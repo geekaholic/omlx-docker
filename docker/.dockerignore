@@ -1,0 +1,12 @@
+.git
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+apps/omlx-mac/build
+packaging/_export
+packaging/_wheels
+docs/images
+

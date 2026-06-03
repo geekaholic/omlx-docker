@@ -36,6 +36,48 @@
                     <!-- Settings Sections -->
                     <div class="space-y-4">
 
+                        <!-- Proxy Backend Section -->
+                        <div x-show="proxyMode" x-cloak class="bg-white rounded-2xl border border-neutral-200 overflow-hidden">
+                            <div class="flex items-center justify-between px-6 py-4 bg-neutral-100 border-b border-neutral-200">
+                                <div class="flex items-center gap-3">
+                                    <i data-lucide="network" class="w-4 h-4 text-neutral-500"></i>
+                                    <span class="text-xs font-bold uppercase tracking-wider text-neutral-600">Proxy Backend</span>
+                                </div>
+                            </div>
+                            <div class="divide-y divide-neutral-100">
+                                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 sm:px-6 py-4">
+                                    <div>
+                                        <label class="text-sm text-neutral-700">Backend URL</label>
+                                        <p class="text-xs text-neutral-400 mt-0.5">Configured by OMLX_BACKEND_URL or the Docker sidecar network.</p>
+                                    </div>
+                                    <span class="text-sm text-neutral-700 font-mono break-all text-right" x-text="globalSettings.proxy.backend_url"></span>
+                                </div>
+                                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 sm:px-6 py-4">
+                                    <div>
+                                        <label class="text-sm text-neutral-700">State file</label>
+                                        <p class="text-xs text-neutral-400 mt-0.5">Stores proxy UI settings such as aliases and default model.</p>
+                                    </div>
+                                    <span class="text-sm text-neutral-700 font-mono break-all text-right" x-text="globalSettings.proxy.state_path || 'disabled'"></span>
+                                </div>
+                                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 sm:px-6 py-4">
+                                    <div>
+                                        <label class="text-sm text-neutral-700">Backend health</label>
+                                        <p class="text-xs text-neutral-400 mt-0.5">The proxy checks /v1/models on the remote backend.</p>
+                                    </div>
+                                    <div class="flex items-center gap-2">
+                                        <span class="w-2 h-2 rounded-full"
+                                              :class="proxyStatus.backend_reachable ? 'bg-green-500' : 'bg-red-500'"></span>
+                                        <span class="text-sm font-medium text-neutral-700"
+                                              x-text="proxyStatus.backend_reachable ? 'reachable' : 'unreachable'"></span>
+                                        <button @click="loadProxyStatus()"
+                                                class="px-3 py-1.5 text-xs font-medium text-neutral-500 hover:text-neutral-700 hover:bg-neutral-100 rounded-lg transition-all">
+                                            Check
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- Language Section -->
                         <div class="bg-white rounded-2xl border border-neutral-200 overflow-hidden">
                             <div class="flex items-center justify-between px-6 py-4 bg-neutral-100 border-b border-neutral-200">

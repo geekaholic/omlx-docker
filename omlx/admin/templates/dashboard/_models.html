@@ -11,6 +11,8 @@
                             {{ t('models.tab.manager') }}
                         </button>
                         <button
+                            x-show="!proxyMode"
+                            x-cloak
                             @click="setModelsTab('downloader')"
                             :class="modelsTab === 'downloader'
                                 ? 'bg-neutral-900 text-white'
@@ -19,6 +21,8 @@
                             {{ t('models.tab.downloader') }}
                         </button>
                         <button
+                            x-show="!proxyMode"
+                            x-cloak
                             @click="setModelsTab('quantizer')"
                             :class="modelsTab === 'quantizer'
                                 ? 'bg-neutral-900 text-white'
@@ -27,6 +31,8 @@
                             {{ t('models.tab.quantizer') }}
                         </button>
                         <button
+                            x-show="!proxyMode"
+                            x-cloak
                             @click="setModelsTab('uploader')"
                             :class="modelsTab === 'uploader'
                                 ? 'bg-neutral-900 text-white'
@@ -53,6 +59,9 @@
                                 </button>
                             </div>
                             <p class="text-sm text-neutral-500 mt-2">{{ t('models.manager.description') }}</p>
+                            <p x-show="proxyMode" x-cloak class="text-sm text-neutral-500 mt-2">
+                                Remote models are discovered from the configured OpenAI-compatible backend. Load, unload, download, quantization, and upload actions are managed outside the proxy.
+                            </p>
                         </div>
 
                         <!-- Local Models Section -->
@@ -60,7 +69,8 @@
                             <div class="flex items-center justify-between px-4 sm:px-6 py-4 bg-neutral-100 border-b border-neutral-200">
                                 <div class="flex items-center gap-3">
                                     <i data-lucide="hard-drive" class="w-4 h-4 text-neutral-500"></i>
-                                    <span class="text-xs font-bold uppercase tracking-wider text-neutral-600">{{ t('models.manager.local_models') }}</span>
+                                    <span class="text-xs font-bold uppercase tracking-wider text-neutral-600"
+                                          x-text="proxyMode ? 'Remote Backend Models' : window.t('models.manager.local_models')"></span>
                                     <span class="text-xs text-neutral-400" x-text="window.t('models.manager.models_count').replace('{count}', hfModels.length)"></span>
                                 </div>
                                 <button @click="loadHFModels()"
@@ -95,7 +105,7 @@
                                                 <svg x-show="copied" x-cloak class="w-3.5 h-3.5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
                                             </button>
                                         </div>
-                                        <div class="flex items-center gap-2 ml-4 shrink-0">
+                                        <div x-show="!proxyMode" x-cloak class="flex items-center gap-2 ml-4 shrink-0">
                                             <template x-if="hfDeleteConfirm !== model.name">
                                                 <button @click="hfDeleteConfirm = model.name"
                                                         class="p-1.5 text-neutral-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"

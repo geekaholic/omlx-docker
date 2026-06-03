@@ -1,0 +1,22 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    fastapi>=0.108.0 \
+    "uvicorn[standard]>=0.23.0" \
+    httpx>=0.26.0 \
+    pydantic>=2.0 \
+    jinja2>=3.0 \
+    jsonschema>=4.0.0 \
+    regex
+
+COPY omlx /app/omlx
+
+EXPOSE 8080
+
+CMD ["python", "-m", "omlx.proxy"]

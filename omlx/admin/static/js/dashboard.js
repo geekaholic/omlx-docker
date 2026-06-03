@@ -45,6 +45,16 @@
                 ui: { language: 'en' },
                 idle_timeout: { idle_timeout_seconds: null },
                 system: { total_memory_bytes: 0, total_memory: '', auto_model_memory: '', ssd_total_bytes: 0, ssd_total: '' },
+                proxy: { mode: 'native', backend_url: '', state_path: '', capabilities: {} },
+            },
+            proxyStatus: {
+                mode: 'native',
+                backend_url: '',
+                backend_reachable: false,
+                backend_error: null,
+                model_count: 0,
+                latency_ms: 0,
+                capabilities: {},
             },
 
             // Cache slider (0-100%)
@@ -458,10 +468,12 @@
                     this.loadGlobalSettings(),
                     this.loadModels(),
                     this.loadServerInfo(),
+                    this.loadProxyStatus(),
                     this.loadProfileFields(),
                     this.loadPresets(),
                     this.checkForUpdate()
                 ]);
+                this.normalizeProxyTabs();
 
                 this.startUpdateCheckTimer();
 
@@ -521,8 +533,14 @@
             },
 
             async handleMainTabChange(value) {
+                if (this.proxyMode && value === 'bench') {
+                    this.mainTab = 'status';
+                    this.syncTabStateToUrl();
+                    return;
+                }
                 if (value === 'status') {
                     await this.loadStats();
+                    if (this.proxyMode) await this.loadProxyStatus();
                     this.startStatsRefresh();
                 } else {
                     this.stopStatsRefresh();
@@ -534,6 +552,10 @@
                     this.stopLogRefresh();
                 }
                 if (value === 'models') {
+                    if (this.proxyMode) {
+                        await this.loadModels();
+                        return;
+                    }
                     const loads = [this.loadHFModels(), this.loadHFTasks(), this.loadOQTasks()];
                     if (this.modelsTab === 'downloader' && !this.hfRecommendedLoaded) {
                         loads.push(this.loadRecommendedModels());
@@ -607,6 +629,7 @@
 
             setMainTab(tab) {
                 if (!DASHBOARD_MAIN_TABS.has(tab)) return;
+                if (this.proxyMode && tab === 'bench') return;
                 this.mainTab = tab;
                 this.syncTabStateToUrl();
             },
@@ -620,6 +643,9 @@
 
             setModelsTab(tab) {
                 if (!DASHBOARD_MODELS_TABS.has(tab)) return;
+                if (this.proxyMode && tab !== 'manager') {
+                    tab = 'manager';
+                }
                 this.modelsTab = tab;
                 this.mainTab = 'models';
                 this.syncTabStateToUrl();
@@ -684,8 +710,10 @@
                             integrations: { ...this.globalSettings.integrations, ...data.integrations },
                             idle_timeout: { ...this.globalSettings.idle_timeout, ...data.idle_timeout },
                             system: { ...this.globalSettings.system, ...data.system },
+                            proxy: { ...this.globalSettings.proxy, ...data.proxy },
                         };
                         this.globalSettings.ui = data.ui || { language: 'en' };
+                        this.normalizeProxyTabs();
 
                         // Sync idle timeout select value
                         this.idleTimeoutValue = this.globalSettings.idle_timeout?.idle_timeout_seconds != null
@@ -889,6 +917,14 @@
                     if (response.ok) {
                         const data = await response.json();
                         this.models = data.models || [];
+                        if (this.proxyMode) {
+                            this.hfModels = this.models.map(m => ({
+                                name: m.id,
+                                size: 0,
+                                size_formatted: 'remote',
+                            }));
+                            this.hfModelsLoaded = true;
+                        }
                     } else if (response.status === 401) {
                         window.location.href = '/admin';
                     }
@@ -1925,6 +1961,37 @@
                 } catch (err) {
                     console.error('Failed to load server info:', err);
                 }
+            },
+
+            async loadProxyStatus() {
+                if (!this.proxyMode && this.globalSettings.proxy?.mode !== 'proxy') return;
+                try {
+                    const response = await fetch('/admin/api/proxy/status');
+                    if (response.ok) {
+                        this.proxyStatus = { ...this.proxyStatus, ...await response.json() };
+                    }
+                } catch (err) {
+                    console.error('Failed to load proxy status:', err);
+                }
+            },
+
+            get proxyMode() {
+                return this.globalSettings.proxy?.mode === 'proxy'
+                    || this.proxyStatus.mode === 'proxy'
+                    || this.stats.proxy?.mode === 'proxy';
+            },
+
+            get proxyCapabilities() {
+                return this.globalSettings.proxy?.capabilities
+                    || this.proxyStatus.capabilities
+                    || {};
+            },
+
+            normalizeProxyTabs() {
+                if (!this.proxyMode) return;
+                if (this.mainTab === 'bench') this.mainTab = 'status';
+                if (this.modelsTab !== 'manager') this.modelsTab = 'manager';
+                this.syncTabStateToUrl();
             },
 
             async restartServerStart() {
@@ -3815,6 +3882,15 @@
             },
 
             async loadHFModels() {
+                if (this.proxyMode) {
+                    this.hfModels = this.models.map(m => ({
+                        name: m.id,
+                        size: 0,
+                        size_formatted: 'remote',
+                    }));
+                    this.hfModelsLoaded = true;
+                    return;
+                }
                 try {
                     const response = await fetch('/admin/api/hf/models');
                     if (response.ok) {

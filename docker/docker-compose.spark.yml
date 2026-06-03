@@ -1,0 +1,56 @@
+services:
+  omlx-proxy:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.proxy
+    ports:
+      - "${OMLX_PROXY_PORT:-8080}:8080"
+    environment:
+      OMLX_BACKEND_URL: "http://vllm:8000/v1"
+      OMLX_BACKEND_API_KEY: "${OMLX_BACKEND_API_KEY:-}"
+      OMLX_PROXY_API_KEY: "${OMLX_PROXY_API_KEY:-}"
+      OMLX_PROXY_HOST: "0.0.0.0"
+      OMLX_PROXY_PORT: "8080"
+      OMLX_CONTEXT_SCALING: "${OMLX_CONTEXT_SCALING:-false}"
+      OMLX_TARGET_CONTEXT_SIZE: "${OMLX_TARGET_CONTEXT_SIZE:-200000}"
+      OMLX_ACTUAL_CONTEXT_SIZE: "${VLLM_MAX_MODEL_LEN:-32768}"
+      OMLX_SSE_KEEPALIVE_MODE: "${OMLX_SSE_KEEPALIVE_MODE:-ping}"
+      OMLX_PROXY_STATE_PATH: "/data/proxy-state.json"
+    volumes:
+      - proxy-state:/data
+    depends_on:
+      - vllm
+
+  vllm:
+    image: "${VLLM_IMAGE:-vllm/vllm-openai:latest}"
+    ports:
+      - "${VLLM_PORT:-8000}:8000"
+    ipc: host
+    gpus: all
+    environment:
+      HF_TOKEN: "${HF_TOKEN:-}"
+      HUGGING_FACE_HUB_TOKEN: "${HUGGING_FACE_HUB_TOKEN:-${HF_TOKEN:-}}"
+      HF_HOME: "/root/.cache/huggingface"
+    volumes:
+      - "${HF_HOME:-${HOME}/.cache/huggingface}:/root/.cache/huggingface"
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--model"
+      - "${VLLM_MODEL:?Set VLLM_MODEL to a Hugging Face model id or local container path}"
+      - "--served-model-name"
+      - "${VLLM_SERVED_MODEL_NAME:-${VLLM_MODEL}}"
+      - "--max-model-len"
+      - "${VLLM_MAX_MODEL_LEN:-32768}"
+      - "--gpu-memory-utilization"
+      - "${VLLM_GPU_MEMORY_UTILIZATION:-0.85}"
+      - "--max-num-seqs"
+      - "${VLLM_MAX_NUM_SEQS:-16}"
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "${VLLM_TOOL_CALL_PARSER:-hermes}"
+
+volumes:
+  proxy-state:

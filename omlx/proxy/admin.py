@@ -1,0 +1,684 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Reduced admin UI compatibility layer for the MLX-free proxy."""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+from omlx._version import __version__
+
+from .backend import OpenAIBackend
+from .config import ProxyConfig
+
+ADMIN_DIR = Path(__file__).resolve().parents[1] / "admin"
+TEMPLATES_DIR = ADMIN_DIR / "templates"
+STATIC_DIR = ADMIN_DIR / "static"
+I18N_DIR = ADMIN_DIR / "i18n"
+
+
+@dataclass
+class ProxyAdminState:
+    started_at: float = field(default_factory=time.time)
+    model_settings: dict[str, dict[str, Any]] = field(default_factory=dict)
+    global_overrides: dict[str, Any] = field(default_factory=dict)
+    logs: list[str] = field(default_factory=list)
+    state_path: Path | None = None
+
+    def log(self, message: str) -> None:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.logs.append(f"{timestamp} proxy {message}")
+        self.logs = self.logs[-1000:]
+
+    @classmethod
+    def load(cls, path: Path | None) -> "ProxyAdminState":
+        state = cls(state_path=path)
+        if path is None or not path.exists():
+            return state
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            state.log(f"failed to read state file {path}")
+            return state
+        if isinstance(data.get("model_settings"), dict):
+            state.model_settings = data["model_settings"]
+        if isinstance(data.get("global_overrides"), dict):
+            state.global_overrides = data["global_overrides"]
+        state.log(f"loaded state from {path}")
+        return state
+
+    def save(self) -> None:
+        if self.state_path is None:
+            return
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "model_settings": self.model_settings,
+            "global_overrides": self.global_overrides,
+        }
+        self.state_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+
+def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
+    """Attach admin UI routes and static assets to a proxy FastAPI app."""
+    state_path = Path(os.getenv("OMLX_PROXY_STATE_PATH", "/data/proxy-state.json"))
+    state = ProxyAdminState.load(state_path)
+    templates = _templates()
+    router = APIRouter(prefix="/admin", tags=["proxy-admin"])
+
+    app.mount("/admin/static", StaticFiles(directory=STATIC_DIR), name="admin-static")
+
+    @router.get("")
+    @router.get("/")
+    async def admin_root():
+        return RedirectResponse(url="/admin/dashboard", status_code=302)
+
+    @router.get("/dashboard")
+    async def dashboard_page(request: Request):
+        return templates.TemplateResponse(request, "dashboard.html", {})
+
+    @router.get("/chat")
+    async def chat_page(request: Request):
+        api_key = config.proxy_api_key or ""
+        return templates.TemplateResponse(
+            request,
+            "chat.html",
+            {"api_key": api_key, "api_key_configured": bool(api_key)},
+        )
+
+    @router.get("/api/update-check")
+    async def update_check():
+        return {
+            "update_available": False,
+            "latest_version": __version__,
+            "current_version": __version__,
+            "release_url": "https://github.com/jundot/omlx",
+        }
+
+    @router.get("/api/server-info")
+    async def server_info():
+        return {
+            "version": __version__,
+            "mode": "proxy",
+            "host": config.host,
+            "port": config.port,
+            "backend_url": config.normalized_backend_url,
+            "aliases": ["localhost", "127.0.0.1"],
+            "capabilities": _capabilities(),
+        }
+
+    @router.get("/api/proxy/status")
+    async def proxy_status():
+        started = time.monotonic()
+        try:
+            data = await backend.get_models(None)
+            models = data.get("data") or []
+            reachable = True
+            error = None
+        except Exception as exc:
+            models = []
+            reachable = False
+            error = str(exc)
+        return {
+            "mode": "proxy",
+            "backend_url": config.normalized_backend_url,
+            "backend_reachable": reachable,
+            "backend_error": error,
+            "model_count": len(models),
+            "latency_ms": round((time.monotonic() - started) * 1000, 1),
+            "state_path": str(state.state_path) if state.state_path else None,
+            "capabilities": _capabilities(),
+        }
+
+    @router.get("/api/proxy/config")
+    async def proxy_config():
+        return {
+            "backend_url": config.normalized_backend_url,
+            "proxy_host": config.host,
+            "proxy_port": config.port,
+            "context_scaling_enabled": state.global_overrides.get(
+                "context_scaling_enabled",
+                config.context_scaling_enabled,
+            ),
+            "target_context_size": state.global_overrides.get(
+                "target_context_size",
+                config.target_context_size,
+            ),
+            "actual_context_size": config.actual_context_size,
+            "sse_keepalive_mode": config.sse_keepalive_mode,
+            "state_path": str(state.state_path) if state.state_path else None,
+        }
+
+    @router.get("/api/global-settings")
+    async def get_global_settings():
+        return _global_settings_payload(config, state)
+
+    @router.post("/api/global-settings")
+    async def update_global_settings(request: Request):
+        payload = await request.json()
+        state.global_overrides.update(payload)
+        if "claude_code_context_scaling_enabled" in payload:
+            state.global_overrides["context_scaling_enabled"] = payload[
+                "claude_code_context_scaling_enabled"
+            ]
+        if "claude_code_target_context_size" in payload:
+            state.global_overrides["target_context_size"] = payload[
+                "claude_code_target_context_size"
+            ]
+        state.log("updated proxy admin settings")
+        state.save()
+        return {
+            "status": "ok",
+            "message": "Proxy settings saved for this process",
+            "runtime_applied": ["proxy_admin_settings"],
+            "requires_restart": True,
+        }
+
+    @router.get("/api/models")
+    async def admin_models():
+        return {"models": await _admin_models(backend, state)}
+
+    @router.post("/api/reload")
+    async def reload_models():
+        state.log("model list refreshed from backend")
+        return {"status": "ok", "message": "Model list refreshed from backend"}
+
+    @router.put("/api/models/{model_id}/settings")
+    async def update_model_settings(model_id: str, request: Request):
+        payload = await request.json()
+        settings = state.model_settings.setdefault(model_id, {})
+        settings.update(payload)
+        if payload.get("is_default"):
+            for mid, mid_settings in state.model_settings.items():
+                if mid != model_id:
+                    mid_settings["is_default"] = False
+        state.log(f"updated settings for model {model_id}")
+        state.save()
+        return {
+            "status": "ok",
+            "model_id": model_id,
+            "requires_reload": False,
+            "auto_reloaded": False,
+        }
+
+    @router.post("/api/models/{model_id}/load")
+    async def load_model(model_id: str):
+        return {
+            "status": "ok",
+            "model_id": model_id,
+            "message": "Remote backend manages model loading",
+        }
+
+    @router.post("/api/models/{model_id}/unload")
+    async def unload_model(model_id: str):
+        return {
+            "status": "ok",
+            "model_id": model_id,
+            "message": "Remote backend manages model unloading",
+        }
+
+    @router.get("/api/models/{model_id}/profiles")
+    async def model_profiles(model_id: str):
+        return {"profiles": [], "active_profile_name": None}
+
+    @router.post("/api/models/{model_id}/profiles")
+    async def create_model_profile(model_id: str):
+        return JSONResponse(
+            {"detail": "Profiles are not implemented in proxy mode"},
+            status_code=501,
+        )
+
+    @router.get("/api/profile-templates")
+    async def profile_templates():
+        return {"templates": []}
+
+    @router.get("/api/profile-fields")
+    async def profile_fields():
+        return {
+            "universal": [
+                "model_alias",
+                "max_context_window",
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "top_k",
+                "min_p",
+                "presence_penalty",
+                "repetition_penalty",
+                "enable_thinking",
+                "thinking_budget_tokens",
+                "max_tool_result_tokens",
+                "ttl_seconds",
+                "is_default",
+            ],
+            "model_specific": [],
+        }
+
+    @router.get("/api/grammar/parsers")
+    async def grammar_parsers():
+        return {"parsers": []}
+
+    @router.get("/api/models/{model_id}/generation_config")
+    async def generation_config(model_id: str):
+        return {"config": {}, "source": "proxy"}
+
+    @router.get("/api/stats")
+    async def stats(model: str = "", scope: str = "session"):
+        models = await _admin_models(backend, state)
+        return _stats_payload(config, state, models)
+
+    @router.post("/api/stats/clear")
+    @router.post("/api/stats/clear-alltime")
+    async def clear_stats():
+        state.log("cleared proxy dashboard stats")
+        return {"status": "ok"}
+
+    @router.post("/api/ssd-cache/clear")
+    @router.post("/api/hot-cache/clear")
+    async def clear_cache():
+        return {
+            "status": "ok",
+            "message": "Remote backend cache controls are not managed by proxy mode",
+        }
+
+    @router.get("/api/logs")
+    async def logs(lines: int = 200, file: str = "server.log"):
+        content = "\n".join(state.logs[-max(1, min(lines, 1000)):])
+        return {
+            "logs": content,
+            "total_lines": len(state.logs),
+            "available_files": ["server.log"],
+            "file": file,
+        }
+
+    @router.get("/api/device-info")
+    async def device_info():
+        return {
+            "device": "remote-backend",
+            "backend_url": config.normalized_backend_url,
+            "memory_total": 0,
+            "memory_available": 0,
+        }
+
+    @router.get("/api/bench/active")
+    async def bench_active():
+        return {"active": False, "run": None}
+
+    @router.post("/api/bench/start")
+    async def bench_start():
+        return JSONResponse(
+            {"detail": "Benchmarks are not implemented in proxy mode"},
+            status_code=501,
+        )
+
+    @router.get("/api/bench/accuracy/results")
+    async def accuracy_results():
+        return {"results": []}
+
+    @router.get("/api/bench/accuracy/queue/status")
+    async def accuracy_queue():
+        return {"queue": [], "active": None}
+
+    @router.get("/api/hf/tasks")
+    @router.get("/api/ms/tasks")
+    @router.get("/api/oq/tasks")
+    @router.get("/api/upload/tasks")
+    async def empty_tasks():
+        return {"tasks": []}
+
+    @router.get("/api/hf/models")
+    async def hf_models():
+        return {"models": []}
+
+    @router.get("/api/hf/recommended")
+    @router.get("/api/ms/recommended")
+    async def recommended_models():
+        return {"trending": [], "popular": []}
+
+    @router.get("/api/hf/search")
+    @router.get("/api/ms/search")
+    async def search_models():
+        return {"models": [], "total": 0}
+
+    @router.get("/api/hf/model-info")
+    @router.get("/api/ms/model-info")
+    async def model_info():
+        return {"model": None}
+
+    @router.get("/api/ms/status")
+    async def ms_status():
+        return {"available": False}
+
+    @router.get("/api/oq/models")
+    async def oq_models():
+        return {"models": [], "all_models": []}
+
+    @router.get("/api/upload/oq-models")
+    async def upload_oq_models():
+        return {"oq_models": [], "all_models": []}
+
+    @router.post("/api/logout")
+    async def logout():
+        return {"status": "ok"}
+
+    @router.post("/api/server/restart")
+    async def restart():
+        return JSONResponse(
+            {"detail": "Restart is managed by Docker/Compose in proxy mode"},
+            status_code=501,
+        )
+
+    @router.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+    async def unsupported_admin_api(path: str):
+        return {
+            "status": "unsupported",
+            "detail": f"/admin/api/{path} is not implemented in proxy mode",
+        }
+
+    app.include_router(router)
+
+
+def _templates() -> Jinja2Templates:
+    templates = Jinja2Templates(directory=TEMPLATES_DIR)
+    locale = _load_locale("en")
+
+    def static(path: str) -> str:
+        file_path = STATIC_DIR / path
+        if file_path.is_file():
+            return f"/admin/static/{path}?v={int(file_path.stat().st_mtime)}"
+        return f"/admin/static/{path}"
+
+    templates.env.globals["static"] = static
+    templates.env.globals["version"] = __version__
+    templates.env.globals["t"] = lambda key: locale.get(key, key)
+    templates.env.globals["locale_json"] = json.dumps(locale, ensure_ascii=False)
+    templates.env.globals["current_lang"] = "en"
+    return templates
+
+
+def _load_locale(language: str) -> dict[str, str]:
+    try:
+        return json.loads((I18N_DIR / f"{language}.json").read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+async def _backend_model_data(backend: OpenAIBackend) -> list[dict[str, Any]]:
+    try:
+        data = await backend.get_models(None)
+    except Exception:
+        return []
+    models = data.get("data") or []
+    return [m for m in models if isinstance(m, dict)]
+
+
+async def _admin_models(
+    backend: OpenAIBackend,
+    state: ProxyAdminState,
+) -> list[dict[str, Any]]:
+    backend_models = await _backend_model_data(backend)
+    default_id = backend_models[0].get("id") if backend_models else None
+    configured_default = next(
+        (
+            mid
+            for mid, settings in state.model_settings.items()
+            if settings.get("is_default")
+        ),
+        None,
+    )
+    if configured_default:
+        default_id = configured_default
+
+    result = []
+    for item in backend_models:
+        model_id = item.get("id")
+        if not model_id:
+            continue
+        settings = state.model_settings.setdefault(model_id, {})
+        result.append(
+            {
+                "id": model_id,
+                "name": model_id,
+                "path": model_id,
+                "model_type": settings.get("model_type_override") or "llm",
+                "engine_type": "remote",
+                "loaded": True,
+                "is_loading": False,
+                "pinned": bool(settings.get("is_pinned", False)),
+                "is_pinned": bool(settings.get("is_pinned", False)),
+                "is_default": model_id == default_id,
+                "estimated_size": 0,
+                "estimated_size_formatted": "remote",
+                "actual_size": None,
+                "settings": {
+                    "max_context_window": item.get("max_model_len"),
+                    **settings,
+                },
+                "model_alias": settings.get("model_alias"),
+                "max_context_window": item.get("max_model_len"),
+                "max_tokens": settings.get("max_tokens"),
+                "dflash_compatible": False,
+                "dflash_ssd_cache_available": False,
+                "mtp_compatible": False,
+            }
+        )
+    return result
+
+
+def _global_settings_payload(
+    config: ProxyConfig,
+    state: ProxyAdminState,
+) -> dict[str, Any]:
+    overrides = state.global_overrides
+    return {
+        "base_path": "",
+        "server": {
+            "host": config.host,
+            "port": config.port,
+            "log_level": overrides.get("log_level", "info"),
+            "server_aliases": ["localhost", "127.0.0.1"],
+            "sse_keepalive_mode": config.sse_keepalive_mode,
+        },
+        "proxy": {
+            "mode": "proxy",
+            "backend_url": config.normalized_backend_url,
+            "state_path": str(state.state_path) if state.state_path else None,
+            "capabilities": _capabilities(),
+        },
+        "model": {
+            "model_dirs": [config.normalized_backend_url],
+            "model_dir": config.normalized_backend_url,
+            "model_fallback": False,
+        },
+        "memory": {
+            "prefill_memory_guard": False,
+            "memory_guard_tier": "balanced",
+            "memory_guard_custom_ceiling_gb": 0,
+        },
+        "scheduler": {
+            "max_concurrent_requests": 0,
+            "embedding_batch_size": 0,
+            "chunked_prefill": False,
+        },
+        "cache": {
+            "enabled": False,
+            "ssd_cache_dir": "",
+            "ssd_cache_max_size": "0",
+            "hot_cache_only": False,
+            "hot_cache_max_size": "0",
+            "initial_cache_blocks": 0,
+        },
+        "mcp": {"config_path": ""},
+        "huggingface": {"endpoint": ""},
+        "modelscope": {"endpoint": ""},
+        "network": {
+            "http_proxy": "",
+            "https_proxy": "",
+            "no_proxy": "",
+            "ca_bundle": "",
+        },
+        "sampling": {
+            "max_context_window": config.actual_context_size,
+            "max_tokens": config.actual_context_size,
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "top_k": 0,
+            "repetition_penalty": 1.0,
+        },
+        "auth": {
+            "api_key_set": bool(config.proxy_api_key),
+            "api_key": config.proxy_api_key or "",
+            "skip_api_key_verification": not bool(config.proxy_api_key),
+            "sub_keys": [],
+        },
+        "claude_code": {
+            "context_scaling_enabled": overrides.get(
+                "context_scaling_enabled",
+                config.context_scaling_enabled,
+            ),
+            "target_context_size": overrides.get(
+                "target_context_size",
+                config.target_context_size,
+            ),
+            "mode": "local",
+            "opus_model": None,
+            "sonnet_model": None,
+            "haiku_model": None,
+        },
+        "integrations": {
+            "codex_model": None,
+            "opencode_model": None,
+            "openclaw_model": None,
+            "hermes_model": None,
+            "pi_model": None,
+            "copilot_model": None,
+            "openclaw_tools_profile": "full",
+        },
+        "system": {
+            "total_memory_bytes": 0,
+            "total_memory": "remote",
+            "auto_model_memory": "remote",
+            "available_memory_bytes": 0,
+            "omlx_phys_footprint_bytes": 0,
+            "free_memory_bytes": 0,
+            "inactive_memory_bytes": 0,
+            "active_memory_bytes": 0,
+            "iogpu_wired_limit_bytes": 0,
+            "omlx_wired_limit_request_bytes": 0,
+            "ssd_total_bytes": 0,
+            "ssd_total": "remote",
+        },
+        "ui": {"language": "en"},
+        "idle_timeout": {"idle_timeout_seconds": None},
+    }
+
+
+def _stats_payload(
+    config: ProxyConfig,
+    state: ProxyAdminState,
+    models: list[dict[str, Any]],
+) -> dict[str, Any]:
+    uptime = max(0.0, time.time() - state.started_at)
+    active_models = [
+        {
+            "id": m["id"],
+            "estimated_size": 0,
+            "estimated_size_formatted": "remote",
+            "actual_size": None,
+            "actual_size_formatted": None,
+            "pinned": m.get("pinned", False),
+            "is_loading": False,
+            "active_requests": 0,
+            "waiting_requests": 0,
+            "waiting": [],
+            "activities": [],
+            "prefilling": [],
+            "generating": [],
+            "idle_seconds": None,
+            "ttl_remaining_seconds": None,
+        }
+        for m in models
+    ]
+    return {
+        "uptime_seconds": uptime,
+        "host": config.host,
+        "port": config.port,
+        "api_key": config.proxy_api_key or "",
+        "cli_prefix": "omlx proxy",
+        "total_requests": 0,
+        "active_requests": 0,
+        "waiting_requests": 0,
+        "total_prompt_tokens": 0,
+        "total_completion_tokens": 0,
+        "total_cached_tokens": 0,
+        "cache_efficiency": 0.0,
+        "avg_prefill_tps": 0.0,
+        "avg_generation_tps": 0.0,
+        "claude_code_context_scaling_enabled": config.context_scaling_enabled,
+        "claude_code_target_context_size": config.target_context_size,
+        "engines": {"mode": "proxy", "backend_url": config.normalized_backend_url},
+        "active_models": {
+            "models": active_models,
+            "model_memory_used": 0,
+            "model_memory_max": 0,
+            "memory_pressure": {
+                "enabled": False,
+                "current_bytes": 0,
+                "soft_bytes": 0,
+                "hard_bytes": 0,
+                "current_formatted": "remote",
+                "soft_formatted": "remote",
+                "hard_formatted": "remote",
+                "pressure_level": "ok",
+            },
+            "total_active_requests": 0,
+            "total_waiting_requests": 0,
+        },
+        "runtime_cache": {
+            "base_path": "",
+            "ssd_cache_dir": "",
+            "response_state_dir": "",
+            "models": [],
+            "total_num_files": 0,
+            "total_size_bytes": 0,
+            "effective_block_sizes": [],
+            "disk_max_bytes": 0,
+            "hot_cache_max_bytes": 0,
+            "hot_cache_size_bytes": 0,
+            "hot_cache_entries": 0,
+        },
+        "proxy": {
+            "mode": "proxy",
+            "backend_url": config.normalized_backend_url,
+            "capabilities": _capabilities(),
+        },
+    }
+
+
+def _capabilities() -> dict[str, bool]:
+    return {
+        "proxy_mode": True,
+        "chat": True,
+        "model_aliases": True,
+        "model_load_unload": False,
+        "local_model_files": False,
+        "hf_downloader": False,
+        "modelscope_downloader": False,
+        "quantizer": False,
+        "uploader": False,
+        "benchmarks": False,
+        "cache_controls": False,
+        "native_memory_guard": False,
+        "backend_metrics": False,
+    }

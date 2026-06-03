@@ -1,0 +1,25 @@
+services:
+  omlx-proxy:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.proxy
+    ports:
+      - "${OMLX_PROXY_PORT:-8080}:8080"
+    environment:
+      OMLX_BACKEND_URL: "${OMLX_BACKEND_URL:-http://host.docker.internal:11434/v1}"
+      OMLX_BACKEND_API_KEY: "${OMLX_BACKEND_API_KEY:-}"
+      OMLX_PROXY_API_KEY: "${OMLX_PROXY_API_KEY:-}"
+      OMLX_PROXY_HOST: "0.0.0.0"
+      OMLX_PROXY_PORT: "8080"
+      OMLX_CONTEXT_SCALING: "${OMLX_CONTEXT_SCALING:-false}"
+      OMLX_TARGET_CONTEXT_SIZE: "${OMLX_TARGET_CONTEXT_SIZE:-200000}"
+      OMLX_ACTUAL_CONTEXT_SIZE: "${OMLX_ACTUAL_CONTEXT_SIZE:-32768}"
+      OMLX_SSE_KEEPALIVE_MODE: "${OMLX_SSE_KEEPALIVE_MODE:-ping}"
+      OMLX_PROXY_STATE_PATH: "/data/proxy-state.json"
+    volumes:
+      - proxy-state:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  proxy-state:

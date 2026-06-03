@@ -53,6 +53,47 @@
                         </div>
                     </div>
 
+                    <!-- Proxy Backend Status -->
+                    <div x-show="proxyMode" x-cloak class="bg-white rounded-2xl border border-neutral-200 overflow-hidden mb-8">
+                        <div class="flex items-center justify-between px-6 py-4 bg-neutral-100 border-b border-neutral-200">
+                            <div class="flex items-center gap-3">
+                                <i data-lucide="network" class="w-4 h-4 text-neutral-500"></i>
+                                <span class="text-xs font-bold uppercase tracking-wider text-neutral-600">Proxy Backend</span>
+                            </div>
+                            <button @click="loadProxyStatus()"
+                                    class="px-3 py-1.5 text-xs font-medium text-neutral-500 hover:text-neutral-700 hover:bg-neutral-100 rounded-lg transition-all flex items-center gap-1.5">
+                                <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+                                Refresh
+                            </button>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-4 divide-y md:divide-y-0 md:divide-x divide-neutral-100">
+                            <div class="p-5">
+                                <p class="text-xs text-neutral-500 mb-1">Status</p>
+                                <div class="flex items-center gap-2">
+                                    <span class="w-2 h-2 rounded-full"
+                                          :class="proxyStatus.backend_reachable ? 'bg-green-500' : 'bg-red-500'"></span>
+                                    <span class="text-sm font-semibold text-neutral-900"
+                                          x-text="proxyStatus.backend_reachable ? 'reachable' : 'unreachable'"></span>
+                                </div>
+                            </div>
+                            <div class="p-5">
+                                <p class="text-xs text-neutral-500 mb-1">Models</p>
+                                <p class="text-xl font-bold text-neutral-900" x-text="proxyStatus.model_count"></p>
+                            </div>
+                            <div class="p-5">
+                                <p class="text-xs text-neutral-500 mb-1">Latency</p>
+                                <p class="text-xl font-bold text-neutral-900" x-text="(proxyStatus.latency_ms || 0).toFixed(1) + ' ms'"></p>
+                            </div>
+                            <div class="p-5 min-w-0">
+                                <p class="text-xs text-neutral-500 mb-1">Backend URL</p>
+                                <p class="text-xs font-mono text-neutral-700 truncate" x-text="proxyStatus.backend_url || globalSettings.proxy.backend_url"></p>
+                            </div>
+                        </div>
+                        <div x-show="proxyStatus.backend_error" x-cloak
+                             class="px-6 py-3 border-t border-red-100 bg-red-50 text-sm text-red-700 font-mono break-all"
+                             x-text="proxyStatus.backend_error"></div>
+                    </div>
+
                     <!-- Three Stat Cards -->
                     <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6 mb-8">
                         <!-- Total Prefill Tokens -->
