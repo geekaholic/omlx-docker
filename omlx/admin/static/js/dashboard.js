@@ -45,11 +45,20 @@
                 ui: { language: 'en' },
                 idle_timeout: { idle_timeout_seconds: null },
                 system: { total_memory_bytes: 0, total_memory: '', auto_model_memory: '', ssd_total_bytes: 0, ssd_total: '' },
-                proxy: { mode: 'native', backend_url: '', state_path: '', capabilities: {} },
+                proxy: {
+                    mode: 'native',
+                    backend_url: '',
+                    backend_type: 'openai-compatible',
+                    backend_api_key: '',
+                    backend_api_key_set: false,
+                    state_path: '',
+                    capabilities: {},
+                },
             },
             proxyStatus: {
                 mode: 'native',
                 backend_url: '',
+                backend_type: 'openai-compatible',
                 backend_reachable: false,
                 backend_error: null,
                 model_count: 0,
@@ -84,6 +93,7 @@
 
             // Auth UI state
             showApiKey: false,
+            showBackendApiKey: false,
             // Sub key management
             newSubKeyValue: '',
             newSubKeyName: '',
@@ -765,14 +775,19 @@
                 // Validate required fields
                 const errors = [];
                 const s = this.globalSettings;
-                if (!s.server.host) errors.push('Host');
-                if (!s.server.port) errors.push('Port');
-                if (!s.model.model_dirs || !s.model.model_dirs.some(d => d.trim())) errors.push('Model Directory');
-                if (!s.scheduler.max_concurrent_requests) errors.push('Max Concurrent Requests');
-                if (!s.scheduler.embedding_batch_size) errors.push('Embedding Batch Size');
-                if (!s.cache.ssd_cache_max_size) errors.push('Max Cache Size');
-                if (!s.sampling.max_context_window) errors.push('Max Context Window');
-                if (!s.sampling.max_tokens) errors.push('Max Tokens');
+                if (this.proxyMode) {
+                    if (!s.proxy.backend_url || !s.proxy.backend_url.trim()) errors.push('Backend URL');
+                    if (!s.proxy.backend_type) errors.push('Backend Type');
+                } else {
+                    if (!s.server.host) errors.push('Host');
+                    if (!s.server.port) errors.push('Port');
+                    if (!s.model.model_dirs || !s.model.model_dirs.some(d => d.trim())) errors.push('Model Directory');
+                    if (!s.scheduler.max_concurrent_requests) errors.push('Max Concurrent Requests');
+                    if (!s.scheduler.embedding_batch_size) errors.push('Embedding Batch Size');
+                    if (!s.cache.ssd_cache_max_size) errors.push('Max Cache Size');
+                    if (!s.sampling.max_context_window) errors.push('Max Context Window');
+                    if (!s.sampling.max_tokens) errors.push('Max Tokens');
+                }
 
                 if (errors.length > 0) {
                     this.saveError = window.t('js.error.required_fields').replace('{fields}', errors.join(', '));
@@ -828,6 +843,11 @@
                             network_https_proxy: this.globalSettings.network.https_proxy,
                             network_no_proxy: this.globalSettings.network.no_proxy,
                             network_ca_bundle: this.globalSettings.network.ca_bundle,
+                            ...(this.proxyMode ? {
+                                proxy_backend_url: this.globalSettings.proxy.backend_url,
+                                proxy_backend_type: this.globalSettings.proxy.backend_type,
+                                proxy_backend_api_key: this.globalSettings.proxy.backend_api_key || '',
+                            } : {}),
                             ...(this.globalSettings.auth.api_key ? { api_key: this.globalSettings.auth.api_key } : {}),
                             skip_api_key_verification: this.globalSettings.auth.skip_api_key_verification,
                             idle_timeout_seconds: this.globalSettings.idle_timeout?.idle_timeout_seconds ?? null,
@@ -841,6 +861,10 @@
                         // Refresh stats and model list (cache changes unload models)
                         await this.loadStats();
                         await this.loadModels();
+                        if (this.proxyMode) {
+                            await this.loadProxyStatus();
+                            await this.loadProxyMetrics();
+                        }
                         setTimeout(() => { this.saveSuccess = false; }, 5000);
                     } else if (response.status === 401) {
                         window.location.href = '/admin';

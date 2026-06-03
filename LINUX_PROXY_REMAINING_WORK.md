@@ -11,12 +11,13 @@ llama.cpp server, or Ollama.
    - vLLM: verify chat streaming, tool calls, Prometheus `/metrics`, token counters, and cache usage.
    - llama.cpp server: verify OpenAI compatibility, model listing behavior, streaming, and any exposed metrics.
 
-2. Add admin controls for proxy backend configuration.
-   - Backend URL.
-   - Backend API key.
-   - Backend type selector: OpenAI-compatible, Ollama, vLLM, llama.cpp.
-   - Persist settings in proxy state.
-   - Mark settings that require container restart versus settings that can hot reload.
+2. Expand admin controls for proxy backend configuration.
+   - Done: Backend URL.
+   - Done: Backend API key.
+   - Done: Backend type selector: OpenAI-compatible, Ollama, vLLM, llama.cpp.
+   - Done: Persist settings in proxy state.
+   - Done: Apply backend URL/API key/type without container restart.
+   - Remaining: Add richer backend-specific launch/config fields for vLLM and llama.cpp sidecars.
 
 3. Add Docker sidecar profiles.
    - Keep the current external-backend proxy compose file as the default.

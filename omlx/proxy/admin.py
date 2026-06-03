@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +75,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
     """Attach admin UI routes and static assets to a proxy FastAPI app."""
     state_path = Path(os.getenv("OMLX_PROXY_STATE_PATH", "/data/proxy-state.json"))
     state = ProxyAdminState.load(state_path)
+    _apply_proxy_backend_overrides(backend, config, state)
     templates = _templates()
     router = APIRouter(prefix="/admin", tags=["proxy-admin"])
 
@@ -112,9 +113,9 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
         return {
             "version": __version__,
             "mode": "proxy",
-            "host": config.host,
-            "port": config.port,
-            "backend_url": config.normalized_backend_url,
+            "host": backend.config.host,
+            "port": backend.config.port,
+            "backend_url": backend.config.normalized_backend_url,
             "aliases": ["localhost", "127.0.0.1"],
             "capabilities": _capabilities(),
         }
@@ -133,7 +134,8 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             error = str(exc)
         return {
             "mode": "proxy",
-            "backend_url": config.normalized_backend_url,
+            "backend_url": backend.config.normalized_backend_url,
+            "backend_type": _proxy_backend_type(state),
             "backend_reachable": reachable,
             "backend_error": error,
             "model_count": len(models),
@@ -145,20 +147,24 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
     @router.get("/api/proxy/config")
     async def proxy_config():
         return {
-            "backend_url": config.normalized_backend_url,
-            "proxy_host": config.host,
-            "proxy_port": config.port,
+            "backend_url": backend.config.normalized_backend_url,
+            "backend_type": _proxy_backend_type(state),
+            "backend_api_key": backend.config.backend_api_key or "",
+            "backend_api_key_set": bool(backend.config.backend_api_key),
+            "proxy_host": backend.config.host,
+            "proxy_port": backend.config.port,
             "context_scaling_enabled": state.global_overrides.get(
                 "context_scaling_enabled",
-                config.context_scaling_enabled,
+                backend.config.context_scaling_enabled,
             ),
             "target_context_size": state.global_overrides.get(
                 "target_context_size",
-                config.target_context_size,
+                backend.config.target_context_size,
             ),
-            "actual_context_size": config.actual_context_size,
-            "sse_keepalive_mode": config.sse_keepalive_mode,
+            "actual_context_size": backend.config.actual_context_size,
+            "sse_keepalive_mode": backend.config.sse_keepalive_mode,
             "state_path": str(state.state_path) if state.state_path else None,
+            "hot_reloadable": ["backend_url", "backend_api_key", "backend_type"],
         }
 
     @router.get("/api/proxy/metrics")
@@ -170,12 +176,20 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
 
     @router.get("/api/global-settings")
     async def get_global_settings():
-        return _global_settings_payload(config, state)
+        return _global_settings_payload(backend.config, state)
 
     @router.post("/api/global-settings")
     async def update_global_settings(request: Request):
         payload = await request.json()
+        try:
+            proxy_updates = _extract_proxy_backend_updates(payload)
+        except ValueError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=422)
         state.global_overrides.update(payload)
+        if proxy_updates:
+            state.global_overrides.update(proxy_updates)
+            backend.config = _config_with_proxy_overrides(backend.config, state)
+            app.state.proxy_config = backend.config
         if "claude_code_context_scaling_enabled" in payload:
             state.global_overrides["context_scaling_enabled"] = payload[
                 "claude_code_context_scaling_enabled"
@@ -186,11 +200,19 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             ]
         state.log("updated proxy admin settings")
         state.save()
+        runtime_applied = ["proxy_admin_settings"]
+        if proxy_updates:
+            runtime_applied.append("proxy_backend_config")
         return {
             "status": "ok",
-            "message": "Proxy settings saved for this process",
-            "runtime_applied": ["proxy_admin_settings"],
-            "requires_restart": True,
+            "message": (
+                "Proxy backend settings saved and applied"
+                if proxy_updates
+                else "Proxy settings saved for this process"
+            ),
+            "runtime_applied": runtime_applied,
+            "requires_restart": False,
+            "restart_required_settings": ["proxy_host", "proxy_port"],
         }
 
     @router.get("/api/models")
@@ -284,7 +306,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
     @router.get("/api/stats")
     async def stats(model: str = "", scope: str = "session"):
         models = await _admin_models(backend, state)
-        return _stats_payload(config, state, models)
+        return _stats_payload(backend.config, state, models)
 
     @router.post("/api/stats/clear")
     @router.post("/api/stats/clear-alltime")
@@ -314,7 +336,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
     async def device_info():
         return {
             "device": "remote-backend",
-            "backend_url": config.normalized_backend_url,
+            "backend_url": backend.config.normalized_backend_url,
             "memory_total": 0,
             "memory_available": 0,
         }
@@ -422,6 +444,75 @@ def _load_locale(language: str) -> dict[str, str]:
         return {}
 
 
+def _apply_proxy_backend_overrides(
+    backend: OpenAIBackend,
+    base_config: ProxyConfig,
+    state: ProxyAdminState,
+) -> None:
+    try:
+        backend.config = _config_with_proxy_overrides(base_config, state)
+    except ValueError as exc:
+        state.log(f"ignored invalid saved proxy backend config: {exc}")
+        backend.config = base_config
+
+
+def _config_with_proxy_overrides(
+    config: ProxyConfig,
+    state: ProxyAdminState,
+) -> ProxyConfig:
+    overrides = state.global_overrides
+    backend_url = str(
+        overrides.get("proxy_backend_url") or config.normalized_backend_url
+    ).strip()
+    backend_api_key = overrides.get("proxy_backend_api_key", config.backend_api_key)
+    if backend_api_key == "":
+        backend_api_key = None
+    return replace(
+        config,
+        backend_url=_normalize_backend_url(backend_url),
+        backend_api_key=backend_api_key,
+    )
+
+
+def _extract_proxy_backend_updates(payload: dict[str, Any]) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    if "proxy_backend_url" in payload:
+        updates["proxy_backend_url"] = _normalize_backend_url(
+            str(payload.get("proxy_backend_url") or "")
+        )
+    if "proxy_backend_api_key" in payload:
+        value = payload.get("proxy_backend_api_key")
+        updates["proxy_backend_api_key"] = str(value).strip() if value else ""
+    if "proxy_backend_type" in payload:
+        updates["proxy_backend_type"] = _normalize_backend_type(
+            str(payload.get("proxy_backend_type") or "")
+        )
+    return updates
+
+
+def _normalize_backend_url(value: str) -> str:
+    value = value.strip().rstrip("/")
+    if not value:
+        raise ValueError("proxy_backend_url is required")
+    if not value.startswith(("http://", "https://")):
+        raise ValueError("proxy_backend_url must start with http:// or https://")
+    return value
+
+
+def _normalize_backend_type(value: str) -> str:
+    allowed = {"openai-compatible", "ollama", "vllm", "llama.cpp"}
+    value = value.strip().lower() or "openai-compatible"
+    if value not in allowed:
+        return "openai-compatible"
+    return value
+
+
+def _proxy_backend_type(state: ProxyAdminState) -> str:
+    return _normalize_backend_type(
+        str(state.global_overrides.get("proxy_backend_type") or "openai-compatible")
+    )
+
+
 async def _backend_model_data(backend: OpenAIBackend) -> list[dict[str, Any]]:
     try:
         data = await backend.get_models(None)
@@ -501,6 +592,9 @@ def _global_settings_payload(
         "proxy": {
             "mode": "proxy",
             "backend_url": config.normalized_backend_url,
+            "backend_type": _proxy_backend_type(state),
+            "backend_api_key": config.backend_api_key or "",
+            "backend_api_key_set": bool(config.backend_api_key),
             "state_path": str(state.state_path) if state.state_path else None,
             "capabilities": _capabilities(),
         },

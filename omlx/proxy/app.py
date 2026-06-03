@@ -51,7 +51,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        app.state.proxy_config = proxy_config
+        app.state.proxy_config = backend.config
         app.state.backend = backend
         yield
         await backend.close()
@@ -66,7 +66,7 @@ def create_app(
     async def verify_proxy_key(
         credentials: HTTPAuthorizationCredentials = Depends(security),
     ) -> bool:
-        expected = proxy_config.proxy_api_key
+        expected = backend.config.proxy_api_key
         if not expected:
             return True
         if credentials is None or credentials.credentials != expected:
@@ -78,7 +78,7 @@ def create_app(
         backend_status: dict[str, Any]
         try:
             models = await backend.get_models(
-                _backend_authorization(request, proxy_config)
+                _backend_authorization(request, backend.config)
             )
             backend_status = {
                 "reachable": True,
@@ -92,7 +92,7 @@ def create_app(
         default_model = None
         try:
             models_data = await backend.get_models(
-                _backend_authorization(request, proxy_config)
+                _backend_authorization(request, backend.config)
             )
             models = models_data.get("data") or []
             if models:
@@ -111,7 +111,7 @@ def create_app(
     async def list_models(request: Request):
         try:
             return await backend.get_models(
-                _backend_authorization(request, proxy_config)
+                _backend_authorization(request, backend.config)
             )
         except Exception as exc:
             raise _backend_http_exception(exc)
@@ -120,7 +120,7 @@ def create_app(
     async def list_models_status(request: Request):
         try:
             data = await backend.get_models(
-                _backend_authorization(request, proxy_config)
+                _backend_authorization(request, backend.config)
             )
         except Exception as exc:
             raise _backend_http_exception(exc)
@@ -159,10 +159,10 @@ def create_app(
             return StreamingResponse(
                 _stream_anthropic_response(
                     backend,
-                    proxy_config,
+                    backend.config,
                     anth_request,
                     openai_body,
-                    _backend_authorization(request, proxy_config),
+                    _backend_authorization(request, backend.config),
                 ),
                 media_type="text/event-stream",
             )
@@ -170,13 +170,14 @@ def create_app(
         try:
             data = await backend.chat_completion(
                 openai_body,
-                _backend_authorization(request, proxy_config),
+                _backend_authorization(request, backend.config),
             )
             internal = openai_response_to_internal(data)
-            prompt_tokens = scale_token_count(internal.prompt_tokens, proxy_config)
+            active_config = backend.config
+            prompt_tokens = scale_token_count(internal.prompt_tokens, active_config)
             completion_tokens = scale_token_count(
                 internal.completion_tokens,
-                proxy_config,
+                active_config,
             )
             response = convert_internal_to_anthropic_response(
                 text=internal.text,
@@ -186,7 +187,7 @@ def create_app(
                 finish_reason=internal.finish_reason,
                 tool_calls=internal.tool_calls,
                 thinking=internal.reasoning_content,
-                cached_tokens=scale_token_count(internal.cached_tokens, proxy_config),
+                cached_tokens=scale_token_count(internal.cached_tokens, active_config),
                 request_uses_cache_control=request_has_cache_control(anth_request),
             )
             return response.model_dump(exclude_none=True)
@@ -213,7 +214,7 @@ def create_app(
         body = anthropic_to_openai_chat_body(messages_request)
         estimated = estimate_tokens(body.get("messages", []), body.get("tools"))
         return TokenCountResponse(
-            input_tokens=scale_token_count(estimated, proxy_config),
+            input_tokens=scale_token_count(estimated, backend.config),
         )
 
     @app.api_route(

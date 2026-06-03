@@ -1149,7 +1149,7 @@
                 <i data-lucide="trash-2" class="w-3 h-3"></i>
                 {{ t('chat.clear_all_history') }}
             </button>
-            <button @click="clearApiKey()"
+            <button @click="clearApiKey()" x-show="apiKeyRequired"
                 class="w-full flex items-center gap-1.5 px-2 py-1 text-xs text-fg-tertiary hover:bg-surface-muted rounded">
                 <i data-lucide="key" class="w-3 h-3"></i>
                 {{ t('chat.change_api_key') }}
@@ -2020,7 +2020,8 @@
     function chatApp() {
         return {
             // API Key
-            apiKeySet: false,
+            apiKeyRequired: {{ api_key_configured | tojson }},
+            apiKeySet: {{ (not api_key_configured) | tojson }},
             apiKeyInput: '',
 
             // UI State
@@ -3286,7 +3287,7 @@
         }
 
         const storedKey = localStorage.getItem('omlx_chat_api_key');
-        if (storedKey) {
+        if (!this.apiKeyRequired || storedKey) {
             this.apiKeySet = true;
             await this.loadModels();
             if (this.currentModel) {
@@ -3361,7 +3362,7 @@
             async fetchModelTypes() {
         try {
             const resp = await fetch('/v1/models/status', {
-                headers: { 'Authorization': `Bearer ${this.getApiKey()}` }
+                headers: this.getAuthHeaders()
             });
             if (!resp.ok) return;
             const data = await resp.json();
@@ -3395,7 +3396,7 @@
             async fetchMcpTools() {
         try {
             const resp = await fetch('/v1/mcp/tools', {
-                headers: { 'Authorization': `Bearer ${this.getApiKey()}` }
+                headers: this.getAuthHeaders()
             });
             if (!resp.ok) return;
             const data = await resp.json();
@@ -3675,7 +3676,13 @@
     },
 
     getApiKey() {
+        if (!this.apiKeyRequired) return '';
         return localStorage.getItem('omlx_chat_api_key') || '';
+    },
+
+    getAuthHeaders() {
+        const apiKey = this.getApiKey();
+        return apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {};
     },
 
     combineAbortSignals(signals) {
@@ -3715,9 +3722,7 @@
             async loadModels() {
         try {
             this._adminModelsList = null;
-            const apiHeaders = this.getApiKey()
-                ? { 'Authorization': `Bearer ${this.getApiKey()}` }
-                : {};
+            const apiHeaders = this.getAuthHeaders();
             // Fetch models, admin model list, and server health in parallel
             const [modelsResponse, adminModelsResponse, healthResponse] = await Promise.all([
                 fetch('/v1/models', { headers: apiHeaders }),
@@ -4529,7 +4534,7 @@
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${this.getApiKey()}`
+                    ...this.getAuthHeaders()
                 },
                 body: JSON.stringify(requestBody),
                 signal: stream.abortController.signal
@@ -4723,7 +4728,7 @@
                         try {
                             execResp = await fetch('/v1/mcp/execute', {
                                 method: 'POST',
-                                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.getApiKey()}` },
+                                headers: { 'Content-Type': 'application/json', ...this.getAuthHeaders() },
                                 body: JSON.stringify({ tool_name: toolName, arguments: args }),
                                 signal: combinedSignal,
                             });

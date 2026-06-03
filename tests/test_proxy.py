@@ -280,6 +280,26 @@ def _app_with_mock_backend(handler):
 
 
 @pytest.mark.asyncio
+async def test_proxy_chat_page_is_unlocked_without_proxy_api_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/admin/chat")
+
+    assert response.status_code == 200
+    assert "apiKeyRequired: false" in response.text
+    assert "apiKeySet: true" in response.text
+
+
+@pytest.mark.asyncio
 async def test_proxy_status_endpoint_reports_backend_health(monkeypatch, tmp_path):
     monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
 
@@ -390,6 +410,94 @@ async def test_proxy_metrics_endpoint_reports_ollama(monkeypatch, tmp_path):
     assert data["ollama"]["available"] is True
     assert data["ollama"]["models_count"] == 1
     assert data["ollama"]["loaded_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_proxy_backend_config_updates_runtime_and_persists(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(state_path))
+    seen_requests = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        if request.url.path == "/v1/models":
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": f"{request.url.host}-model",
+                            "object": "model",
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/admin/api/global-settings",
+            json={
+                "proxy_backend_url": "http://new-backend/v1/",
+                "proxy_backend_type": "vllm",
+                "proxy_backend_api_key": "backend-secret",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["requires_restart"] is False
+
+        response = await client.get("/admin/api/proxy/config")
+        assert response.status_code == 200
+        config = response.json()
+        assert config["backend_url"] == "http://new-backend/v1"
+        assert config["backend_type"] == "vllm"
+        assert config["backend_api_key_set"] is True
+
+        response = await client.get("/v1/models")
+        assert response.status_code == 200
+        assert response.json()["data"][0]["id"] == "new-backend-model"
+
+    model_requests = [request for request in seen_requests if request.url.path == "/v1/models"]
+    assert model_requests[-1].url.host == "new-backend"
+    assert model_requests[-1].headers["authorization"] == "Bearer backend-secret"
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/admin/api/proxy/config")
+
+    assert response.status_code == 200
+    assert response.json()["backend_url"] == "http://new-backend/v1"
+
+
+@pytest.mark.asyncio
+async def test_proxy_backend_config_rejects_invalid_url(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/admin/api/global-settings",
+            json={"proxy_backend_url": "new-backend/v1"},
+        )
+        assert response.status_code == 422
+
+        response = await client.get("/admin/api/proxy/config")
+        assert response.status_code == 200
+        assert response.json()["backend_url"] == "http://backend/v1"
 
 
 @pytest.mark.asyncio

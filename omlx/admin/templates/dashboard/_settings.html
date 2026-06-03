@@ -47,17 +47,43 @@
                             <div class="divide-y divide-neutral-100">
                                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 sm:px-6 py-4">
                                     <div>
-                                        <label class="text-sm text-neutral-700">Backend URL</label>
-                                        <p class="text-xs text-neutral-400 mt-0.5">Configured by OMLX_BACKEND_URL or the Docker sidecar network.</p>
+                                        <label class="text-sm text-neutral-700">Backend Type</label>
+                                        <p class="text-xs text-neutral-400 mt-0.5">Used for backend-specific status and metrics probes.</p>
                                     </div>
-                                    <span class="text-sm text-neutral-700 font-mono break-all text-right" x-text="globalSettings.proxy.backend_url"></span>
+                                    <select x-model="globalSettings.proxy.backend_type"
+                                            class="w-full sm:w-64 px-3 py-2 text-sm border border-neutral-200 rounded-lg focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all bg-white">
+                                        <option value="openai-compatible">OpenAI-compatible</option>
+                                        <option value="ollama">Ollama</option>
+                                        <option value="vllm">vLLM</option>
+                                        <option value="llama.cpp">llama.cpp</option>
+                                    </select>
                                 </div>
                                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 sm:px-6 py-4">
                                     <div>
-                                        <label class="text-sm text-neutral-700">State file</label>
-                                        <p class="text-xs text-neutral-400 mt-0.5">Stores proxy UI settings such as aliases and default model.</p>
+                                        <label class="text-sm text-neutral-700">Backend URL</label>
+                                        <p class="text-xs text-neutral-400 mt-0.5">Applied immediately. Include the OpenAI-compatible /v1 path when the backend requires it.</p>
                                     </div>
-                                    <span class="text-sm text-neutral-700 font-mono break-all text-right" x-text="globalSettings.proxy.state_path || 'disabled'"></span>
+                                    <input type="text" x-model="globalSettings.proxy.backend_url"
+                                           placeholder="http://vllm:8000/v1"
+                                           class="w-full sm:w-[28rem] px-3 py-2 text-sm text-right border border-neutral-200 rounded-lg focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all font-mono text-xs">
+                                </div>
+                                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 sm:px-6 py-4">
+                                    <div>
+                                        <label class="text-sm text-neutral-700">Backend API Key</label>
+                                        <p class="text-xs text-neutral-400 mt-0.5">Sent upstream as a bearer token when the backend requires authentication.</p>
+                                    </div>
+                                    <div class="flex items-center gap-2 w-full sm:w-auto">
+                                        <input :type="showBackendApiKey ? 'text' : 'password'"
+                                               x-model="globalSettings.proxy.backend_api_key"
+                                               :placeholder="globalSettings.proxy.backend_api_key_set ? 'configured' : 'optional'"
+                                               class="w-full sm:w-64 px-3 py-2 text-sm text-right border border-neutral-200 rounded-lg focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all font-mono text-xs">
+                                        <button type="button" @click="showBackendApiKey = !showBackendApiKey"
+                                                class="p-2 rounded-lg hover:bg-neutral-100 transition-colors text-neutral-400 hover:text-neutral-600"
+                                                title="{{ t('settings.auth.toggle_visibility_tooltip') }}">
+                                            <i x-show="!showBackendApiKey" data-lucide="eye" class="w-4 h-4"></i>
+                                            <i x-show="showBackendApiKey" data-lucide="eye-off" class="w-4 h-4" x-cloak></i>
+                                        </button>
+                                    </div>
                                 </div>
                                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 sm:px-6 py-4">
                                     <div>
@@ -74,6 +100,13 @@
                                             Check
                                         </button>
                                     </div>
+                                </div>
+                                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 sm:px-6 py-4">
+                                    <div>
+                                        <label class="text-sm text-neutral-700">State file</label>
+                                        <p class="text-xs text-neutral-400 mt-0.5">Stores proxy UI settings such as aliases, backend config, and default model.</p>
+                                    </div>
+                                    <span class="text-sm text-neutral-700 font-mono break-all text-right" x-text="globalSettings.proxy.state_path || 'disabled'"></span>
                                 </div>
                             </div>
                         </div>
