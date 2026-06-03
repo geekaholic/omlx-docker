@@ -19,6 +19,7 @@ from omlx._version import __version__
 
 from .backend import OpenAIBackend
 from .config import ProxyConfig
+from .metrics import collect_backend_metrics
 
 ADMIN_DIR = Path(__file__).resolve().parents[1] / "admin"
 TEMPLATES_DIR = ADMIN_DIR / "templates"
@@ -159,6 +160,13 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             "sse_keepalive_mode": config.sse_keepalive_mode,
             "state_path": str(state.state_path) if state.state_path else None,
         }
+
+    @router.get("/api/proxy/metrics")
+    async def proxy_metrics():
+        started = time.monotonic()
+        metrics = await collect_backend_metrics(backend)
+        metrics["latency_ms"] = round((time.monotonic() - started) * 1000, 1)
+        return metrics
 
     @router.get("/api/global-settings")
     async def get_global_settings():
@@ -588,8 +596,15 @@ def _stats_payload(
     config: ProxyConfig,
     state: ProxyAdminState,
     models: list[dict[str, Any]],
+    metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     uptime = max(0.0, time.time() - state.started_at)
+    metrics = metrics or {}
+    summary = metrics.get("summary") or {}
+    prompt_tokens = int(summary.get("prompt_tokens_total") or 0)
+    generation_tokens = int(summary.get("generation_tokens_total") or 0)
+    running = int(summary.get("running_requests") or 0)
+    waiting = int(summary.get("waiting_requests") or 0)
     active_models = [
         {
             "id": m["id"],
@@ -616,11 +631,11 @@ def _stats_payload(
         "port": config.port,
         "api_key": config.proxy_api_key or "",
         "cli_prefix": "omlx proxy",
-        "total_requests": 0,
-        "active_requests": 0,
-        "waiting_requests": 0,
-        "total_prompt_tokens": 0,
-        "total_completion_tokens": 0,
+        "total_requests": int(summary.get("requests_total") or 0),
+        "active_requests": running,
+        "waiting_requests": waiting,
+        "total_prompt_tokens": prompt_tokens,
+        "total_completion_tokens": generation_tokens,
         "total_cached_tokens": 0,
         "cache_efficiency": 0.0,
         "avg_prefill_tps": 0.0,
@@ -642,8 +657,8 @@ def _stats_payload(
                 "hard_formatted": "remote",
                 "pressure_level": "ok",
             },
-            "total_active_requests": 0,
-            "total_waiting_requests": 0,
+            "total_active_requests": running,
+            "total_waiting_requests": waiting,
         },
         "runtime_cache": {
             "base_path": "",
@@ -662,6 +677,7 @@ def _stats_payload(
             "mode": "proxy",
             "backend_url": config.normalized_backend_url,
             "capabilities": _capabilities(),
+            "metrics": metrics,
         },
     }
 
@@ -680,5 +696,5 @@ def _capabilities() -> dict[str, bool]:
         "benchmarks": False,
         "cache_controls": False,
         "native_memory_guard": False,
-        "backend_metrics": False,
+        "backend_metrics": True,
     }

@@ -10,6 +10,7 @@ from omlx.api.anthropic_models import AnthropicMessage, AnthropicTool, MessagesR
 from omlx.proxy.app import anthropic_to_openai_chat_body, create_app
 from omlx.proxy.backend import OpenAIBackend
 from omlx.proxy.config import ProxyConfig
+from omlx.proxy.metrics import parse_prometheus_text, select_prometheus_metrics
 from omlx.proxy.scaling import scale_token_count
 
 
@@ -303,6 +304,92 @@ async def test_proxy_status_endpoint_reports_backend_health(monkeypatch, tmp_pat
     assert data["backend_reachable"] is True
     assert data["model_count"] == 1
     assert data["capabilities"]["proxy_mode"] is True
+
+
+def test_parse_prometheus_metrics_selects_vllm_counters():
+    text = """
+# HELP vllm:num_requests_running Running requests.
+vllm:num_requests_running{model_name="qwen"} 2
+vllm:num_requests_waiting{model_name="qwen"} 1
+vllm:prompt_tokens_total{model_name="qwen"} 100
+vllm:generation_tokens_total{model_name="qwen"} 25
+vllm:gpu_cache_usage_perc{model_name="qwen"} 0.42
+"""
+    samples = parse_prometheus_text(text)
+    selected = select_prometheus_metrics(samples)
+
+    assert selected["running_requests"] == 2
+    assert selected["waiting_requests"] == 1
+    assert selected["prompt_tokens_total"] == 100
+    assert selected["generation_tokens_total"] == 25
+    assert selected["gpu_cache_usage_perc"] == 0.42
+
+
+@pytest.mark.asyncio
+async def test_proxy_metrics_endpoint_reports_prometheus(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/metrics":
+            return httpx.Response(
+                200,
+                text=(
+                    "vllm:num_requests_running 1\n"
+                    "vllm:prompt_tokens_total 7\n"
+                    "vllm:generation_tokens_total 3\n"
+                ),
+            )
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/admin/api/proxy/metrics")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["prometheus"]["available"] is True
+    assert data["summary"]["running_requests"] == 1
+    assert data["summary"]["prompt_tokens_total"] == 7
+    assert data["summary"]["generation_tokens_total"] == 3
+
+
+@pytest.mark.asyncio
+async def test_proxy_metrics_endpoint_reports_ollama(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/metrics":
+            return httpx.Response(404)
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "qwen3:4b", "size": 123}]},
+            )
+        if request.url.path == "/api/ps":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "qwen3:4b", "size_vram": 456}]},
+            )
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/admin/api/proxy/metrics")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["backend_kind"] == "ollama"
+    assert data["ollama"]["available"] is True
+    assert data["ollama"]["models_count"] == 1
+    assert data["ollama"]["loaded_count"] == 1
 
 
 @pytest.mark.asyncio

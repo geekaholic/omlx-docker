@@ -94,6 +94,64 @@
                              x-text="proxyStatus.backend_error"></div>
                     </div>
 
+                    <!-- Proxy Backend Metrics -->
+                    <div x-show="proxyMode" x-cloak class="bg-white rounded-2xl border border-neutral-200 overflow-hidden mb-8">
+                        <div class="flex items-center justify-between px-6 py-4 bg-neutral-100 border-b border-neutral-200">
+                            <div class="flex items-center gap-3">
+                                <i data-lucide="activity" class="w-4 h-4 text-neutral-500"></i>
+                                <span class="text-xs font-bold uppercase tracking-wider text-neutral-600">Backend Metrics</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <span class="px-2 py-1 text-[10px] font-medium rounded bg-neutral-200 text-neutral-600"
+                                      x-text="proxyMetrics.backend_kind"></span>
+                                <button @click="loadProxyMetrics()"
+                                        class="px-3 py-1.5 text-xs font-medium text-neutral-500 hover:text-neutral-700 hover:bg-neutral-100 rounded-lg transition-all flex items-center gap-1.5">
+                                    <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+                                    Refresh
+                                </button>
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-4 divide-y md:divide-y-0 md:divide-x divide-neutral-100">
+                            <div class="p-5">
+                                <p class="text-xs text-neutral-500 mb-1">Requests</p>
+                                <p class="text-xl font-bold text-neutral-900"
+                                   x-text="proxyMetrics.summary.requests_total != null ? formatNumber(proxyMetrics.summary.requests_total) : '-'"></p>
+                            </div>
+                            <div class="p-5">
+                                <p class="text-xs text-neutral-500 mb-1">Prompt Tokens</p>
+                                <p class="text-xl font-bold text-neutral-900"
+                                   x-text="proxyMetrics.summary.prompt_tokens_total != null ? formatNumber(proxyMetrics.summary.prompt_tokens_total) : '-'"></p>
+                            </div>
+                            <div class="p-5">
+                                <p class="text-xs text-neutral-500 mb-1">Generation Tokens</p>
+                                <p class="text-xl font-bold text-neutral-900"
+                                   x-text="proxyMetrics.summary.generation_tokens_total != null ? formatNumber(proxyMetrics.summary.generation_tokens_total) : '-'"></p>
+                            </div>
+                            <div class="p-5">
+                                <p class="text-xs text-neutral-500 mb-1">Cache Usage</p>
+                                <p class="text-xl font-bold text-neutral-900"
+                                   x-text="proxyMetrics.summary.gpu_cache_usage_perc != null ? (proxyMetrics.summary.gpu_cache_usage_perc * 100).toFixed(1) + '%' : '-'"></p>
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-neutral-100 border-t border-neutral-100">
+                            <div class="p-5">
+                                <p class="text-xs text-neutral-500 mb-1">Running / Waiting</p>
+                                <p class="text-lg font-semibold text-neutral-900"
+                                   x-text="(proxyMetrics.summary.running_requests ?? '-') + ' / ' + (proxyMetrics.summary.waiting_requests ?? '-')"></p>
+                            </div>
+                            <div class="p-5">
+                                <p class="text-xs text-neutral-500 mb-1">Prometheus Samples</p>
+                                <p class="text-lg font-semibold text-neutral-900"
+                                   x-text="proxyMetrics.prometheus.available ? proxyMetrics.prometheus.sample_count + ' samples · ' + proxyMetrics.prometheus.metric_count + ' metrics' : 'not exposed'"></p>
+                            </div>
+                            <div class="p-5">
+                                <p class="text-xs text-neutral-500 mb-1">Ollama Loaded</p>
+                                <p class="text-lg font-semibold text-neutral-900"
+                                   x-text="proxyMetrics.ollama.available ? proxyMetrics.ollama.loaded_count + ' / ' + proxyMetrics.ollama.models_count : 'not detected'"></p>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Three Stat Cards -->
                     <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6 mb-8">
                         <!-- Total Prefill Tokens -->

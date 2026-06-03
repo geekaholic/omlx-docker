@@ -56,6 +56,13 @@
                 latency_ms: 0,
                 capabilities: {},
             },
+            proxyMetrics: {
+                backend_kind: 'unknown',
+                latency_ms: 0,
+                summary: {},
+                prometheus: { available: false, sample_count: 0, metric_count: 0, selected: {} },
+                ollama: { available: false, models_count: 0, loaded_count: 0, models: [], loaded_models: [] },
+            },
 
             // Cache slider (0-100%)
             cachePercent: 10,
@@ -540,7 +547,10 @@
                 }
                 if (value === 'status') {
                     await this.loadStats();
-                    if (this.proxyMode) await this.loadProxyStatus();
+                    if (this.proxyMode) {
+                        await this.loadProxyStatus();
+                        await this.loadProxyMetrics();
+                    }
                     this.startStatsRefresh();
                 } else {
                     this.stopStatsRefresh();
@@ -1972,6 +1982,25 @@
                     }
                 } catch (err) {
                     console.error('Failed to load proxy status:', err);
+                }
+            },
+
+            async loadProxyMetrics() {
+                if (!this.proxyMode && this.globalSettings.proxy?.mode !== 'proxy') return;
+                try {
+                    const response = await fetch('/admin/api/proxy/metrics');
+                    if (response.ok) {
+                        const data = await response.json();
+                        this.proxyMetrics = {
+                            ...this.proxyMetrics,
+                            ...data,
+                            summary: { ...this.proxyMetrics.summary, ...(data.summary || {}) },
+                            prometheus: { ...this.proxyMetrics.prometheus, ...(data.prometheus || {}) },
+                            ollama: { ...this.proxyMetrics.ollama, ...(data.ollama || {}) },
+                        };
+                    }
+                } catch (err) {
+                    console.error('Failed to load proxy metrics:', err);
                 }
             },
 

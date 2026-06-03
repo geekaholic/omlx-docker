@@ -38,6 +38,13 @@ class OpenAIBackend:
     def url(self, path: str) -> str:
         return f"{self.config.normalized_backend_url}/{path.lstrip('/')}"
 
+    @property
+    def root_base_url(self) -> str:
+        url = self.config.normalized_backend_url
+        if url.endswith("/v1"):
+            return url[:-3]
+        return url
+
     def headers(self, inbound_authorization: str | None = None) -> dict[str, str]:
         headers = {"accept": "application/json"}
         token = self.config.backend_api_key
@@ -55,6 +62,34 @@ class OpenAIBackend:
         )
         response.raise_for_status()
         return response.json()
+
+    async def get_root_json(
+        self,
+        path: str,
+        inbound_authorization: str | None = None,
+    ) -> dict[str, Any]:
+        assert self.client is not None
+        response = await self.client.get(
+            f"{self.root_base_url}/{path.lstrip('/')}",
+            headers=self.headers(inbound_authorization),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_root_text(
+        self,
+        path: str,
+        inbound_authorization: str | None = None,
+    ) -> str:
+        assert self.client is not None
+        headers = self.headers(inbound_authorization)
+        headers["accept"] = "text/plain, */*"
+        response = await self.client.get(
+            f"{self.root_base_url}/{path.lstrip('/')}",
+            headers=headers,
+        )
+        response.raise_for_status()
+        return response.text
 
     async def chat_completion(
         self,
@@ -210,4 +245,3 @@ def _coerce_tool_calls(value: Any) -> list[ToolCall] | None:
             )
         )
     return result or None
-
