@@ -48,7 +48,7 @@ Working:
 
 Still in progress:
 
-- Admin controls for changing backend URL/API key/type from the UI.
+- Admin controls for changing backend URL/API key/type and generating vLLM Compose settings.
 - Cleaner proxy-mode UI that hides native MLX-only controls.
 - More complete real-backend validation for vLLM, llama.cpp server, and Ollama.
 - Formal package/CLI rename from `omlx` to `omni` or another final command name.
@@ -102,32 +102,43 @@ protects the oMNI proxy itself.
 
 ## Quickstart: vLLM Sidecar
 
-The Spark compose file runs oMNI plus a vLLM OpenAI server sidecar.
+The vLLM compose file runs oMNI plus a vLLM OpenAI server sidecar on Linux/NVIDIA hosts.
 
 ```bash
-VLLM_MODEL=Qwen/Qwen2.5-7B-Instruct \
+VLLM_MODEL=Qwen/Qwen3-1.7B \
 VLLM_SERVED_MODEL_NAME=qwen \
-docker compose -f docker/docker-compose.spark.yml up --build
+docker compose -f docker/docker-compose.vllm.yml up --build
 ```
 
 The proxy talks to vLLM at `http://vllm:8000/v1` inside the compose network and
-publishes oMNI on port `8080`.
+publishes oMNI on port `8080`. The compose file bind-mounts the host Hugging Face
+cache at `${HOME}/.cache/huggingface`, so already downloaded models are reused.
+
+The admin dashboard can regenerate `docker/docker-compose.vllm.yml` from the
+proxy settings when the stack is launched from that file. Restart the Compose
+stack after changing vLLM launch settings; only proxy settings apply live.
 
 Useful environment variables:
 
 | Variable | Default | Purpose |
 |---|---:|---|
 | `VLLM_IMAGE` | `vllm/vllm-openai:latest` | vLLM container image |
-| `VLLM_MODEL` | required | Hugging Face model id or container-local path |
-| `VLLM_SERVED_MODEL_NAME` | `VLLM_MODEL` | API-visible model name |
-| `VLLM_MAX_MODEL_LEN` | `32768` | vLLM context length |
-| `VLLM_GPU_MEMORY_UTILIZATION` | `0.85` | vLLM GPU memory fraction |
-| `VLLM_MAX_NUM_SEQS` | `16` | vLLM max concurrent sequences |
+| `VLLM_MODEL` | `Qwen/Qwen3-1.7B` | Hugging Face model id or container-local path |
+| `VLLM_SERVED_MODEL_NAME` | `qwen` | API-visible model name |
+| `VLLM_MAX_MODEL_LEN` | `8192` | vLLM context length |
+| `VLLM_GPU_MEMORY_UTILIZATION` | `0.80` | vLLM GPU memory fraction |
+| `VLLM_MAX_NUM_SEQS` | `4` | vLLM max concurrent sequences |
+| `VLLM_HF_HOME` | `${HOME}/.cache/huggingface` | Host Hugging Face cache to mount |
+| `VLLM_GENERATION_CONFIG` | `vllm` | Use vLLM defaults instead of model `generation_config.json` |
+| `VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS` | `{"enable_thinking":false}` | Disables Qwen thinking output in chat templates |
+| `VLLM_TRUST_REMOTE_CODE` | `true` | Add `--trust-remote-code` |
+| `VLLM_ENABLE_AUTO_TOOL_CHOICE` | `false` | Add vLLM auto tool-choice flags when enabled |
 | `VLLM_TOOL_CALL_PARSER` | `hermes` | vLLM auto tool-choice parser |
 | `HF_TOKEN` | empty | Hugging Face token for gated models |
 
 The sidecar compose uses `gpus: all` and `ipc: host`, so Docker must be
-configured with NVIDIA Container Toolkit on Linux.
+configured with NVIDIA Container Toolkit on Linux. `docker/docker-compose.spark.yml`
+remains as a compatibility file, but new work should use `docker/docker-compose.vllm.yml`.
 
 ## Running Without Docker
 
@@ -230,7 +241,9 @@ proxy path.
 | `omlx/admin/` | Reused oMLX admin UI assets and proxy compatibility routes |
 | `docker/Dockerfile.proxy` | Minimal proxy image |
 | `docker/docker-compose.proxy.yml` | Proxy with external backend |
-| `docker/docker-compose.spark.yml` | Proxy plus vLLM sidecar |
+| `docker/docker-compose.vllm.yml` | Generated proxy plus vLLM sidecar |
+| `docker/docker-compose.vllm.template.yml` | Default template for vLLM compose generation |
+| `docker/docker-compose.spark.yml` | Legacy compatibility alias for the vLLM sidecar |
 | `docker/proxy.env.example` | Example environment values |
 | `tests/test_proxy.py` | Proxy regression tests |
 | `LINUX_PROXY_REMAINING_WORK.md` | Current backlog |

@@ -2980,6 +2980,97 @@
                 };
             },
 
+            trailingTagPrefix(text, tag) {
+                const max = Math.min(text.length, tag.length - 1);
+                for (let len = max; len > 0; len--) {
+                    const suffix = text.slice(-len);
+                    if (tag.startsWith(suffix)) return suffix;
+                }
+                return '';
+            },
+
+            finishStreamingThinking(stream, context) {
+                if (!stream.thinkingState.isInThinking) return;
+                const thinkSecs = ((Date.now() - stream.thinkingState.thinkingStartTime) / 1000).toFixed(1);
+                this.setEngineStatus(context.chatId, { text: `Thought for ${thinkSecs}s` });
+                stream.thinkingState.isInThinking = false;
+                stream.thinkingState.thinkingStartTime = null;
+                stream._thinkSecs = thinkSecs;
+            },
+
+            beginStreamingThinking(stream, context) {
+                if (stream.thinkingState.isInThinking) return;
+                stream.thinkingState.isInThinking = true;
+                stream.thinkingState.thinkingStartTime = Date.now();
+                this.setEngineStatus(context.chatId, { text: 'Thinking' });
+            },
+
+            processStreamingContentDelta(stream, content, context) {
+                let input = `${stream._contentTagBuffer || ''}${content || ''}`;
+                stream._contentTagBuffer = '';
+                let visibleContent = false;
+                let thinkingContent = false;
+
+                while (input) {
+                    if (stream._literalThinkActive) {
+                        const closeIndex = input.indexOf('</think>');
+                        if (closeIndex === -1) {
+                            const keep = this.trailingTagPrefix(input, '</think>');
+                            const thinkingText = keep ? input.slice(0, -keep.length) : input;
+                            if (thinkingText) {
+                                stream.streamingThinking += thinkingText;
+                                thinkingContent = true;
+                            }
+                            stream._contentTagBuffer = keep;
+                            break;
+                        }
+
+                        const thinkingText = input.slice(0, closeIndex);
+                        if (thinkingText) {
+                            stream.streamingThinking += thinkingText;
+                            thinkingContent = true;
+                        }
+                        stream._literalThinkActive = false;
+                        this.finishStreamingThinking(stream, context);
+                        input = input.slice(closeIndex + '</think>'.length);
+                        continue;
+                    }
+
+                    const openIndex = input.indexOf('<think>');
+                    if (openIndex === -1) {
+                        const keep = this.trailingTagPrefix(input, '<think>');
+                        const visibleText = keep ? input.slice(0, -keep.length) : input;
+                        if (visibleText) {
+                            stream.streamingContent += visibleText;
+                            visibleContent = visibleContent || !!visibleText.trim();
+                        }
+                        stream._contentTagBuffer = keep;
+                        break;
+                    }
+
+                    const beforeThink = input.slice(0, openIndex);
+                    if (beforeThink) {
+                        stream.streamingContent += beforeThink;
+                        visibleContent = visibleContent || !!beforeThink.trim();
+                    }
+                    stream._literalThinkActive = true;
+                    this.beginStreamingThinking(stream, context);
+                    input = input.slice(openIndex + '<think>'.length);
+                }
+
+                return { visibleContent, thinkingContent };
+            },
+
+            flushStreamingContentTagBuffer(stream) {
+                if (!stream._contentTagBuffer) return;
+                if (stream._literalThinkActive) {
+                    stream.streamingThinking += stream._contentTagBuffer;
+                } else {
+                    stream.streamingContent += stream._contentTagBuffer;
+                }
+                stream._contentTagBuffer = '';
+            },
+
             createStreamSession(chatId = null) {
                 return {
                     chatId,
@@ -2992,6 +3083,8 @@
                     thinkingState: this.createThinkingState(),
                     streamingThinking: '',
                     streamingThinkingOpen: false,
+                    _literalThinkActive: false,
+                    _contentTagBuffer: '',
                     streamRenderState: {
                         stableIndex: 0,
                         stableText: ''
@@ -3244,6 +3337,8 @@
                 stream.thinkingState = this.createThinkingState();
                 stream.streamingThinking = '';
                 stream.streamingThinkingOpen = false;
+                stream._literalThinkActive = false;
+                stream._contentTagBuffer = '';
                 stream.streamRenderState = {
                     stableIndex: 0,
                     stableText: ''
@@ -4630,20 +4725,15 @@
                                     stream._ttft = (Date.now() - stream._statusStart) / 1000;
                                     this.stopPrefillPolling(context.chatId);
                                 }
-                                // Log thinking duration to timeline when content starts
-                                if (stream.thinkingState.isInThinking) {
-                                    const thinkSecs = ((Date.now() - stream.thinkingState.thinkingStartTime) / 1000).toFixed(1);
-                                    this.setEngineStatus(context.chatId, { text: `Thought for ${thinkSecs}s` });
-                                    stream.thinkingState.isInThinking = false;
-                                    stream.thinkingState.thinkingStartTime = null;
-                                    stream._thinkSecs = thinkSecs;
+                                const parsed = this.processStreamingContentDelta(stream, delta.content, context);
+                                if (parsed.visibleContent) {
+                                    // Log thinking duration to timeline when answer content starts.
+                                    this.finishStreamingThinking(stream, context);
+                                    if (!stream.finalContent) {
+                                        stream.finalContent = true;
+                                        stream.engineStatus = null;
+                                    }
                                 }
-                                // Only set finalContent on non-whitespace content
-                                if (!stream.finalContent && delta.content.trim()) {
-                                    stream.finalContent = true;
-                                    stream.engineStatus = null;
-                                }
-                                stream.streamingContent += delta.content;
                                 if (this.currentChatId === context.chatId) {
                                     this.scrollToBottom();
                                 }
@@ -4654,6 +4744,8 @@
                     }
                 }
             }
+
+            this.flushStreamingContentTagBuffer(stream);
 
             // If model ended while still thinking (tool-call turn or manual stop), log elapsed and reset
             if (stream.thinkingState.isInThinking) {
@@ -5539,35 +5631,15 @@
 
         const text = stream.streamingContent;
 
-        if (text.includes('<think>')) {
-            container.innerHTML = this.renderStreamingMarkdown(text);
-
-            this.$nextTick(() => {
-                this.addCodeCopyButtons(container);
-                this.renderMathInRoot(container);
-                this.scrollToBottom();
-            });
-            return;
-        }
-
-        const { stableRoot, tailRoot } = this.ensureStreamingRoots(container, stream);
-        const cutoff = this.findStableRenderCutoff(text);
-        const safeCutoff = Math.max(cutoff, stream.streamRenderState.stableIndex);
-
-        if (safeCutoff > stream.streamRenderState.stableIndex) {
-            stream.streamRenderState.stableText = text.slice(0, safeCutoff);
-            stableRoot.innerHTML = stream.streamRenderState.stableText
-                ? DOMPurify.sanitize(marked.parse(stream.streamRenderState.stableText))
-                : '';
-            this.addCodeCopyButtons(stableRoot);
-            this.renderMathInRoot(stableRoot);
-            stream.streamRenderState.stableIndex = safeCutoff;
-        }
-
-        const tailText = text.slice(stream.streamRenderState.stableIndex);
-        tailRoot.innerHTML = tailText ? DOMPurify.sanitize(marked.parse(tailText)) : '';
+        // Render from the complete accumulated stream each frame. vLLM can emit
+        // very small deltas, and the stable/tail renderer can visibly replace
+        // the tail on every token for Qwen-style streams. Full re-rendering is
+        // simpler and keeps the visible text monotonic while streaming.
+        container.innerHTML = this.renderStreamingMarkdown(text);
 
         this.$nextTick(() => {
+            this.addCodeCopyButtons(container);
+            this.renderMathInRoot(container);
             this.scrollToBottom();
         });
     },

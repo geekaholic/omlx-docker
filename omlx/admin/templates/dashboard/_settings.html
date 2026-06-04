@@ -108,6 +108,66 @@
                                     </div>
                                     <span class="text-sm text-neutral-700 font-mono break-all text-right" x-text="globalSettings.proxy.state_path || 'disabled'"></span>
                                 </div>
+                                <div x-show="globalSettings.proxy.backend_type === 'vllm'" x-cloak class="px-4 sm:px-6 py-4 bg-neutral-50/70">
+                                    <div class="mb-3">
+                                        <label class="text-sm font-medium text-neutral-700">vLLM Compose</label>
+                                        <p class="text-xs text-neutral-400 mt-0.5">Saved settings regenerate docker/docker-compose.vllm.yml. Restart the Compose stack for vLLM launch changes.</p>
+                                    </div>
+                                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                                        <label class="text-xs text-neutral-500">Image
+                                            <input type="text" x-model="globalSettings.proxy.vllm.image" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">Model
+                                            <input type="text" x-model="globalSettings.proxy.vllm.model" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">Served Name
+                                            <input type="text" x-model="globalSettings.proxy.vllm.served_model_name" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">HF Cache
+                                            <input type="text" x-model="globalSettings.proxy.vllm.hf_home" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">Max Model Len
+                                            <input type="number" x-model.number="globalSettings.proxy.vllm.max_model_len" min="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">Max Seqs
+                                            <input type="number" x-model.number="globalSettings.proxy.vllm.max_num_seqs" min="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">GPU Memory Utilization
+                                            <input type="number" x-model.number="globalSettings.proxy.vllm.gpu_memory_utilization" min="0.1" max="1" step="0.01" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">vLLM Port
+                                            <input type="number" x-model.number="globalSettings.proxy.vllm.port" min="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">Generation Config
+                                            <select x-model="globalSettings.proxy.vllm.generation_config" class="mt-1 w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg bg-white">
+                                                <option value="vllm">vllm defaults</option>
+                                                <option value="auto">model generation_config.json</option>
+                                            </select>
+                                        </label>
+                                        <label class="text-xs text-neutral-500">Default Chat Template Kwargs
+                                            <input type="text" x-model="globalSettings.proxy.vllm.default_chat_template_kwargs" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder='{"enable_thinking":false}'>
+                                        </label>
+                                        <label class="flex items-center justify-between gap-3 text-xs text-neutral-500 px-3 py-2 border border-neutral-200 rounded-lg bg-white">
+                                            <span>Trust remote code</span>
+                                            <input type="checkbox" x-model="globalSettings.proxy.vllm.trust_remote_code">
+                                        </label>
+                                        <label class="flex items-center justify-between gap-3 text-xs text-neutral-500 px-3 py-2 border border-neutral-200 rounded-lg bg-white">
+                                            <span>Enforce eager</span>
+                                            <input type="checkbox" x-model="globalSettings.proxy.vllm.enforce_eager">
+                                        </label>
+                                        <label class="flex items-center justify-between gap-3 text-xs text-neutral-500 px-3 py-2 border border-neutral-200 rounded-lg bg-white">
+                                            <span>Auto tool choice</span>
+                                            <input type="checkbox" x-model="globalSettings.proxy.vllm.enable_auto_tool_choice">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">Tool parser
+                                            <input type="text" x-model="globalSettings.proxy.vllm.tool_call_parser" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">Reasoning parser
+                                            <input type="text" x-model="globalSettings.proxy.vllm.reasoning_parser" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
+                                        </label>
+                                    </div>
+                                    <p class="text-xs text-neutral-400 mt-3" x-text="globalSettings.proxy.vllm.compose_output_path ? 'Output: ' + globalSettings.proxy.vllm.compose_output_path : 'Compose output path is not mounted in this container.'"></p>
+                                </div>
                             </div>
                         </div>
 

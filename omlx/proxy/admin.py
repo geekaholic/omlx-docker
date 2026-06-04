@@ -20,6 +20,7 @@ from omlx._version import __version__
 from .backend import OpenAIBackend
 from .config import ProxyConfig
 from .metrics import collect_backend_metrics
+from .vllm_compose import render_vllm_compose, settings_from_overrides, write_vllm_compose
 
 ADMIN_DIR = Path(__file__).resolve().parents[1] / "admin"
 TEMPLATES_DIR = ADMIN_DIR / "templates"
@@ -174,6 +175,23 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
         metrics["latency_ms"] = round((time.monotonic() - started) * 1000, 1)
         return metrics
 
+    @router.get("/api/proxy/vllm-compose")
+    async def proxy_vllm_compose():
+        settings = settings_from_overrides(state.global_overrides)
+        output_path = _vllm_compose_output_path()
+        return {
+            "settings": settings.__dict__,
+            "content": render_vllm_compose(settings),
+            "output_path": str(output_path) if output_path else None,
+            "writable": bool(output_path),
+        }
+
+    @router.post("/api/proxy/vllm-compose/regenerate")
+    async def regenerate_proxy_vllm_compose():
+        result = _write_vllm_compose_if_configured(state)
+        status = 200 if result.get("written") or not result.get("error") else 500
+        return JSONResponse(result, status_code=status)
+
     @router.get("/api/global-settings")
     async def get_global_settings():
         return _global_settings_payload(backend.config, state)
@@ -198,11 +216,17 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             state.global_overrides["target_context_size"] = payload[
                 "claude_code_target_context_size"
             ]
+        vllm_updates = _extract_vllm_compose_updates(payload)
+        if vllm_updates:
+            state.global_overrides.update(vllm_updates)
         state.log("updated proxy admin settings")
         state.save()
+        compose_result = _write_vllm_compose_if_configured(state)
         runtime_applied = ["proxy_admin_settings"]
         if proxy_updates:
             runtime_applied.append("proxy_backend_config")
+        if compose_result.get("written"):
+            runtime_applied.append("vllm_compose_file")
         return {
             "status": "ok",
             "message": (
@@ -211,8 +235,9 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
                 else "Proxy settings saved for this process"
             ),
             "runtime_applied": runtime_applied,
-            "requires_restart": False,
-            "restart_required_settings": ["proxy_host", "proxy_port"],
+            "compose": compose_result,
+            "requires_restart": bool(vllm_updates),
+            "restart_required_settings": ["proxy_host", "proxy_port", "vllm"],
         }
 
     @router.get("/api/models")
@@ -490,6 +515,63 @@ def _extract_proxy_backend_updates(payload: dict[str, Any]) -> dict[str, Any]:
     return updates
 
 
+def _extract_vllm_compose_updates(payload: dict[str, Any]) -> dict[str, Any]:
+    fields = {
+        "vllm_image",
+        "vllm_model",
+        "vllm_served_model_name",
+        "vllm_max_model_len",
+        "vllm_gpu_memory_utilization",
+        "vllm_max_num_seqs",
+        "vllm_port",
+        "vllm_hf_home",
+        "vllm_generation_config",
+        "vllm_default_chat_template_kwargs",
+        "vllm_trust_remote_code",
+        "vllm_enforce_eager",
+        "vllm_enable_auto_tool_choice",
+        "vllm_tool_call_parser",
+        "vllm_reasoning_parser",
+    }
+    updates = {key: payload[key] for key in fields if key in payload}
+    if not updates:
+        return {}
+    if "sampling_max_context_window" in payload and "vllm_max_model_len" not in updates:
+        updates["vllm_max_model_len"] = payload["sampling_max_context_window"]
+    if "max_concurrent_requests" in payload and "vllm_max_num_seqs" not in updates:
+        updates["vllm_max_num_seqs"] = payload["max_concurrent_requests"]
+    return updates
+
+
+def _vllm_settings_payload(state: ProxyAdminState) -> dict[str, Any]:
+    settings = settings_from_overrides(state.global_overrides)
+    output_path = _vllm_compose_output_path()
+    payload = settings.__dict__.copy()
+    payload["compose_output_path"] = str(output_path) if output_path else None
+    return payload
+
+
+def _vllm_compose_output_path() -> Path | None:
+    value = os.getenv("OMLX_VLLM_COMPOSE_OUTPUT_PATH", "").strip()
+    if not value:
+        return None
+    return Path(value)
+
+
+def _write_vllm_compose_if_configured(state: ProxyAdminState) -> dict[str, Any]:
+    output_path = _vllm_compose_output_path()
+    if output_path is None:
+        return {"written": False, "output_path": None}
+    settings = settings_from_overrides(state.global_overrides)
+    try:
+        written = write_vllm_compose(output_path, settings)
+    except Exception as exc:
+        state.log(f"failed to write vLLM compose file: {exc}")
+        return {"written": False, "output_path": str(output_path), "error": str(exc)}
+    state.log(f"wrote vLLM compose file {written}")
+    return {"written": True, "output_path": str(written)}
+
+
 def _normalize_backend_url(value: str) -> str:
     value = value.strip().rstrip("/")
     if not value:
@@ -597,6 +679,7 @@ def _global_settings_payload(
             "backend_api_key_set": bool(config.backend_api_key),
             "state_path": str(state.state_path) if state.state_path else None,
             "capabilities": _capabilities(),
+            "vllm": _vllm_settings_payload(state),
         },
         "model": {
             "model_dirs": [config.normalized_backend_url],

@@ -1,5 +1,5 @@
-# Legacy compatibility file. Prefer docker-compose.vllm.yml; admin settings
-# regenerate docker-compose.vllm.yml, not this file.
+# Template defaults for the generated oMNI vLLM compose file. Edit docker-compose.vllm.template.yml or
+# admin proxy settings, then regenerate instead of hand-editing this file.
 services:
   omlx-proxy:
     build:
