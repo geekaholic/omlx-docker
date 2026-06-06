@@ -100,23 +100,75 @@ docker compose -f docker/docker-compose.proxy.yml up --build
 `OMLX_BACKEND_API_KEY` is sent to the upstream backend. `OMLX_PROXY_API_KEY`
 protects the oMNI proxy itself.
 
-## Quickstart: vLLM Sidecar
+## Installing the `omni` Tool
 
-The vLLM compose file runs oMNI plus a vLLM OpenAI server sidecar on Linux/NVIDIA hosts.
+`omni` is installed from this repo as a Python console script. On Linux/Spark
+hosts, the CLI is mainly a Docker Compose launcher, so the lightweight install
+path is to install the local package without resolving the Mac/MLX runtime
+dependencies:
 
 ```bash
-VLLM_MODEL=Qwen/Qwen3-1.7B \
-VLLM_SERVED_MODEL_NAME=qwen \
-docker compose -f docker/docker-compose.vllm.yml up --build
+cd /home/bud/omlx-docker
+python3 -m pip install -e . --no-deps
+rehash  # zsh only; refreshes command lookup after installing console scripts
+omni --help
 ```
 
-The proxy talks to vLLM at `http://vllm:8000/v1` inside the compose network and
-publishes oMNI on port `8080`. The compose file bind-mounts the host Hugging Face
-cache at `${HOME}/.cache/huggingface`, so already downloaded models are reused.
+If the shell still cannot find `omni`, run it through Python directly:
 
-The admin dashboard can regenerate `docker/docker-compose.vllm.yml` from the
-proxy settings when the stack is launched from that file. Restart the Compose
-stack after changing vLLM launch settings; only proxy settings apply live.
+```bash
+cd /home/bud/omlx-docker
+python3 -m omlx.omni_cli --help
+python3 -m omlx.omni_cli serve --backend vllm --generate-only
+```
+
+With `uv`, use an isolated environment and the same no-dependency install:
+
+```bash
+cd /home/bud/omlx-docker
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -e . --no-deps
+omni --help
+```
+
+Use `--no-deps` for the Linux proxy workflow because the upstream project still
+declares Mac/MLX-oriented dependencies. The Docker proxy image installs its own
+minimal server dependencies. For development tests in this repo, install pytest
+into the active environment:
+
+```bash
+python3 -m pip install pytest
+python3 -m pytest tests/test_omni_cli.py -q
+```
+
+## Quickstart: vLLM Sidecar
+
+Use `omni serve` to generate a local vLLM Compose file and launch oMNI plus a
+vLLM OpenAI server sidecar on Linux/NVIDIA hosts.
+
+```bash
+omni serve --backend vllm \
+  --model Qwen/Qwen3-1.7B \
+  --served-model-name qwen
+```
+
+The command writes two local generated files, then runs Docker Compose with an
+explicit env file:
+
+- `docker/docker-compose.vllm.yml` - generated Compose stack, ignored by git.
+- `docker/docker-compose.vllm.env` - last-used vLLM launch settings, ignored by git.
+
+If `docker/docker-compose.vllm.env` already exists, omitted `omni serve` flags
+reuse values from that file. Passing a flag such as `--model`,
+`--served-model-name`, or `--max-model-len` updates only the corresponding env
+value. On first run, missing values use the built-in defaults. The proxy talks
+to vLLM at `http://vllm:8000/v1` inside the compose network and publishes oMNI
+on port `8080`. The compose file bind-mounts the host Hugging Face cache at
+`${HOME}/.cache/huggingface`, so already downloaded models are reused.
+
+Restart the Compose stack after changing vLLM launch settings; only proxy
+settings apply live.
 
 Useful environment variables:
 
@@ -137,8 +189,48 @@ Useful environment variables:
 | `HF_TOKEN` | empty | Hugging Face token for gated models |
 
 The sidecar compose uses `gpus: all` and `ipc: host`, so Docker must be
-configured with NVIDIA Container Toolkit on Linux. `docker/docker-compose.spark.yml`
-remains as a compatibility file, but new work should use `docker/docker-compose.vllm.yml`.
+configured with NVIDIA Container Toolkit on Linux. Use `omni serve --backend vllm`
+for vLLM sidecar launches.
+
+## Managing the Docker Stack
+
+Use `omni status` to view the containers for the active oMNI Compose stack:
+
+```bash
+omni status
+```
+
+By default, `omni status` uses the generated `docker/docker-compose.vllm.yml`
+when it exists, otherwise it falls back to `docker/docker-compose.proxy.yml`. To
+inspect a specific stack:
+
+```bash
+omni status --compose-file docker/docker-compose.proxy.yml
+```
+
+View logs for the selected stack, optionally following new output or filtering
+to the proxy or managed backend service:
+
+```bash
+omni logs
+omni logs -f
+omni logs --target proxy
+omni logs --target backend
+omni logs --compose-file docker/docker-compose.proxy.yml
+```
+
+Restart the proxy, the managed backend, or both services:
+
+```bash
+omni restart --target proxy
+omni restart --target backend
+omni restart --target both
+```
+
+For the vLLM sidecar stack, `--target backend` reads logs from or restarts the
+`vllm` service. For OpenAI, Ollama, and llama.cpp proxy stacks, the backend is
+external and not managed by this repo, so use `--target proxy` or inspect/restart
+the backend with its own tooling.
 
 ## Running Without Docker
 
@@ -241,9 +333,9 @@ proxy path.
 | `omlx/admin/` | Reused oMLX admin UI assets and proxy compatibility routes |
 | `docker/Dockerfile.proxy` | Minimal proxy image |
 | `docker/docker-compose.proxy.yml` | Proxy with external backend |
-| `docker/docker-compose.vllm.yml` | Generated proxy plus vLLM sidecar |
-| `docker/docker-compose.vllm.template.yml` | Default template for vLLM compose generation |
-| `docker/docker-compose.spark.yml` | Legacy compatibility alias for the vLLM sidecar |
+| `docker/docker-compose.vllm.template.yml` | Default template for generated vLLM compose files |
+| `docker/docker-compose.vllm.yml` | Local generated vLLM sidecar compose file, ignored by git |
+| `docker/docker-compose.vllm.env` | Local generated vLLM launch settings, ignored by git |
 | `docker/proxy.env.example` | Example environment values |
 | `tests/test_proxy.py` | Proxy regression tests |
 | `LINUX_PROXY_REMAINING_WORK.md` | Current backlog |

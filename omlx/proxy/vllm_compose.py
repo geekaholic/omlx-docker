@@ -107,7 +107,12 @@ def settings_from_overrides(overrides: dict[str, Any]) -> VllmComposeSettings:
     )
 
 
-def render_vllm_compose(settings: VllmComposeSettings) -> str:
+def render_vllm_compose(
+    settings: VllmComposeSettings,
+    *,
+    project_context: str = "..",
+    compose_output_dir: str = "../docker",
+) -> str:
     env = {
         "VLLM_IMAGE": settings.image,
         "VLLM_MODEL": settings.model,
@@ -140,7 +145,7 @@ def render_vllm_compose(settings: VllmComposeSettings) -> str:
 services:
   omlx-proxy:
     build:
-      context: ..
+      context: {_yaml_quote(project_context)}
       dockerfile: docker/Dockerfile.proxy
     ports:
       - "{_compose_default_expr('OMLX_PROXY_PORT', str(settings.proxy_port))}:8080"
@@ -158,7 +163,7 @@ services:
       OMLX_VLLM_COMPOSE_OUTPUT_PATH: "/compose-output/docker-compose.vllm.yml"
     volumes:
       - proxy-state:/data
-      - ../docker:/compose-output
+      - {_yaml_quote(f'{compose_output_dir}:/compose-output')}
     depends_on:
       - vllm
 
@@ -212,11 +217,48 @@ volumes:
 '''
 
 
+def render_vllm_compose_for_path(
+    path: str | os.PathLike[str],
+    settings: VllmComposeSettings,
+    *,
+    repo_root: str | os.PathLike[str] | None = None,
+) -> str:
+    root = Path(repo_root) if repo_root is not None else Path(__file__).resolve().parents[2]
+    output_dir = Path(path).parent.resolve()
+    project_context = _relative_path(root.resolve(), output_dir)
+    compose_output_dir = _relative_path((root / "docker").resolve(), output_dir)
+    return render_vllm_compose(
+        settings,
+        project_context=project_context,
+        compose_output_dir=compose_output_dir,
+    )
+
+
 def write_vllm_compose(path: str | os.PathLike[str], settings: VllmComposeSettings) -> Path:
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(render_vllm_compose(settings), encoding="utf-8")
     return output
+
+
+def write_vllm_compose_for_path(
+    path: str | os.PathLike[str],
+    settings: VllmComposeSettings,
+    *,
+    repo_root: str | os.PathLike[str] | None = None,
+) -> Path:
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        render_vllm_compose_for_path(output, settings, repo_root=repo_root),
+        encoding="utf-8",
+    )
+    return output
+
+
+def _relative_path(target: Path, start: Path) -> str:
+    rel = os.path.relpath(target, start)
+    return "." if rel == "." else rel
 
 
 def _int(value: Any, default: int) -> int:

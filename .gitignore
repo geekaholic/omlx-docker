@@ -121,3 +121,6 @@ docs/native_app_architecture.md
 uv.lock
 # generated TurboQuant memory report (machine-specific)
 tq_batch_memory.md
+# Generated local Docker Compose files
+docker/docker-compose.vllm.yml
+docker/docker-compose.vllm.env
