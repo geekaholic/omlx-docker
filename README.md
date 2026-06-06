@@ -227,10 +227,19 @@ omni restart --target backend
 omni restart --target both
 ```
 
-For the vLLM sidecar stack, `--target backend` reads logs from or restarts the
-`vllm` service. For OpenAI, Ollama, and llama.cpp proxy stacks, the backend is
-external and not managed by this repo, so use `--target proxy` or inspect/restart
-the backend with its own tooling.
+Stop the proxy, the managed backend, or both services. `omni stop` requires an
+explicit target and stops containers without removing volumes or networks:
+
+```bash
+omni stop --target proxy
+omni stop --target backend
+omni stop --target both
+```
+
+For the vLLM sidecar stack, `--target backend` reads logs from, restarts, or
+stops the `vllm` service. For OpenAI, Ollama, and llama.cpp proxy stacks, the
+backend is external and not managed by this repo, so use `--target proxy` or
+inspect/restart/stop the backend with its own tooling.
 
 ## Running Without Docker
 

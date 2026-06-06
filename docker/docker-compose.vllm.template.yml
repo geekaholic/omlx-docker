@@ -19,6 +19,7 @@ services:
       OMLX_SSE_KEEPALIVE_MODE: "${OMLX_SSE_KEEPALIVE_MODE:-ping}"
       OMLX_PROXY_STATE_PATH: "/data/proxy-state.json"
       OMLX_VLLM_COMPOSE_OUTPUT_PATH: "/compose-output/docker-compose.vllm.yml"
+      OMLX_VLLM_ENV_OUTPUT_PATH: "/compose-output/docker-compose.vllm.env"
     volumes:
       - proxy-state:/data
       - ../docker:/compose-output

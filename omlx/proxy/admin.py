@@ -20,7 +20,17 @@ from omlx._version import __version__
 from .backend import OpenAIBackend
 from .config import ProxyConfig
 from .metrics import collect_backend_metrics
-from .vllm_compose import render_vllm_compose, settings_from_overrides, write_vllm_compose
+from .vllm_compose import (
+    load_vllm_env_file,
+    render_vllm_compose,
+    render_vllm_env_file,
+    settings_from_overrides,
+    vllm_env_from_compose,
+    vllm_environment,
+    vllm_settings_from_env,
+    write_vllm_compose,
+    write_vllm_env_file,
+)
 
 ADMIN_DIR = Path(__file__).resolve().parents[1] / "admin"
 TEMPLATES_DIR = ADMIN_DIR / "templates"
@@ -177,13 +187,17 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
 
     @router.get("/api/proxy/vllm-compose")
     async def proxy_vllm_compose():
-        settings = settings_from_overrides(state.global_overrides)
-        output_path = _vllm_compose_output_path()
+        settings = _vllm_settings_from_files(state)
+        compose_path = _vllm_compose_output_path()
+        env_path = _vllm_env_output_path()
+        env_values = vllm_environment(settings)
         return {
             "settings": settings.__dict__,
             "content": render_vllm_compose(settings),
-            "output_path": str(output_path) if output_path else None,
-            "writable": bool(output_path),
+            "env_content": render_vllm_env_file(env_values),
+            "output_path": str(compose_path) if compose_path else None,
+            "env_output_path": str(env_path) if env_path else None,
+            "writable": bool(compose_path or env_path),
         }
 
     @router.post("/api/proxy/vllm-compose/regenerate")
@@ -221,11 +235,14 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             state.global_overrides.update(vllm_updates)
         state.log("updated proxy admin settings")
         state.save()
-        compose_result = _write_vllm_compose_if_configured(state)
+        compose_settings = _vllm_settings_from_files(state, vllm_updates)
+        compose_result = _write_vllm_compose_if_configured(state, compose_settings)
         runtime_applied = ["proxy_admin_settings"]
         if proxy_updates:
             runtime_applied.append("proxy_backend_config")
-        if compose_result.get("written"):
+        if compose_result.get("env_written"):
+            runtime_applied.append("vllm_env_file")
+        if compose_result.get("compose_written"):
             runtime_applied.append("vllm_compose_file")
         return {
             "status": "ok",
@@ -544,11 +561,64 @@ def _extract_vllm_compose_updates(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _vllm_settings_payload(state: ProxyAdminState) -> dict[str, Any]:
-    settings = settings_from_overrides(state.global_overrides)
-    output_path = _vllm_compose_output_path()
+    settings = _vllm_settings_from_files(state)
+    compose_path = _vllm_compose_output_path()
+    env_path = _vllm_env_output_path()
     payload = settings.__dict__.copy()
-    payload["compose_output_path"] = str(output_path) if output_path else None
+    payload["compose_output_path"] = str(compose_path) if compose_path else None
+    payload["env_output_path"] = str(env_path) if env_path else None
     return payload
+
+
+def _vllm_settings_from_files(
+    state: ProxyAdminState,
+    updates: dict[str, Any] | None = None,
+):
+    values = vllm_environment(settings_from_overrides(state.global_overrides))
+    compose_path = _vllm_compose_output_path()
+    if compose_path is not None:
+        values.update(vllm_env_from_compose(compose_path))
+    env_path = _vllm_env_output_path()
+    if env_path is not None:
+        values.update(load_vllm_env_file(env_path))
+    if updates:
+        values.update(_vllm_env_from_admin_updates(updates))
+    return vllm_settings_from_env(values)
+
+
+def _vllm_env_from_admin_updates(updates: dict[str, Any]) -> dict[str, str]:
+    field_map = {
+        "vllm_image": "VLLM_IMAGE",
+        "vllm_model": "VLLM_MODEL",
+        "vllm_served_model_name": "VLLM_SERVED_MODEL_NAME",
+        "vllm_max_model_len": "VLLM_MAX_MODEL_LEN",
+        "vllm_gpu_memory_utilization": "VLLM_GPU_MEMORY_UTILIZATION",
+        "vllm_max_num_seqs": "VLLM_MAX_NUM_SEQS",
+        "vllm_port": "VLLM_PORT",
+        "vllm_hf_home": "VLLM_HF_HOME",
+        "vllm_generation_config": "VLLM_GENERATION_CONFIG",
+        "vllm_default_chat_template_kwargs": "VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS",
+        "vllm_trust_remote_code": "VLLM_TRUST_REMOTE_CODE",
+        "vllm_enforce_eager": "VLLM_ENFORCE_EAGER",
+        "vllm_enable_auto_tool_choice": "VLLM_ENABLE_AUTO_TOOL_CHOICE",
+        "vllm_tool_call_parser": "VLLM_TOOL_CALL_PARSER",
+        "vllm_reasoning_parser": "VLLM_REASONING_PARSER",
+    }
+    bool_fields = {
+        "vllm_trust_remote_code",
+        "vllm_enforce_eager",
+        "vllm_enable_auto_tool_choice",
+    }
+    env = {}
+    for field, env_key in field_map.items():
+        if field not in updates:
+            continue
+        value = updates[field]
+        if field in bool_fields:
+            env[env_key] = "true" if bool(value) else "false"
+        else:
+            env[env_key] = str(value)
+    return env
 
 
 def _vllm_compose_output_path() -> Path | None:
@@ -558,18 +628,57 @@ def _vllm_compose_output_path() -> Path | None:
     return Path(value)
 
 
-def _write_vllm_compose_if_configured(state: ProxyAdminState) -> dict[str, Any]:
-    output_path = _vllm_compose_output_path()
-    if output_path is None:
-        return {"written": False, "output_path": None}
-    settings = settings_from_overrides(state.global_overrides)
-    try:
-        written = write_vllm_compose(output_path, settings)
-    except Exception as exc:
-        state.log(f"failed to write vLLM compose file: {exc}")
-        return {"written": False, "output_path": str(output_path), "error": str(exc)}
-    state.log(f"wrote vLLM compose file {written}")
-    return {"written": True, "output_path": str(written)}
+def _vllm_env_output_path() -> Path | None:
+    value = os.getenv("OMLX_VLLM_ENV_OUTPUT_PATH", "").strip()
+    if not value:
+        return None
+    return Path(value)
+
+
+def _write_vllm_compose_if_configured(
+    state: ProxyAdminState,
+    settings=None,
+) -> dict[str, Any]:
+    compose_path = _vllm_compose_output_path()
+    env_path = _vllm_env_output_path()
+    result: dict[str, Any] = {
+        "written": False,
+        "compose_written": False,
+        "env_written": False,
+        "output_path": str(compose_path) if compose_path else None,
+        "env_output_path": str(env_path) if env_path else None,
+    }
+    if compose_path is None and env_path is None:
+        return result
+
+    settings = settings or _vllm_settings_from_files(state)
+    errors = []
+    if env_path is not None:
+        try:
+            written_env = write_vllm_env_file(env_path, vllm_environment(settings))
+        except Exception as exc:
+            state.log(f"failed to write vLLM env file: {exc}")
+            errors.append(str(exc))
+        else:
+            state.log(f"wrote vLLM env file {written_env}")
+            result["env_written"] = True
+            result["env_output_path"] = str(written_env)
+
+    if compose_path is not None:
+        try:
+            written_compose = write_vllm_compose(compose_path, settings)
+        except Exception as exc:
+            state.log(f"failed to write vLLM compose file: {exc}")
+            errors.append(str(exc))
+        else:
+            state.log(f"wrote vLLM compose file {written_compose}")
+            result["compose_written"] = True
+            result["output_path"] = str(written_compose)
+
+    result["written"] = bool(result["compose_written"] or result["env_written"])
+    if errors:
+        result["error"] = "; ".join(errors)
+    return result
 
 
 def _normalize_backend_url(value: str) -> str:

@@ -23,17 +23,19 @@ def test_top_level_help_documents_serve_options(capsys):
     assert "omni status [--compose-file PATH]" in output
     assert "omni logs [--target proxy|backend|both]" in output
     assert "omni restart [--target proxy|backend|both]" in output
+    assert "omni stop --target proxy|backend|both" in output
     assert "--backend {vllm,openai,ollama,llamacpp}" in output
     assert "--hf-home PATH" in output
     assert "--sse-keepalive-mode {ping,comment,off}" in output
 
 
-def test_parser_recognizes_status_logs_and_restart():
+def test_parser_recognizes_status_logs_restart_and_stop():
     parser = omni_cli.build_parser()
 
     status = parser.parse_args(["status"])
     logs = parser.parse_args(["logs", "--target", "backend", "-f"])
     restart = parser.parse_args(["restart", "--target", "backend"])
+    stop = parser.parse_args(["stop", "--target", "backend"])
 
     assert status.command == "status"
     assert logs.command == "logs"
@@ -41,6 +43,15 @@ def test_parser_recognizes_status_logs_and_restart():
     assert logs.follow is True
     assert restart.command == "restart"
     assert restart.target == "backend"
+    assert stop.command == "stop"
+    assert stop.target == "backend"
+
+
+def test_stop_requires_target():
+    parser = omni_cli.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["stop"])
 
 
 def test_default_control_compose_file_prefers_generated_vllm(monkeypatch, tmp_path):
@@ -69,6 +80,11 @@ def test_restart_services_for_target_maps_managed_services():
 def test_restart_backend_errors_for_external_backend_stack():
     with pytest.raises(SystemExit, match="external or not managed"):
         omni_cli.restart_services_for_target("backend", ["omlx-proxy"])
+
+
+def test_stop_backend_errors_for_external_backend_stack():
+    with pytest.raises(SystemExit, match="external or not managed"):
+        omni_cli.services_for_target("backend", ["omlx-proxy"])
 
 
 def test_status_command_runs_compose_ps(monkeypatch, tmp_path):
@@ -243,6 +259,124 @@ def test_restart_command_restarts_backend_service(monkeypatch, tmp_path):
             {},
         ),
     ]
+
+
+def test_stop_command_stops_proxy_service(monkeypatch, tmp_path):
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}")
+    calls = []
+
+    class Result:
+        stdout = "omlx-proxy\nvllm\n"
+
+    def fake_run(command, check, **kwargs):
+        calls.append((command, check, kwargs))
+        return Result()
+
+    monkeypatch.setattr(omni_cli.subprocess, "run", fake_run)
+    args = omni_cli.build_parser().parse_args([
+        "stop",
+        "--target",
+        "proxy",
+        "--compose-file",
+        str(compose_file),
+    ])
+
+    assert omni_cli.stop_command(args) == 0
+    assert calls == [
+        (
+            ["docker", "compose", "-f", str(compose_file), "config", "--services"],
+            True,
+            {"capture_output": True, "text": True},
+        ),
+        (
+            ["docker", "compose", "-f", str(compose_file), "stop", "omlx-proxy"],
+            True,
+            {},
+        ),
+    ]
+
+
+def test_stop_command_stops_backend_service(monkeypatch, tmp_path):
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}")
+    calls = []
+
+    class Result:
+        stdout = "omlx-proxy\nvllm\n"
+
+    def fake_run(command, check, **kwargs):
+        calls.append((command, check, kwargs))
+        return Result()
+
+    monkeypatch.setattr(omni_cli.subprocess, "run", fake_run)
+    args = omni_cli.build_parser().parse_args([
+        "stop",
+        "--target",
+        "backend",
+        "--compose-file",
+        str(compose_file),
+    ])
+
+    assert omni_cli.stop_command(args) == 0
+    assert calls == [
+        (
+            ["docker", "compose", "-f", str(compose_file), "config", "--services"],
+            True,
+            {"capture_output": True, "text": True},
+        ),
+        (
+            ["docker", "compose", "-f", str(compose_file), "stop", "vllm"],
+            True,
+            {},
+        ),
+    ]
+
+
+def test_stop_command_stops_all_services_without_discovery(monkeypatch, tmp_path):
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}")
+    calls = []
+
+    def fake_run(command, check, **kwargs):
+        calls.append((command, check, kwargs))
+
+    monkeypatch.setattr(omni_cli.subprocess, "run", fake_run)
+    args = omni_cli.build_parser().parse_args([
+        "stop",
+        "--target",
+        "both",
+        "--compose-file",
+        str(compose_file),
+    ])
+
+    assert omni_cli.stop_command(args) == 0
+    assert calls == [
+        (["docker", "compose", "-f", str(compose_file), "stop"], True, {})
+    ]
+
+
+def test_stop_backend_errors_for_external_backend_command(monkeypatch, tmp_path):
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}")
+
+    class Result:
+        stdout = "omlx-proxy\n"
+
+    def fake_run(command, check, **kwargs):
+        return Result()
+
+    monkeypatch.setattr(omni_cli.subprocess, "run", fake_run)
+    args = omni_cli.build_parser().parse_args([
+        "stop",
+        "--target",
+        "backend",
+        "--compose-file",
+        str(compose_file),
+    ])
+
+    with pytest.raises(SystemExit, match="external or not managed"):
+        omni_cli.stop_command(args)
 
 
 def test_vllm_generate_only_writes_compose(tmp_path, capsys):

@@ -12,6 +12,13 @@ from omlx.proxy.backend import OpenAIBackend
 from omlx.proxy.config import ProxyConfig
 from omlx.proxy.metrics import parse_prometheus_text, select_prometheus_metrics
 from omlx.proxy.scaling import scale_token_count
+from omlx.proxy.vllm_compose import (
+    VllmComposeSettings,
+    load_vllm_env_file,
+    vllm_environment,
+    write_vllm_compose,
+    write_vllm_env_file,
+)
 
 
 def test_proxy_app_import_does_not_require_env(monkeypatch):
@@ -498,6 +505,123 @@ async def test_proxy_backend_config_rejects_invalid_url(monkeypatch, tmp_path):
         response = await client.get("/admin/api/proxy/config")
         assert response.status_code == 200
         assert response.json()["backend_url"] == "http://backend/v1"
+
+
+@pytest.mark.asyncio
+async def test_admin_vllm_settings_reflect_generated_env_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+    compose_path = tmp_path / "docker-compose.vllm.yml"
+    env_path = tmp_path / "docker-compose.vllm.env"
+    monkeypatch.setenv("OMLX_VLLM_COMPOSE_OUTPUT_PATH", str(compose_path))
+    monkeypatch.setenv("OMLX_VLLM_ENV_OUTPUT_PATH", str(env_path))
+
+    write_vllm_compose(
+        compose_path,
+        VllmComposeSettings(
+            model="example/compose-model",
+            served_model_name="compose-name",
+            max_model_len=16384,
+        ),
+    )
+    write_vllm_env_file(
+        env_path,
+        vllm_environment(
+            VllmComposeSettings(
+                model="example/env-model",
+                served_model_name="env-name",
+                max_model_len=32768,
+                hf_home="/cache/from-env",
+            )
+        ),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/admin/api/global-settings")
+        assert response.status_code == 200
+        vllm = response.json()["proxy"]["vllm"]
+        assert vllm["model"] == "example/env-model"
+        assert vllm["served_model_name"] == "env-name"
+        assert vllm["max_model_len"] == 32768
+        assert vllm["hf_home"] == "/cache/from-env"
+        assert vllm["compose_output_path"] == str(compose_path)
+        assert vllm["env_output_path"] == str(env_path)
+
+        response = await client.get("/admin/api/proxy/vllm-compose")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["settings"]["model"] == "example/env-model"
+        assert data["env_output_path"] == str(env_path)
+        assert "VLLM_MODEL=example/env-model" in data["env_content"]
+
+
+@pytest.mark.asyncio
+async def test_admin_vllm_settings_save_writes_env_and_compose(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+    compose_path = tmp_path / "docker-compose.vllm.yml"
+    env_path = tmp_path / "docker-compose.vllm.env"
+    monkeypatch.setenv("OMLX_VLLM_COMPOSE_OUTPUT_PATH", str(compose_path))
+    monkeypatch.setenv("OMLX_VLLM_ENV_OUTPUT_PATH", str(env_path))
+
+    write_vllm_env_file(
+        env_path,
+        vllm_environment(
+            VllmComposeSettings(
+                model="example/previous-model",
+                served_model_name="previous-name",
+                tool_call_parser="existing-parser",
+                reasoning_parser="existing-reasoner",
+            )
+        ),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/admin/api/global-settings",
+            json={
+                "proxy_backend_url": "http://backend/v1",
+                "proxy_backend_type": "vllm",
+                "vllm_model": "example/admin-model",
+                "vllm_served_model_name": "admin-name",
+                "vllm_max_model_len": 24576,
+                "vllm_gpu_memory_utilization": 0.72,
+                "vllm_max_num_seqs": 8,
+                "vllm_hf_home": "/cache/admin",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["requires_restart"] is True
+    assert "vllm_env_file" in data["runtime_applied"]
+    assert "vllm_compose_file" in data["runtime_applied"]
+    assert data["compose"]["env_written"] is True
+    assert data["compose"]["compose_written"] is True
+
+    env = load_vllm_env_file(env_path)
+    assert env["VLLM_MODEL"] == "example/admin-model"
+    assert env["VLLM_SERVED_MODEL_NAME"] == "admin-name"
+    assert env["VLLM_MAX_MODEL_LEN"] == "24576"
+    assert env["VLLM_HF_HOME"] == "/cache/admin"
+    assert env["VLLM_TOOL_CALL_PARSER"] == "existing-parser"
+    assert env["VLLM_REASONING_PARSER"] == "existing-reasoner"
+
+    content = compose_path.read_text(encoding="utf-8")
+    assert 'OMLX_VLLM_ENV_OUTPUT_PATH: "/compose-output/docker-compose.vllm.env"' in content
+    assert "example/admin-model" in content
 
 
 @pytest.mark.asyncio
