@@ -40,7 +40,7 @@ class ClaudeCodeIntegration(Integration):
         # Use the actual omlx API key so Claude Code authenticates correctly.
         # Fallback to "omlx" only when no API key is configured (open server).
         env["ANTHROPIC_AUTH_TOKEN"] = ctx.auth_token
-        env["ANTHROPIC_API_KEY"] = ""
+        env["ANTHROPIC_API_KEY"] = ctx.auth_token
         env["CLAUDE_CODE_ATTRIBUTION_HEADER"] = "0"
         # Large timeout for local model inference (model loading + generation).
         env["API_TIMEOUT_MS"] = "3000000"
@@ -61,6 +61,13 @@ class ClaudeCodeIntegration(Integration):
         subagent_model = haiku_model or sonnet_model or opus_model
         if subagent_model:
             env["CLAUDE_CODE_SUBAGENT_MODEL"] = subagent_model
+
+        primary_model = sonnet_model or opus_model
+        if primary_model:
+            env["ANTHROPIC_MODEL"] = primary_model
+        small_fast_model = haiku_model or sonnet_model or opus_model
+        if small_fast_model:
+            env["ANTHROPIC_SMALL_FAST_MODEL"] = small_fast_model
 
         if ctx.context_window:
             env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(ctx.context_window)

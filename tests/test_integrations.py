@@ -1152,11 +1152,13 @@ class TestClaudeCodeIntegration:
         env = captured["env"]
         assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8000"
         assert env["ANTHROPIC_AUTH_TOKEN"] == "secret"
-        assert env["ANTHROPIC_API_KEY"] == ""
+        assert env["ANTHROPIC_API_KEY"] == "secret"
         assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "qwen3.5"
         assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "qwen3.5"
         assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "qwen3.5"
         assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "qwen3.5"
+        assert env["ANTHROPIC_MODEL"] == "qwen3.5"
+        assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "qwen3.5"
         assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "131072"
         # Bundled-python vars must be stripped so claude code subprocess hooks
         # don't inherit our cpython-3.11 stack.
@@ -1194,6 +1196,8 @@ class TestClaudeCodeIntegration:
         assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "sonnet-local"
         assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "haiku-local"
         assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "haiku-local"
+        assert env["ANTHROPIC_MODEL"] == "sonnet-local"
+        assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "haiku-local"
 
     def test_launch_open_server_uses_omlx_token(self):
         cc = ClaudeCodeIntegration()
@@ -1234,6 +1238,8 @@ class TestClaudeCodeIntegration:
         env = captured["env"]
         assert "ANTHROPIC_DEFAULT_OPUS_MODEL" not in env
         assert "CLAUDE_CODE_SUBAGENT_MODEL" not in env
+        assert "ANTHROPIC_MODEL" not in env
+        assert "ANTHROPIC_SMALL_FAST_MODEL" not in env
 
     def test_launch_default_argv_has_no_extra(self):
         cc = ClaudeCodeIntegration()

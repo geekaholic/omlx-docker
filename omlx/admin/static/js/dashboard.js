@@ -1998,7 +1998,8 @@
             //  - unwraps existing IPv6 brackets so we can re-bracket consistently
             //  - maps unspecified bind addresses (0.0.0.0, ::) to a placeholder
             //    since they are not routable from a client
-            //  - maps `localhost` to 127.0.0.1 for consistency with other URLs
+            //  - preserves `localhost` because Docker Desktop may publish IPv6
+            //    localhost separately from a host process on 127.0.0.1
             //  - bracket-wraps IPv6 addresses per RFC 3986 (`http://[::1]:8000/v1`)
             formatDisplayHost(host) {
                 const value = (host || '').trim();
@@ -2009,13 +2010,12 @@
                     : value;
 
                 if (unwrapped === '0.0.0.0' || unwrapped === '::') return 'your-ip-address';
-                if (unwrapped === 'localhost') return '127.0.0.1';
                 if (unwrapped.includes(':')) return `[${unwrapped}]`;
                 return unwrapped;
             },
 
             get displayHost() {
-                const host = this.selectedAlias || this.stats.host || '127.0.0.1';
+                const host = this.selectedAlias || this.stats.host || 'localhost';
                 return this.formatDisplayHost(host);
             },
 
@@ -2221,21 +2221,29 @@
             get claudeCodeCommand() {
                 const mode = this.globalSettings.claude_code.mode;
                 if (mode === 'cloud') {
-                    return 'env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_DEFAULT_OPUS_MODEL -u ANTHROPIC_DEFAULT_SONNET_MODEL -u ANTHROPIC_DEFAULT_HAIKU_MODEL -u API_TIMEOUT_MS -u CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC claude';
+                    return 'env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_MODEL -u ANTHROPIC_SMALL_FAST_MODEL -u ANTHROPIC_DEFAULT_OPUS_MODEL -u ANTHROPIC_DEFAULT_SONNET_MODEL -u ANTHROPIC_DEFAULT_HAIKU_MODEL -u CLAUDE_CODE_SUBAGENT_MODEL -u API_TIMEOUT_MS -u CLAUDE_CODE_ATTRIBUTION_HEADER -u CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC claude';
                 }
                 // Local mode
                 const port = this.stats.port || 8000;
                 const opusModel = this.globalSettings.claude_code.opus_model || 'select-a-model';
                 const sonnetModel = this.globalSettings.claude_code.sonnet_model || 'select-a-model';
                 const haikuModel = this.globalSettings.claude_code.haiku_model || 'select-a-model';
+                const selected = (value) => value && value !== 'select-a-model';
+                const primaryModel = selected(sonnetModel) ? sonnetModel : opusModel;
+                const smallFastModel = selected(haikuModel)
+                    ? haikuModel
+                    : (selected(sonnetModel) ? sonnetModel : opusModel);
                 const parts = [];
                 parts.push(this.shellEnvAssign('ANTHROPIC_BASE_URL', `http://${this.displayHost}:${port}`));
-                if (this.stats.api_key) {
-                    parts.push(this.shellEnvAssign('ANTHROPIC_AUTH_TOKEN', this.stats.api_key));
-                }
+                parts.push(this.shellEnvAssign('ANTHROPIC_AUTH_TOKEN', this.stats.api_key || 'omlx'));
+                parts.push(this.shellEnvAssign('ANTHROPIC_API_KEY', this.stats.api_key || 'omlx'));
+                parts.push(this.shellEnvAssign('ANTHROPIC_MODEL', primaryModel));
+                parts.push(this.shellEnvAssign('ANTHROPIC_SMALL_FAST_MODEL', smallFastModel));
                 parts.push(this.shellEnvAssign('ANTHROPIC_DEFAULT_OPUS_MODEL', opusModel));
                 parts.push(this.shellEnvAssign('ANTHROPIC_DEFAULT_SONNET_MODEL', sonnetModel));
                 parts.push(this.shellEnvAssign('ANTHROPIC_DEFAULT_HAIKU_MODEL', haikuModel));
+                parts.push(this.shellEnvAssign('CLAUDE_CODE_SUBAGENT_MODEL', smallFastModel));
+                parts.push('CLAUDE_CODE_ATTRIBUTION_HEADER=0');
                 parts.push('API_TIMEOUT_MS=3000000');
                 parts.push('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1');
                 parts.push('claude');

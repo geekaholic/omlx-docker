@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
@@ -65,11 +65,13 @@ def create_app(
 
     async def verify_proxy_key(
         credentials: HTTPAuthorizationCredentials = Depends(security),
+        x_api_key: str | None = Header(default=None),
     ) -> bool:
         expected = backend.config.proxy_api_key
         if not expected:
             return True
-        if credentials is None or credentials.credentials != expected:
+        bearer_token = credentials.credentials if credentials else None
+        if bearer_token != expected and x_api_key != expected:
             raise HTTPException(status_code=401, detail="Invalid API key")
         return True
 
@@ -145,6 +147,38 @@ def create_app(
     @app.get("/v1/mcp/tools", dependencies=[Depends(verify_proxy_key)])
     async def list_mcp_tools():
         return {"tools": [], "count": 0}
+
+    @app.api_route(
+        "/v1/messages",
+        methods=["GET", "HEAD", "OPTIONS"],
+        dependencies=[Depends(verify_proxy_key)],
+    )
+    @app.api_route(
+        "/v1/messages/count_tokens",
+        methods=["GET", "HEAD", "OPTIONS"],
+        dependencies=[Depends(verify_proxy_key)],
+    )
+    async def anthropic_endpoint_probe(request: Request):
+        headers = {"allow": "GET, HEAD, OPTIONS, POST"}
+        if request.method in {"HEAD", "OPTIONS"}:
+            return Response(status_code=204, headers=headers)
+        if request.url.path.endswith("/count_tokens"):
+            return JSONResponse(
+                {
+                    "type": "endpoint",
+                    "endpoint": "/v1/messages/count_tokens",
+                    "methods": ["POST"],
+                },
+                headers=headers,
+            )
+        return JSONResponse(
+            {
+                "type": "endpoint",
+                "endpoint": "/v1/messages",
+                "methods": ["POST"],
+            },
+            headers=headers,
+        )
 
     @app.post("/v1/messages", dependencies=[Depends(verify_proxy_key)])
     async def anthropic_messages(request: Request):

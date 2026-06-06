@@ -73,6 +73,53 @@ def test_scale_token_count_uses_target_context_ratio():
 
 
 @pytest.mark.asyncio
+async def test_anthropic_endpoint_probes_do_not_return_405():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"probe should not reach backend: {request.url.path}")
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        for path in ("/v1/messages", "/v1/messages/count_tokens"):
+            get_response = await client.get(path)
+            assert get_response.status_code == 200
+            assert get_response.json()["endpoint"] == path
+
+            head_response = await client.head(path)
+            assert head_response.status_code == 204
+
+            options_response = await client.options(path)
+            assert options_response.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_proxy_auth_accepts_x_api_key_for_claude_code():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/models"
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    config = ProxyConfig(backend_url="http://backend/v1", proxy_api_key="secret")
+    backend = OpenAIBackend(
+        config=config,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    app = create_app(config=config, backend=backend)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        missing = await client.get("/v1/models")
+        assert missing.status_code == 401
+
+        response = await client.get("/v1/models", headers={"x-api-key": "secret"})
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_anthropic_messages_non_stream_translates_response():
     seen_request = {}
 
@@ -243,6 +290,23 @@ async def test_proxy_serves_admin_chat_page():
     assert response.status_code == 200
     assert "oMLX" in response.text
     assert "/v1/chat/completions" in response.text
+
+
+@pytest.mark.asyncio
+async def test_proxy_server_info_prefers_localhost_aliases():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/admin/api/server-info")
+
+    assert response.status_code == 200
+    assert response.json()["aliases"][:3] == ["::1", "localhost", "127.0.0.1"]
 
 
 @pytest.mark.asyncio

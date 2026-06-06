@@ -129,7 +129,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             "host": backend.config.host,
             "port": backend.config.port,
             "backend_url": backend.config.normalized_backend_url,
-            "aliases": ["localhost", "127.0.0.1"],
+            "aliases": ["::1", "localhost", "127.0.0.1"],
             "capabilities": _capabilities(),
         }
 
@@ -888,7 +888,7 @@ def _global_settings_payload(
             "host": config.host,
             "port": config.port,
             "log_level": overrides.get("log_level", "info"),
-            "server_aliases": ["localhost", "127.0.0.1"],
+            "server_aliases": ["::1", "localhost", "127.0.0.1"],
             "sse_keepalive_mode": config.sse_keepalive_mode,
         },
         "proxy": {
