@@ -538,6 +538,106 @@ def test_admin_vllm_writer_keeps_template_relative_paths(tmp_path):
     assert '"../docker:/compose-output"' in content
 
 
+def test_vllm_serve_maps_advanced_flags_to_env_and_compose(tmp_path):
+    compose_file = tmp_path / "docker-compose.vllm.yml"
+    env_file = compose_file.with_suffix(".env")
+
+    result = omni_cli.main([
+        "serve",
+        "--backend",
+        "vllm",
+        "--compose-file",
+        str(compose_file),
+        "--dtype",
+        "bfloat16",
+        "--tokenizer",
+        "example/tokenizer",
+        "--max-num-batched-tokens",
+        "8192",
+        "--enable-chunked-prefill",
+        "--no-enable-prefix-caching",
+        "--kv-cache-dtype",
+        "fp8",
+        "--cpu-offload-gb",
+        "8",
+        "--tensor-parallel-size",
+        "2",
+        "--http-proxy",
+        "http://proxy:8080",
+        "--hf-endpoint",
+        "https://hf.example",
+        "--extra-args-json",
+        '["--foo","bar baz"]',
+        "--generate-only",
+        "--no-build",
+    ])
+
+    assert result == 0
+    env = omni_cli.load_env_file(env_file)
+    assert env["VLLM_DTYPE"] == "bfloat16"
+    assert env["VLLM_TOKENIZER"] == "example/tokenizer"
+    assert env["VLLM_MAX_NUM_BATCHED_TOKENS"] == "8192"
+    assert env["VLLM_ENABLE_CHUNKED_PREFILL"] == "true"
+    assert env["VLLM_ENABLE_PREFIX_CACHING"] == "false"
+    assert env["VLLM_KV_CACHE_DTYPE"] == "fp8"
+    assert env["VLLM_CPU_OFFLOAD_GB"] == "8.0"
+    assert env["VLLM_TENSOR_PARALLEL_SIZE"] == "2"
+    assert env["VLLM_HTTP_PROXY"] == "http://proxy:8080"
+    assert env["VLLM_HF_ENDPOINT"] == "https://hf.example"
+    assert env["VLLM_EXTRA_ARGS_JSON"] == '["--foo","bar baz"]'
+
+    content = compose_file.read_text()
+    assert "--dtype" in content
+    assert "--max-num-batched-tokens" in content
+    assert "--no-enable-prefix-caching" in content
+    assert "HF_ENDPOINT" in content
+    assert "HTTP_PROXY" in content
+
+
+
+def test_vllm_compose_sanitizes_empty_runtime_url_env(tmp_path):
+    compose_file = tmp_path / "docker-compose.vllm.yml"
+
+    omni_cli.write_vllm_compose_for_path(compose_file, VllmComposeSettings())
+
+    content = compose_file.read_text()
+    vllm_environment = content.split("  vllm:", 1)[1].split("    volumes:", 1)[0]
+    assert "\n      HF_ENDPOINT:" not in vllm_environment
+    assert "\n      HTTP_PROXY:" not in vllm_environment
+    assert "\n      HTTPS_PROXY:" not in vllm_environment
+    assert "\n      REQUESTS_CA_BUNDLE:" not in vllm_environment
+    assert "\n      SSL_CERT_FILE:" not in vllm_environment
+    assert 'export HF_ENDPOINT="$${VLLM_HF_ENDPOINT}"' in content
+    assert "unset HF_ENDPOINT" in content
+    assert "unset REQUESTS_CA_BUNDLE" in content
+    assert "unset VLLM_IMAGE VLLM_MODEL" in content
+    assert "unset OMLX_PROXY_PORT OMLX_PROXY_API_KEY" in content
+
+
+def test_vllm_settings_from_args_maps_advanced_flags():
+    args = parse_args(
+        "--backend",
+        "vllm",
+        "--dtype",
+        "float16",
+        "--max-num-batched-tokens",
+        "4096",
+        "--enable-prefix-caching",
+        "--tensor-parallel-size",
+        "4",
+        "--hf-endpoint",
+        "https://hf.example",
+    )
+
+    settings = omni_cli.vllm_settings_from_args(args)
+
+    assert settings.dtype == "float16"
+    assert settings.max_num_batched_tokens == "4096"
+    assert settings.enable_prefix_caching is True
+    assert settings.tensor_parallel_size == 4
+    assert settings.hf_endpoint == "https://hf.example"
+
+
 def test_ollama_proxy_backend_defaults(capsys):
     args = parse_args("--backend", "ollama", "--generate-only", "--no-build")
 

@@ -74,6 +74,31 @@ vLLM serve options:
   --enable-auto-tool-choice
   --tool-call-parser NAME
   --reasoning-parser NAME
+  --dtype {auto,bfloat16,float,float16,float32,half}
+  --tokenizer TOKENIZER
+  --tokenizer-mode MODE
+  --revision REVISION
+  --load-format FORMAT
+  --quantization QUANTIZATION
+  --download-dir PATH
+  --max-num-batched-tokens TOKENS
+  --enable-chunked-prefill | --no-enable-chunked-prefill
+  --enable-prefix-caching | --no-enable-prefix-caching
+  --kv-cache-dtype DTYPE
+  --cpu-offload-gb GB
+  --swap-space GB
+  --tensor-parallel-size COUNT
+  --pipeline-parallel-size COUNT
+  --uvicorn-log-level LEVEL
+  --disable-log-stats
+  --extra-args-json JSON_ARRAY
+
+Proxy/network options:
+  --http-proxy URL
+  --https-proxy URL
+  --no-proxy HOSTS
+  --ca-bundle PATH
+  --hf-endpoint URL
 
 Proxy behavior options:
   --context-scaling
@@ -212,6 +237,71 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve.add_argument("--tool-call-parser", default=None, help="vLLM tool call parser")
     serve.add_argument("--reasoning-parser", default=None, help="vLLM reasoning parser")
+    serve.add_argument(
+        "--dtype",
+        choices=["auto", "bfloat16", "float", "float16", "float32", "half"],
+        default=None,
+        help="vLLM model dtype",
+    )
+    serve.add_argument("--tokenizer", default=None, help="vLLM tokenizer id or path")
+    serve.add_argument("--tokenizer-mode", default=None, help="vLLM tokenizer mode")
+    serve.add_argument("--revision", default=None, help="Hugging Face model revision")
+    serve.add_argument("--load-format", default=None, help="vLLM load format")
+    serve.add_argument("--quantization", default=None, help="vLLM quantization mode")
+    serve.add_argument("--download-dir", default=None, help="vLLM download directory")
+    serve.add_argument(
+        "--max-num-batched-tokens",
+        default=None,
+        help="vLLM max tokens processed per scheduler iteration",
+    )
+    serve.add_argument(
+        "--enable-chunked-prefill",
+        dest="enable_chunked_prefill",
+        action="store_true",
+        default=None,
+        help="Pass --enable-chunked-prefill to vLLM",
+    )
+    serve.add_argument(
+        "--no-enable-chunked-prefill",
+        dest="enable_chunked_prefill",
+        action="store_false",
+        help="Pass --no-enable-chunked-prefill to vLLM",
+    )
+    serve.add_argument(
+        "--enable-prefix-caching",
+        dest="enable_prefix_caching",
+        action="store_true",
+        default=None,
+        help="Pass --enable-prefix-caching to vLLM",
+    )
+    serve.add_argument(
+        "--no-enable-prefix-caching",
+        dest="enable_prefix_caching",
+        action="store_false",
+        help="Pass --no-enable-prefix-caching to vLLM",
+    )
+    serve.add_argument("--kv-cache-dtype", default=None, help="vLLM KV cache dtype")
+    serve.add_argument("--cpu-offload-gb", type=float, default=None, help="CPU offload GB per GPU")
+    serve.add_argument("--swap-space", type=float, default=None, help="CPU swap space GB per GPU")
+    serve.add_argument("--tensor-parallel-size", type=int, default=None, help="vLLM tensor parallel size")
+    serve.add_argument("--pipeline-parallel-size", type=int, default=None, help="vLLM pipeline parallel size")
+    serve.add_argument("--uvicorn-log-level", default=None, help="vLLM API server log level")
+    serve.add_argument(
+        "--disable-log-stats",
+        action="store_true",
+        default=None,
+        help="Pass --disable-log-stats to vLLM",
+    )
+    serve.add_argument(
+        "--extra-args-json",
+        default=None,
+        help='Raw vLLM args as a JSON array, appended last, e.g. ["--foo","bar"]',
+    )
+    serve.add_argument("--http-proxy", default=None, help="HTTP proxy for proxy and vLLM containers")
+    serve.add_argument("--https-proxy", default=None, help="HTTPS proxy for proxy and vLLM containers")
+    serve.add_argument("--no-proxy", default=None, help="Comma-separated hosts that bypass proxy")
+    serve.add_argument("--ca-bundle", default=None, help="CA bundle path for TLS verification")
+    serve.add_argument("--hf-endpoint", default=None, help="Hugging Face endpoint for vLLM downloads")
     serve.add_argument(
         "--context-scaling",
         action="store_true",
@@ -395,6 +485,26 @@ def vllm_cli_environment(args: argparse.Namespace) -> dict[str, str]:
         "default_chat_template_kwargs": "VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS",
         "tool_call_parser": "VLLM_TOOL_CALL_PARSER",
         "reasoning_parser": "VLLM_REASONING_PARSER",
+        "dtype": "VLLM_DTYPE",
+        "tokenizer": "VLLM_TOKENIZER",
+        "tokenizer_mode": "VLLM_TOKENIZER_MODE",
+        "revision": "VLLM_REVISION",
+        "load_format": "VLLM_LOAD_FORMAT",
+        "quantization": "VLLM_QUANTIZATION",
+        "download_dir": "VLLM_DOWNLOAD_DIR",
+        "max_num_batched_tokens": "VLLM_MAX_NUM_BATCHED_TOKENS",
+        "kv_cache_dtype": "VLLM_KV_CACHE_DTYPE",
+        "cpu_offload_gb": "VLLM_CPU_OFFLOAD_GB",
+        "swap_space": "VLLM_SWAP_SPACE",
+        "tensor_parallel_size": "VLLM_TENSOR_PARALLEL_SIZE",
+        "pipeline_parallel_size": "VLLM_PIPELINE_PARALLEL_SIZE",
+        "uvicorn_log_level": "VLLM_UVICORN_LOG_LEVEL",
+        "extra_args_json": "VLLM_EXTRA_ARGS_JSON",
+        "http_proxy": "VLLM_HTTP_PROXY",
+        "https_proxy": "VLLM_HTTPS_PROXY",
+        "no_proxy": "VLLM_NO_PROXY",
+        "ca_bundle": "VLLM_CA_BUNDLE",
+        "hf_endpoint": "VLLM_HF_ENDPOINT",
         "proxy_port": "OMLX_PROXY_PORT",
         "api_key": "OMLX_PROXY_API_KEY",
         "backend_api_key": "OMLX_BACKEND_API_KEY",
@@ -413,6 +523,12 @@ def vllm_cli_environment(args: argparse.Namespace) -> dict[str, str]:
         values["VLLM_ENFORCE_EAGER"] = _bool_str(args.enforce_eager)
     if args.enable_auto_tool_choice is not None:
         values["VLLM_ENABLE_AUTO_TOOL_CHOICE"] = _bool_str(args.enable_auto_tool_choice)
+    if args.enable_chunked_prefill is not None:
+        values["VLLM_ENABLE_CHUNKED_PREFILL"] = _bool_str(args.enable_chunked_prefill)
+    if args.enable_prefix_caching is not None:
+        values["VLLM_ENABLE_PREFIX_CACHING"] = _bool_str(args.enable_prefix_caching)
+    if args.disable_log_stats is not None:
+        values["VLLM_DISABLE_LOG_STATS"] = _bool_str(args.disable_log_stats)
     if args.context_scaling:
         values["OMLX_CONTEXT_SCALING"] = "true"
     return values

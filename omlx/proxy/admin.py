@@ -86,6 +86,8 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
     """Attach admin UI routes and static assets to a proxy FastAPI app."""
     state_path = Path(os.getenv("OMLX_PROXY_STATE_PATH", "/data/proxy-state.json"))
     state = ProxyAdminState.load(state_path)
+    _apply_env_sampling_overrides(state)
+    app.state.proxy_admin_state = state
     _apply_proxy_backend_overrides(backend, config, state)
     templates = _templates()
     router = APIRouter(prefix="/admin", tags=["proxy-admin"])
@@ -230,7 +232,12 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             state.global_overrides["target_context_size"] = payload[
                 "claude_code_target_context_size"
             ]
-        vllm_updates = _extract_vllm_compose_updates(payload)
+        backend_type = proxy_updates.get("proxy_backend_type") or _proxy_backend_type(state)
+        vllm_updates = (
+            _extract_vllm_compose_updates(payload)
+            if backend_type == "vllm"
+            else {}
+        )
         if vllm_updates:
             state.global_overrides.update(vllm_updates)
         state.log("updated proxy admin settings")
@@ -498,6 +505,35 @@ def _apply_proxy_backend_overrides(
         backend.config = base_config
 
 
+def _apply_env_sampling_overrides(state: ProxyAdminState) -> None:
+    env_map = {
+        "OMLX_SAMPLING_MAX_TOKENS": "sampling_max_tokens",
+        "OMLX_SAMPLING_TEMPERATURE": "sampling_temperature",
+        "OMLX_SAMPLING_TOP_P": "sampling_top_p",
+        "OMLX_SAMPLING_TOP_K": "sampling_top_k",
+        "OMLX_SAMPLING_REPETITION_PENALTY": "sampling_repetition_penalty",
+    }
+    for env_key, override_key in env_map.items():
+        value = os.getenv(env_key)
+        if value is None or value == "" or override_key in state.global_overrides:
+            continue
+        state.global_overrides[override_key] = _coerce_sampling_env_value(
+            override_key,
+            value,
+        )
+
+
+
+def _coerce_sampling_env_value(key: str, value: str) -> int | float | str:
+    try:
+        if key in {"sampling_max_tokens", "sampling_top_k"}:
+            return int(value)
+        return float(value)
+    except ValueError:
+        return value
+
+
+
 def _config_with_proxy_overrides(
     config: ProxyConfig,
     state: ProxyAdminState,
@@ -549,6 +585,34 @@ def _extract_vllm_compose_updates(payload: dict[str, Any]) -> dict[str, Any]:
         "vllm_enable_auto_tool_choice",
         "vllm_tool_call_parser",
         "vllm_reasoning_parser",
+        "vllm_dtype",
+        "vllm_tokenizer",
+        "vllm_tokenizer_mode",
+        "vllm_revision",
+        "vllm_load_format",
+        "vllm_quantization",
+        "vllm_download_dir",
+        "vllm_max_num_batched_tokens",
+        "vllm_enable_chunked_prefill",
+        "vllm_enable_prefix_caching",
+        "vllm_kv_cache_dtype",
+        "vllm_cpu_offload_gb",
+        "vllm_swap_space",
+        "vllm_tensor_parallel_size",
+        "vllm_pipeline_parallel_size",
+        "vllm_uvicorn_log_level",
+        "vllm_disable_log_stats",
+        "vllm_extra_args_json",
+        "network_http_proxy",
+        "network_https_proxy",
+        "network_no_proxy",
+        "network_ca_bundle",
+        "huggingface_endpoint",
+        "sampling_max_tokens",
+        "sampling_temperature",
+        "sampling_top_p",
+        "sampling_top_k",
+        "sampling_repetition_penalty",
     }
     updates = {key: payload[key] for key in fields if key in payload}
     if not updates:
@@ -557,6 +621,8 @@ def _extract_vllm_compose_updates(payload: dict[str, Any]) -> dict[str, Any]:
         updates["vllm_max_model_len"] = payload["sampling_max_context_window"]
     if "max_concurrent_requests" in payload and "vllm_max_num_seqs" not in updates:
         updates["vllm_max_num_seqs"] = payload["max_concurrent_requests"]
+    if "chunked_prefill" in payload and "vllm_enable_chunked_prefill" not in updates:
+        updates["vllm_enable_chunked_prefill"] = payload["chunked_prefill"]
     return updates
 
 
@@ -603,11 +669,46 @@ def _vllm_env_from_admin_updates(updates: dict[str, Any]) -> dict[str, str]:
         "vllm_enable_auto_tool_choice": "VLLM_ENABLE_AUTO_TOOL_CHOICE",
         "vllm_tool_call_parser": "VLLM_TOOL_CALL_PARSER",
         "vllm_reasoning_parser": "VLLM_REASONING_PARSER",
+        "vllm_dtype": "VLLM_DTYPE",
+        "vllm_tokenizer": "VLLM_TOKENIZER",
+        "vllm_tokenizer_mode": "VLLM_TOKENIZER_MODE",
+        "vllm_revision": "VLLM_REVISION",
+        "vllm_load_format": "VLLM_LOAD_FORMAT",
+        "vllm_quantization": "VLLM_QUANTIZATION",
+        "vllm_download_dir": "VLLM_DOWNLOAD_DIR",
+        "vllm_max_num_batched_tokens": "VLLM_MAX_NUM_BATCHED_TOKENS",
+        "vllm_enable_chunked_prefill": "VLLM_ENABLE_CHUNKED_PREFILL",
+        "vllm_enable_prefix_caching": "VLLM_ENABLE_PREFIX_CACHING",
+        "vllm_kv_cache_dtype": "VLLM_KV_CACHE_DTYPE",
+        "vllm_cpu_offload_gb": "VLLM_CPU_OFFLOAD_GB",
+        "vllm_swap_space": "VLLM_SWAP_SPACE",
+        "vllm_tensor_parallel_size": "VLLM_TENSOR_PARALLEL_SIZE",
+        "vllm_pipeline_parallel_size": "VLLM_PIPELINE_PARALLEL_SIZE",
+        "vllm_uvicorn_log_level": "VLLM_UVICORN_LOG_LEVEL",
+        "vllm_disable_log_stats": "VLLM_DISABLE_LOG_STATS",
+        "vllm_extra_args_json": "VLLM_EXTRA_ARGS_JSON",
+        "network_http_proxy": "VLLM_HTTP_PROXY",
+        "network_https_proxy": "VLLM_HTTPS_PROXY",
+        "network_no_proxy": "VLLM_NO_PROXY",
+        "network_ca_bundle": "VLLM_CA_BUNDLE",
+        "huggingface_endpoint": "VLLM_HF_ENDPOINT",
+        "sampling_max_tokens": "OMLX_SAMPLING_MAX_TOKENS",
+        "sampling_temperature": "OMLX_SAMPLING_TEMPERATURE",
+        "sampling_top_p": "OMLX_SAMPLING_TOP_P",
+        "sampling_top_k": "OMLX_SAMPLING_TOP_K",
+        "sampling_repetition_penalty": "OMLX_SAMPLING_REPETITION_PENALTY",
     }
     bool_fields = {
         "vllm_trust_remote_code",
         "vllm_enforce_eager",
         "vllm_enable_auto_tool_choice",
+        "vllm_enable_chunked_prefill",
+        "vllm_enable_prefix_caching",
+        "vllm_disable_log_stats",
+    }
+    optional_bool_fields = {
+        "vllm_enable_chunked_prefill",
+        "vllm_enable_prefix_caching",
     }
     env = {}
     for field, env_key in field_map.items():
@@ -615,10 +716,19 @@ def _vllm_env_from_admin_updates(updates: dict[str, Any]) -> dict[str, str]:
             continue
         value = updates[field]
         if field in bool_fields:
-            env[env_key] = "true" if bool(value) else "false"
+            if field in optional_bool_fields and (value is None or value == ""):
+                env[env_key] = ""
+            else:
+                env[env_key] = "true" if _truthy(value) else "false"
         else:
             env[env_key] = str(value)
     return env
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _vllm_compose_output_path() -> Path | None:
@@ -771,6 +881,7 @@ def _global_settings_payload(
     state: ProxyAdminState,
 ) -> dict[str, Any]:
     overrides = state.global_overrides
+    vllm_settings = _vllm_settings_from_files(state)
     return {
         "base_path": "",
         "server": {
@@ -801,9 +912,15 @@ def _global_settings_payload(
             "memory_guard_custom_ceiling_gb": 0,
         },
         "scheduler": {
-            "max_concurrent_requests": 0,
+            "max_concurrent_requests": overrides.get(
+                "max_concurrent_requests",
+                vllm_settings.max_num_seqs,
+            ),
             "embedding_batch_size": 0,
-            "chunked_prefill": False,
+            "chunked_prefill": overrides.get(
+                "chunked_prefill",
+                bool(vllm_settings.enable_chunked_prefill),
+            ),
         },
         "cache": {
             "enabled": False,
@@ -814,21 +931,24 @@ def _global_settings_payload(
             "initial_cache_blocks": 0,
         },
         "mcp": {"config_path": ""},
-        "huggingface": {"endpoint": ""},
+        "huggingface": {"endpoint": vllm_settings.hf_endpoint},
         "modelscope": {"endpoint": ""},
         "network": {
-            "http_proxy": "",
-            "https_proxy": "",
-            "no_proxy": "",
-            "ca_bundle": "",
+            "http_proxy": vllm_settings.http_proxy,
+            "https_proxy": vllm_settings.https_proxy,
+            "no_proxy": vllm_settings.no_proxy,
+            "ca_bundle": vllm_settings.ca_bundle,
         },
         "sampling": {
-            "max_context_window": config.actual_context_size,
-            "max_tokens": config.actual_context_size,
-            "temperature": 1.0,
-            "top_p": 1.0,
-            "top_k": 0,
-            "repetition_penalty": 1.0,
+            "max_context_window": overrides.get(
+                "sampling_max_context_window",
+                vllm_settings.max_model_len,
+            ),
+            "max_tokens": overrides.get("sampling_max_tokens", config.actual_context_size),
+            "temperature": overrides.get("sampling_temperature", 1.0),
+            "top_p": overrides.get("sampling_top_p", 1.0),
+            "top_k": overrides.get("sampling_top_k", 0),
+            "repetition_penalty": overrides.get("sampling_repetition_penalty", 1.0),
         },
         "auth": {
             "api_key_set": bool(config.proxy_api_key),

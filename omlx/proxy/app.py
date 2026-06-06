@@ -155,6 +155,11 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc))
 
         openai_body = anthropic_to_openai_chat_body(anth_request)
+        apply_proxy_request_defaults(
+            openai_body,
+            getattr(request.app.state, "proxy_admin_state", None),
+            include_chat_template=True,
+        )
         if anth_request.stream:
             return StreamingResponse(
                 _stream_anthropic_response(
@@ -338,12 +343,112 @@ async def _stream_anthropic_response(
         yield adapter.format_error_event(str(exc))
 
 
+def apply_proxy_request_defaults(
+    body: dict[str, Any],
+    state: Any,
+    *,
+    include_chat_template: bool = False,
+) -> dict[str, Any]:
+    """Apply saved admin sampling defaults before forwarding to the backend."""
+    if state is None or not isinstance(body, dict):
+        return body
+
+    model_id = body.get("model")
+    model_settings = {}
+    if model_id is not None:
+        model_settings = state.model_settings.get(str(model_id), {}) or {}
+    overrides = state.global_overrides or {}
+    force = bool(model_settings.get("force_sampling"))
+
+    sampling_fields = (
+        ("max_tokens", "sampling_max_tokens"),
+        ("temperature", "sampling_temperature"),
+        ("top_p", "sampling_top_p"),
+        ("top_k", "sampling_top_k"),
+        ("min_p", "sampling_min_p"),
+        ("presence_penalty", "sampling_presence_penalty"),
+        ("repetition_penalty", "sampling_repetition_penalty"),
+    )
+    for request_key, global_key in sampling_fields:
+        value = _first_configured(model_settings.get(request_key), overrides.get(global_key))
+        if value is None:
+            continue
+        if force or body.get(request_key) is None:
+            body[request_key] = value
+
+    if include_chat_template:
+        chat_template_kwargs = _dict_value(model_settings.get("chat_template_kwargs"))
+        enable_thinking = model_settings.get("enable_thinking")
+        if isinstance(enable_thinking, bool):
+            chat_template_kwargs["enable_thinking"] = enable_thinking
+        if chat_template_kwargs:
+            merged = _dict_value(body.get("chat_template_kwargs"))
+            merged.update(chat_template_kwargs)
+            body["chat_template_kwargs"] = merged
+
+        budget_enabled = bool(model_settings.get("thinking_budget_enabled"))
+        budget = model_settings.get("thinking_budget_tokens")
+        if budget_enabled and _configured_value(budget):
+            body["thinking_budget"] = budget
+    return body
+
+
+def _body_with_proxy_defaults(
+    body: bytes,
+    state: Any,
+    *,
+    include_chat_template: bool = False,
+) -> bytes:
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except Exception:
+        return body
+    if not isinstance(payload, dict):
+        return body
+    apply_proxy_request_defaults(
+        payload,
+        state,
+        include_chat_template=include_chat_template,
+    )
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+
+def _first_configured(*values: Any) -> Any | None:
+    for value in values:
+        if _configured_value(value):
+            return value
+    return None
+
+
+def _configured_value(value: Any) -> bool:
+    return value is not None and value != ""
+
+
+def _dict_value(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
 async def _passthrough_backend(
     request: Request,
     backend: OpenAIBackend,
     path: str,
 ) -> Response:
     body = await request.body()
+    if path in {"chat/completions", "completions"}:
+        body = _body_with_proxy_defaults(
+            body,
+            getattr(request.app.state, "proxy_admin_state", None),
+            include_chat_template=path == "chat/completions",
+        )
     headers = _backend_headers(request, backend)
     wants_stream = _body_requests_stream(body)
 

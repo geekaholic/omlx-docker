@@ -186,7 +186,42 @@ Useful environment variables:
 | `VLLM_TRUST_REMOTE_CODE` | `true` | Add `--trust-remote-code` |
 | `VLLM_ENABLE_AUTO_TOOL_CHOICE` | `false` | Add vLLM auto tool-choice flags when enabled |
 | `VLLM_TOOL_CALL_PARSER` | `hermes` | vLLM auto tool-choice parser |
+| `VLLM_REASONING_PARSER` | empty | vLLM reasoning parser |
+| `VLLM_DTYPE` | empty | Optional `--dtype` override |
+| `VLLM_TOKENIZER` | empty | Optional tokenizer id/path |
+| `VLLM_TOKENIZER_MODE` | empty | Optional tokenizer mode |
+| `VLLM_REVISION` | empty | Optional model revision |
+| `VLLM_LOAD_FORMAT` | empty | Optional load format |
+| `VLLM_QUANTIZATION` | empty | Optional quantization mode |
+| `VLLM_DOWNLOAD_DIR` | empty | Optional vLLM download directory |
+| `VLLM_MAX_NUM_BATCHED_TOKENS` | empty | Optional scheduler token budget |
+| `VLLM_ENABLE_CHUNKED_PREFILL` | empty | `true`/`false` to force chunked prefill on/off; empty uses vLLM default |
+| `VLLM_ENABLE_PREFIX_CACHING` | empty | `true`/`false` to force prefix caching on/off; empty uses vLLM default |
+| `VLLM_KV_CACHE_DTYPE` | empty | Optional KV cache dtype |
+| `VLLM_CPU_OFFLOAD_GB` | empty | Optional CPU offload GB per GPU |
+| `VLLM_SWAP_SPACE` | empty | Optional swap space GB per GPU |
+| `VLLM_TENSOR_PARALLEL_SIZE` | `1` | Tensor parallel size |
+| `VLLM_PIPELINE_PARALLEL_SIZE` | `1` | Pipeline parallel size |
+| `VLLM_UVICORN_LOG_LEVEL` | empty | Optional vLLM API log level |
+| `VLLM_DISABLE_LOG_STATS` | `false` | Add `--disable-log-stats` when true |
+| `VLLM_EXTRA_ARGS_JSON` | `[]` | Raw extra vLLM args as a JSON array appended last |
+| `VLLM_HTTP_PROXY` / `VLLM_HTTPS_PROXY` | empty | Proxy env passed to proxy and vLLM containers |
+| `VLLM_NO_PROXY` | empty | No-proxy host list for both containers |
+| `VLLM_CA_BUNDLE` | empty | CA bundle path exposed as `REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE` |
+| `VLLM_HF_ENDPOINT` | empty | Hugging Face endpoint exposed as `HF_ENDPOINT` |
+| `OMLX_SAMPLING_MAX_TOKENS` | `32768` | Proxy default max output tokens when request omits it |
+| `OMLX_SAMPLING_TEMPERATURE` | `1.0` | Proxy default temperature when request omits it |
+| `OMLX_SAMPLING_TOP_P` | `1.0` | Proxy default top-p when request omits it |
+| `OMLX_SAMPLING_TOP_K` | `0` | Proxy default top-k when request omits it |
+| `OMLX_SAMPLING_REPETITION_PENALTY` | `1.0` | Proxy default repetition penalty when request omits it |
 | `HF_TOKEN` | empty | Hugging Face token for gated models |
+
+The admin settings page edits the same env-backed vLLM launch and proxy default
+settings, then regenerates `docker/docker-compose.vllm.yml`. Original oMLX
+sampling defaults such as temperature, top-p, top-k, repetition penalty, and max
+tokens are persisted in `docker/docker-compose.vllm.env` as `OMLX_SAMPLING_*`
+values and applied by the oMNI proxy to forwarded chat/completion requests. vLLM
+launch settings still require a backend/container restart.
 
 The sidecar compose uses `gpus: all` and `ipc: host`, so Docker must be
 configured with NVIDIA Container Toolkit on Linux. Use `omni serve --backend vllm`

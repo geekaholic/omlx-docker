@@ -166,6 +166,85 @@
                                             <input type="text" x-model="globalSettings.proxy.vllm.reasoning_parser" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
                                         </label>
                                     </div>
+                                    <div x-data="{ open: false }" class="mt-4 border border-neutral-200 rounded-lg bg-white overflow-hidden">
+                                        <button type="button" @click="open = !open" class="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-neutral-600 hover:bg-neutral-50">
+                                            <span>vLLM Advanced</span>
+                                            <i data-lucide="chevron-down" class="w-3.5 h-3.5 transition-transform" :class="open && 'rotate-180'"></i>
+                                        </button>
+                                        <div x-show="open" x-collapse x-cloak class="grid grid-cols-1 lg:grid-cols-2 gap-3 p-3 border-t border-neutral-200">
+                                            <label class="text-xs text-neutral-500">Dtype
+                                                <select x-model="globalSettings.proxy.vllm.dtype" class="mt-1 w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg bg-white">
+                                                    <option value="">vLLM default</option>
+                                                    <option value="auto">auto</option>
+                                                    <option value="bfloat16">bfloat16</option>
+                                                    <option value="float16">float16</option>
+                                                    <option value="half">half</option>
+                                                    <option value="float">float</option>
+                                                    <option value="float32">float32</option>
+                                                </select>
+                                            </label>
+                                            <label class="text-xs text-neutral-500">Tokenizer
+                                                <input type="text" x-model="globalSettings.proxy.vllm.tokenizer" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
+                                            </label>
+                                            <label class="text-xs text-neutral-500">Tokenizer mode
+                                                <input type="text" x-model="globalSettings.proxy.vllm.tokenizer_mode" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="auto">
+                                            </label>
+                                            <label class="text-xs text-neutral-500">Revision
+                                                <input type="text" x-model="globalSettings.proxy.vllm.revision" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
+                                            </label>
+                                            <label class="text-xs text-neutral-500">Load format
+                                                <input type="text" x-model="globalSettings.proxy.vllm.load_format" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
+                                            </label>
+                                            <label class="text-xs text-neutral-500">Quantization
+                                                <input type="text" x-model="globalSettings.proxy.vllm.quantization" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
+                                            </label>
+                                            <label class="text-xs text-neutral-500">Download dir
+                                                <input type="text" x-model="globalSettings.proxy.vllm.download_dir" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
+                                            </label>
+                                            <label class="text-xs text-neutral-500">Max batched tokens
+                                                <input type="text" x-model="globalSettings.proxy.vllm.max_num_batched_tokens" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg" placeholder="optional">
+                                            </label>
+                                            <label class="text-xs text-neutral-500">Chunked prefill
+                                                <select x-model="globalSettings.proxy.vllm.enable_chunked_prefill" class="mt-1 w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg bg-white">
+                                                    <option value="">vLLM default</option>
+                                                    <option :value="true">enabled</option>
+                                                    <option :value="false">disabled</option>
+                                                </select>
+                                            </label>
+                                            <label class="text-xs text-neutral-500">Prefix caching
+                                                <select x-model="globalSettings.proxy.vllm.enable_prefix_caching" class="mt-1 w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg bg-white">
+                                                    <option value="">vLLM default</option>
+                                                    <option :value="true">enabled</option>
+                                                    <option :value="false">disabled</option>
+                                                </select>
+                                            </label>
+                                            <label class="text-xs text-neutral-500">KV cache dtype
+                                                <input type="text" x-model="globalSettings.proxy.vllm.kv_cache_dtype" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="auto">
+                                            </label>
+                                            <label class="text-xs text-neutral-500">CPU offload GB
+                                                <input type="number" x-model.number="globalSettings.proxy.vllm.cpu_offload_gb" min="0" step="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
+                                            </label>
+                                            <label class="text-xs text-neutral-500">Swap space GB
+                                                <input type="number" x-model.number="globalSettings.proxy.vllm.swap_space" min="0" step="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
+                                            </label>
+                                            <label class="text-xs text-neutral-500">Tensor parallel
+                                                <input type="number" x-model.number="globalSettings.proxy.vllm.tensor_parallel_size" min="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
+                                            </label>
+                                            <label class="text-xs text-neutral-500">Pipeline parallel
+                                                <input type="number" x-model.number="globalSettings.proxy.vllm.pipeline_parallel_size" min="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
+                                            </label>
+                                            <label class="text-xs text-neutral-500">Uvicorn log level
+                                                <input type="text" x-model="globalSettings.proxy.vllm.uvicorn_log_level" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
+                                            </label>
+                                            <label class="flex items-center justify-between gap-3 text-xs text-neutral-500 px-3 py-2 border border-neutral-200 rounded-lg bg-white">
+                                                <span>Disable log stats</span>
+                                                <input type="checkbox" x-model="globalSettings.proxy.vllm.disable_log_stats">
+                                            </label>
+                                            <label class="text-xs text-neutral-500 lg:col-span-2">Extra args JSON
+                                                <input type="text" x-model="globalSettings.proxy.vllm.extra_args_json" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder='["--flag","value"]'>
+                                            </label>
+                                        </div>
+                                    </div>
                                     <p class="text-xs text-neutral-400 mt-3" x-text="globalSettings.proxy.vllm.compose_output_path ? 'Output: ' + globalSettings.proxy.vllm.compose_output_path : 'Compose output path is not mounted in this container.'"></p>
                                 </div>
                             </div>

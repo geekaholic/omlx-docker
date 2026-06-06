@@ -287,6 +287,95 @@ def _app_with_mock_backend(handler):
 
 
 @pytest.mark.asyncio
+async def test_proxy_applies_saved_sampling_defaults_to_openai_passthrough(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(state_path))
+    seen_request = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "qwen"}]})
+        assert request.url.path == "/v1/chat/completions"
+        seen_request.update(json.loads(request.content.decode()))
+        return httpx.Response(200, json={"model": "qwen", "choices": [], "usage": {}})
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/admin/api/global-settings",
+            json={
+                "proxy_backend_url": "http://backend/v1",
+                "proxy_backend_type": "vllm",
+                "sampling_temperature": 0.25,
+                "sampling_top_p": 0.8,
+                "sampling_max_tokens": 77,
+            },
+        )
+        assert response.status_code == 200
+
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "qwen", "messages": [], "stream": False},
+        )
+
+    assert response.status_code == 200
+    assert seen_request["temperature"] == 0.25
+    assert seen_request["top_p"] == 0.8
+    assert seen_request["max_tokens"] == 77
+
+
+@pytest.mark.asyncio
+async def test_proxy_model_force_sampling_overrides_openai_request(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(state_path))
+    seen_request = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "qwen"}]})
+        seen_request.update(json.loads(request.content.decode()))
+        return httpx.Response(200, json={"model": "qwen", "choices": [], "usage": {}})
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.put(
+            "/admin/api/models/qwen/settings",
+            json={
+                "temperature": 0.1,
+                "top_k": 20,
+                "force_sampling": True,
+                "enable_thinking": False,
+                "thinking_budget_enabled": True,
+                "thinking_budget_tokens": 512,
+            },
+        )
+        assert response.status_code == 200
+
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "qwen",
+                "messages": [],
+                "stream": False,
+                "temperature": 0.9,
+                "chat_template_kwargs": {"foo": "bar"},
+            },
+        )
+
+    assert response.status_code == 200
+    assert seen_request["temperature"] == 0.1
+    assert seen_request["top_k"] == 20
+    assert seen_request["chat_template_kwargs"] == {"foo": "bar", "enable_thinking": False}
+    assert seen_request["thinking_budget"] == 512
+
+
+@pytest.mark.asyncio
 async def test_proxy_chat_page_is_unlocked_without_proxy_api_key(monkeypatch, tmp_path):
     monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
 
@@ -600,6 +689,8 @@ async def test_admin_vllm_settings_save_writes_env_and_compose(monkeypatch, tmp_
                 "vllm_gpu_memory_utilization": 0.72,
                 "vllm_max_num_seqs": 8,
                 "vllm_hf_home": "/cache/admin",
+                "sampling_top_p": 0.77,
+                "sampling_top_k": 42,
             },
         )
 
@@ -616,12 +707,44 @@ async def test_admin_vllm_settings_save_writes_env_and_compose(monkeypatch, tmp_
     assert env["VLLM_SERVED_MODEL_NAME"] == "admin-name"
     assert env["VLLM_MAX_MODEL_LEN"] == "24576"
     assert env["VLLM_HF_HOME"] == "/cache/admin"
+    assert env["OMLX_SAMPLING_TOP_P"] == "0.77"
+    assert env["OMLX_SAMPLING_TOP_K"] == "42"
     assert env["VLLM_TOOL_CALL_PARSER"] == "existing-parser"
     assert env["VLLM_REASONING_PARSER"] == "existing-reasoner"
 
     content = compose_path.read_text(encoding="utf-8")
     assert 'OMLX_VLLM_ENV_OUTPUT_PATH: "/compose-output/docker-compose.vllm.env"' in content
     assert "example/admin-model" in content
+    assert "OMLX_SAMPLING_TOP_P" in content
+    assert "0.77" in content
+
+
+@pytest.mark.asyncio
+async def test_proxy_sampling_defaults_seed_from_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setenv("OMLX_SAMPLING_TOP_P", "0.66")
+    monkeypatch.setenv("OMLX_SAMPLING_TOP_K", "13")
+    seen_request = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "qwen"}]})
+        seen_request.update(json.loads(request.content.decode()))
+        return httpx.Response(200, json={"model": "qwen", "choices": [], "usage": {}})
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "qwen", "messages": [], "stream": False},
+        )
+
+    assert response.status_code == 200
+    assert seen_request["top_p"] == 0.66
+    assert seen_request["top_k"] == 13
 
 
 @pytest.mark.asyncio
