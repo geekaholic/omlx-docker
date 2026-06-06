@@ -4,46 +4,69 @@ This fork is moving toward a Linux-friendly oMLX UI/proxy that delegates
 inference to remote or sidecar OpenAI-compatible backends such as vLLM,
 llama.cpp server, or Ollama.
 
-## Next Implementation Steps
+## Current Decisions
+
+- vLLM lifecycle is Compose-owned. `omni serve --backend vllm` generates
+  `docker/docker-compose.vllm.yml` plus `docker/docker-compose.vllm.env`, then
+  launches the stack with Docker Compose.
+- The FastAPI proxy does not directly own or supervise the GPU server process.
+- Admin can edit proxy settings live. Admin can also edit intended vLLM launch
+  settings and regenerate the env/compose files, but vLLM launch changes require
+  a backend/container restart.
+- Sampling defaults are proxy request defaults. They are persisted as
+  `OMLX_SAMPLING_*` values and injected into forwarded chat/completion requests
+  when the client omits those fields.
+
+## Completed Linux Proxy Work
+
+- Dockerized MLX-free proxy container.
+- OpenAI-compatible passthrough and Anthropic Messages API bridge.
+- Proxy admin dashboard and browser chat UI.
+- Backend URL/API key/type controls with persisted proxy state.
+- Live application of backend URL/API key/type changes.
+- Backend status and metrics endpoints, including vLLM Prometheus and Ollama
+  native probes.
+- `omni` CLI for `serve`, `status`, `logs`, `restart`, and `stop`.
+- vLLM sidecar compose generation for NVIDIA hosts.
+- vLLM env-file persistence, admin regeneration, HF cache mounting, and
+  advanced launch settings.
+- vLLM compose startup sanitation for empty Hugging Face/proxy/cert env vars.
+
+## Remaining Implementation Steps
 
 1. Test against real backends.
    - Ollama: verify chat, `/v1/models`, `/admin/api/proxy/metrics`, `/api/tags`, and `/api/ps`.
-   - vLLM: verify chat streaming, tool calls, Prometheus `/metrics`, token counters, and cache usage.
-   - llama.cpp server: verify OpenAI compatibility, model listing behavior, streaming, and any exposed metrics.
+   - vLLM: verify chat streaming, tool calls, Prometheus `/metrics`, token counters, cache usage, and restart flows on Spark.
+   - llama.cpp server: verify OpenAI compatibility, model listing behavior, streaming, tool calling, and any exposed metrics.
 
-2. Expand admin controls for proxy backend configuration.
-   - Done: Backend URL.
-   - Done: Backend API key.
-   - Done: Backend type selector: OpenAI-compatible, Ollama, vLLM, llama.cpp.
-   - Done: Persist settings in proxy state.
-   - Done: Apply backend URL/API key/type without container restart.
-   - Remaining: Add richer backend-specific launch/config fields for vLLM and llama.cpp sidecars.
+2. Finish proxy-mode admin UI cleanup.
+   - Hide or remove remaining native MLX-only controls.
+   - Keep chat, model aliases/settings, backend status, backend metrics, logs, proxy configuration, and vLLM launch configuration.
+   - Replace unsupported native actions with clear proxy-mode messaging or remove them.
 
-3. Add Docker sidecar profiles.
-   - Keep the current external-backend proxy compose file as the default.
-   - Add an optional vLLM sidecar compose profile for NVIDIA hosts.
-   - Add an optional llama.cpp server sidecar profile if it proves useful.
-   - Document model volume paths and NVIDIA runtime requirements for DGX Spark.
+3. Decide llama.cpp lifecycle support.
+   - Current support assumes an external OpenAI-compatible llama.cpp server.
+   - Add a llama.cpp sidecar only if Spark/Linux usage shows it is worth managing from this repo.
+   - If added, mirror the vLLM pattern: template + ignored generated compose/env + `omni serve` flags.
 
-4. Decide vLLM lifecycle boundaries.
-   - Preferred: run vLLM as a Docker sidecar managed by Compose or the host orchestrator.
-   - Admin UI can edit intended vLLM launch config and show status.
-   - Avoid making the FastAPI proxy directly own GPU server process lifecycle unless there is a clear operational need.
-
-5. Clean up proxy-mode admin UI.
-   - Hide or remove native MLX-only controls.
-   - Keep chat, model aliases/settings, backend status, backend metrics, logs, and proxy configuration.
-   - Replace stubbed actions with clear proxy-mode behavior.
-
-6. Add Linux/DGX runbook coverage.
+4. Add Spark/Linux runbook coverage.
    - External Ollama.
    - External vLLM.
-   - vLLM sidecar.
+   - vLLM sidecar with known-good model examples.
    - llama.cpp server if supported.
-   - Known unsupported native oMLX features.
+   - Troubleshooting for HF cache mounts, gated models, NVIDIA runtime, vLLM env settings, and backend restarts.
+   - Known unsupported native oMLX/MLX features.
+
+5. Continue fork cleanup.
+   - Isolate or remove native MLX/Metal imports from the Linux proxy path.
+   - Decide the final package/module rename strategy from `omlx` toward `omni`.
+   - Remove unused macOS app and native-inference code once the proxy surface is stable.
 
 ## Current Verification Gaps
 
-- Full pytest collection still imports MLX/Metal paths and fails in headless or sandboxed Mac sessions without an accessible Metal device.
-- The proxy-specific test suite is the reliable Linux-port signal until native MLX paths are isolated or removed.
-- Real backend behavior still needs manual testing with Ollama, vLLM, and llama.cpp server.
+- Full pytest collection still imports MLX/Metal paths and fails in headless,
+  sandboxed, virtualized, or Linux sessions without an accessible Metal device.
+- The proxy-specific and `omni` test suites are the reliable Linux-port signal
+  until native MLX paths are isolated or removed.
+- Real backend behavior still needs manual testing with Ollama, vLLM, and
+  llama.cpp server.

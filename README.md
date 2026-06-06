@@ -29,34 +29,6 @@ This fork has a different goal:
 In short: oMNI is oMLX without the MLX runtime dependency, adapted for many LLM
 inference backends.
 
-## Current Status
-
-Working:
-
-- Dockerized proxy container.
-- OpenAI-compatible passthrough for `/v1/chat/completions` and related routes.
-- Anthropic Messages API translation at `/v1/messages`.
-- Built-in chat UI at `/admin/chat`.
-- Admin dashboard compatibility layer at `/admin/dashboard`.
-- Backend model discovery from `/v1/models`.
-- Proxy backend status and backend metrics panel.
-- Ollama backend support when Ollama exposes its OpenAI-compatible API.
-- vLLM-compatible Prometheus metrics parsing from `/metrics`.
-- Optional vLLM sidecar compose file for NVIDIA hosts.
-- Context token scaling for Claude Code style workflows.
-- SSE keepalive support for long-running requests.
-
-Still in progress:
-
-- Admin controls for changing backend URL/API key/type and generating vLLM Compose settings.
-- Cleaner proxy-mode UI that hides native MLX-only controls.
-- More complete real-backend validation for vLLM, llama.cpp server, and Ollama.
-- Formal package/CLI rename from `omlx` to `omni` or another final command name.
-- Removing unused macOS/MLX-native code from this fork.
-
-See [LINUX_PROXY_REMAINING_WORK.md](LINUX_PROXY_REMAINING_WORK.md) for the
-current implementation backlog.
-
 ## Quickstart: Docker Proxy
 
 The default Docker workflow runs oMNI as a proxy and expects an external backend
@@ -167,8 +139,8 @@ to vLLM at `http://vllm:8000/v1` inside the compose network and publishes oMNI
 on port `8080`. The compose file bind-mounts the host Hugging Face cache at
 `${HOME}/.cache/huggingface`, so already downloaded models are reused.
 
-Restart the Compose stack after changing vLLM launch settings; only proxy
-settings apply live.
+Restart the vLLM container after changing vLLM launch settings; proxy backend
+settings and proxy sampling defaults apply live in the running proxy.
 
 Useful environment variables:
 
@@ -220,8 +192,11 @@ The admin settings page edits the same env-backed vLLM launch and proxy default
 settings, then regenerates `docker/docker-compose.vllm.yml`. Original oMLX
 sampling defaults such as temperature, top-p, top-k, repetition penalty, and max
 tokens are persisted in `docker/docker-compose.vllm.env` as `OMLX_SAMPLING_*`
-values and applied by the oMNI proxy to forwarded chat/completion requests. vLLM
-launch settings still require a backend/container restart.
+values and applied by the oMNI proxy to forwarded chat/completion requests when
+the client omits those fields. vLLM launch settings still require a
+backend/container restart. The generated vLLM entrypoint exports Hugging Face,
+proxy, and CA bundle environment variables only when configured, avoiding empty
+URL values such as `HF_ENDPOINT=` inside the vLLM process.
 
 The sidecar compose uses `gpus: all` and `ipc: host`, so Docker must be
 configured with NVIDIA Container Toolkit on Linux. Use `omni serve --backend vllm`
@@ -342,22 +317,26 @@ when available, so the dashboard can show available and loaded model counts.
 ### vLLM
 
 vLLM is the preferred Linux/NVIDIA backend target. oMNI can proxy to an external
-vLLM server or run with the provided vLLM sidecar compose file. The dashboard
-parses common vLLM Prometheus metrics such as request counts, token counts,
-running/waiting requests, and GPU cache usage.
+vLLM server or run with the generated vLLM sidecar compose stack. `omni serve
+--backend vllm` owns sidecar generation and Compose launch; Admin edits the same
+intended launch settings and regenerates the local env/compose files. The
+dashboard parses common vLLM Prometheus metrics such as request counts, token
+counts, running/waiting requests, and GPU cache usage.
 
 ### llama.cpp Server
 
 llama.cpp server is a target backend when launched with OpenAI-compatible
-endpoints. Compatibility still needs more real-backend testing, especially
-around model listing, streaming behavior, tool calling, and metrics.
+endpoints. Current support assumes an externally managed server; a managed
+sidecar has not been added yet. Compatibility still needs more real-backend
+testing, especially around model listing, streaming behavior, tool calling, and
+metrics.
 
 ## Development
 
 Proxy-focused checks:
 
 ```bash
-pytest tests/test_proxy.py -q
+pytest tests/test_proxy.py tests/test_omni_cli.py -q
 python -m compileall -q omlx/proxy
 node --check omlx/admin/static/js/dashboard.js
 docker compose -f docker/docker-compose.proxy.yml build
@@ -366,8 +345,8 @@ docker compose -f docker/docker-compose.proxy.yml build
 The full upstream test suite still imports MLX/Metal paths. In headless,
 sandboxed, virtualized, or Linux environments those tests may fail during
 collection before reaching proxy code. Until the fork removes or isolates native
-MLX modules, `tests/test_proxy.py` is the main regression suite for the Linux
-proxy path.
+MLX modules, `tests/test_proxy.py` and `tests/test_omni_cli.py` are the main
+regression suites for the Linux proxy path.
 
 ## Project Layout
 
@@ -383,6 +362,38 @@ proxy path.
 | `docker/proxy.env.example` | Example environment values |
 | `tests/test_proxy.py` | Proxy regression tests |
 | `LINUX_PROXY_REMAINING_WORK.md` | Current backlog |
+
+## Current Status
+
+Working:
+
+- Dockerized proxy container.
+- OpenAI-compatible passthrough for `/v1/chat/completions` and related routes.
+- Anthropic Messages API translation at `/v1/messages`.
+- Built-in chat UI at `/admin/chat`.
+- Admin dashboard compatibility layer at `/admin/dashboard`.
+- Backend model discovery from `/v1/models`.
+- Proxy backend status and backend metrics panel.
+- Ollama backend support when Ollama exposes its OpenAI-compatible API.
+- vLLM-compatible Prometheus metrics parsing from `/metrics`.
+- Optional vLLM sidecar compose generation for NVIDIA hosts.
+- `omni` CLI for generating vLLM stacks and managing Compose containers.
+- Admin controls for backend URL/API key/type and vLLM launch settings.
+- Env-file persistence for vLLM launch settings and proxy sampling defaults.
+- Context token scaling for Claude Code style workflows.
+- SSE keepalive support for long-running requests.
+
+Still in progress:
+
+- Cleaner proxy-mode UI that hides native MLX-only controls.
+- More complete real-backend validation for vLLM, llama.cpp server, and Ollama.
+- Spark/Linux runbooks with known-good model examples and troubleshooting.
+- llama.cpp lifecycle decision: external-only backend versus managed sidecar.
+- Formal package/module rename from `omlx` toward `omni`.
+- Removing unused macOS/MLX-native code from this fork.
+
+See [LINUX_PROXY_REMAINING_WORK.md](LINUX_PROXY_REMAINING_WORK.md) for the
+current implementation backlog.
 
 ## Attribution
 
