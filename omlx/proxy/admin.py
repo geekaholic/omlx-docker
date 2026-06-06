@@ -1036,7 +1036,7 @@ def _stats_payload(
         "host": config.host,
         "port": config.port,
         "api_key": config.proxy_api_key or "",
-        "cli_prefix": "omlx proxy",
+        "cli_prefix": "omni",
         "total_requests": int(summary.get("requests_total") or 0),
         "active_requests": running,
         "waiting_requests": waiting,

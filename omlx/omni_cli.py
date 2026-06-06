@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -35,6 +38,7 @@ DEFAULT_VLLM_ENV_FILE = DOCKER_DIR / "docker-compose.vllm.env"
 TOP_LEVEL_HELP = """
 Command quick reference:
   omni serve [options]
+  omni launch <tool> [--model MODEL] [--port PORT] [--host HOST] [--api-key KEY]
   omni status [--compose-file PATH]
   omni logs [--target proxy|backend|both] [-f|--follow] [--compose-file PATH]
   omni restart [--target proxy|backend|both] [--compose-file PATH]
@@ -109,15 +113,19 @@ Examples:
   omni serve --backend vllm --model Qwen/Qwen3-1.7B --served-model-name qwen3
   omni serve --backend ollama
   omni serve --backend llamacpp --backend-url http://host.docker.internal:8000/v1
+  omni launch list
+  omni launch claude
+  omni launch codex --model qwen --port 8080
+  omni launch claude --opus-model qwen-big --sonnet-model qwen --haiku-model qwen-fast
   omni status
   omni logs --target backend
   omni logs -f
   omni restart --target backend
   omni stop --target both
 
-Run `omni serve --help`, `omni status --help`, `omni logs --help`,
-`omni restart --help`, or `omni stop --help` for argparse's detailed
-option descriptions.
+Run `omni serve --help`, `omni launch --help`, `omni status --help`,
+`omni logs --help`, `omni restart --help`, or `omni stop --help` for
+argparse's detailed option descriptions.
 """.strip()
 
 SERVE_DESCRIPTION = """
@@ -319,6 +327,41 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Proxy SSE keepalive mode",
     )
+
+    launch = subparsers.add_parser(
+        "launch",
+        help="Launch an external coding agent pointed at the oMNI proxy",
+        description=(
+            "Connect an external coding agent (claude, codex, copilot, etc.) to "
+            "the running oMNI proxy. Pass 'list' as the tool name to see all "
+            "available integrations."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    launch.add_argument(
+        "tool",
+        help="Tool to launch: claude, codex, opencode, openclaw, copilot, hermes, pi, or 'list'",
+    )
+    launch.add_argument("--model", default=None, help="Model id to use (skips interactive selection)")
+    launch.add_argument(
+        "--host",
+        default=None,
+        help="oMNI proxy host (default: localhost)",
+    )
+    launch.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="oMNI proxy port (default: OMLX_PROXY_PORT env or 8080)",
+    )
+    launch.add_argument(
+        "--api-key",
+        default=None,
+        help="oMNI proxy API key (default: OMLX_PROXY_API_KEY or OMLX_API_KEY env)",
+    )
+    launch.add_argument("--opus-model", default=None, help="Claude Code Opus-tier model override")
+    launch.add_argument("--sonnet-model", default=None, help="Claude Code Sonnet-tier model override")
+    launch.add_argument("--haiku-model", default=None, help="Claude Code Haiku-tier model override")
 
     status = subparsers.add_parser(
         "status",
@@ -673,6 +716,104 @@ def stop_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def launch_command(args: argparse.Namespace) -> int:
+    from .integrations import IntegrationContext, get_integration, list_integrations
+
+    tool_name = args.tool
+
+    if tool_name == "list":
+        print("Available integrations:")
+        for integ in list_integrations():
+            installed = "installed" if integ.is_installed() else "not installed"
+            print(f"  {integ.name:12s} {integ.display_name} ({installed})")
+        return 0
+
+    integration = get_integration(tool_name)
+    if integration is None:
+        print(f"Unknown integration: {tool_name}")
+        print("Available: " + ", ".join(i.name for i in list_integrations()))
+        sys.exit(1)
+
+    host = args.host or "localhost"
+    port = args.port or int(os.environ.get("OMLX_PROXY_PORT", "8080"))
+    api_key = (
+        args.api_key
+        or os.environ.get("OMLX_PROXY_API_KEY")
+        or os.environ.get("OMLX_API_KEY")
+        or ""
+    )
+
+    base_url = f"http://{host}:{port}"
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    # Verify the proxy is reachable.
+    try:
+        req = urllib.request.Request(f"{base_url}/health", headers=headers)
+        with urllib.request.urlopen(req, timeout=5):
+            pass
+    except (urllib.error.URLError, OSError):
+        print(f"oMNI proxy is not reachable at {base_url}")
+        print("Start the proxy first: omni serve")
+        sys.exit(1)
+
+    # Determine model.
+    opus_model = args.opus_model or None
+    sonnet_model = args.sonnet_model or None
+    haiku_model = args.haiku_model or None
+    claude_has_tier_models = tool_name == "claude" and any(
+        (opus_model, sonnet_model, haiku_model)
+    )
+
+    model = args.model or ""
+    if not model and claude_has_tier_models:
+        model = sonnet_model or opus_model or haiku_model or ""
+
+    if not model:
+        try:
+            req = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read())
+            models = [
+                m["id"]
+                for m in data.get("data", [])
+                if m.get("model_type") in ("llm", "vlm", None)
+            ]
+        except (urllib.error.URLError, OSError, KeyError, ValueError):
+            models = []
+
+        if not models:
+            print("No models available. Load a model in the backend first.")
+            sys.exit(1)
+
+        if len(models) == 1:
+            model = models[0]
+            print(f"Using model: {model}")
+        else:
+            model = integration.select_model(
+                [{"id": m} for m in models], integration.display_name
+            )
+
+    if not integration.is_installed():
+        print(f"{integration.display_name} is not installed.")
+        print(f"Install: {integration.install_hint}")
+        sys.exit(1)
+
+    ctx = IntegrationContext(
+        host=host,
+        port=port,
+        api_key=api_key,
+        model=model,
+        opus_model=opus_model if tool_name == "claude" else None,
+        sonnet_model=sonnet_model if tool_name == "claude" else None,
+        haiku_model=haiku_model if tool_name == "claude" else None,
+    )
+    print(f"Launching {integration.display_name} with model {model}...")
+    integration.launch(ctx)
+    return 0
+
+
 def serve_command(args: argparse.Namespace) -> int:
     compose_file = Path(args.compose_file) if args.compose_file else default_compose_file(args.backend)
     command = compose_command(compose_file, foreground=args.foreground, build=not args.no_build)
@@ -727,6 +868,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "serve":
         return serve_command(args)
+    if args.command == "launch":
+        return launch_command(args)
     if args.command == "status":
         return status_command(args)
     if args.command == "logs":

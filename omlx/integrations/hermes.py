@@ -7,8 +7,6 @@ import shutil
 import time
 from pathlib import Path
 
-import yaml
-
 from omlx.integrations.base import Integration, IntegrationContext
 from omlx.utils.install import get_cli_prefix
 
@@ -40,6 +38,8 @@ class HermesIntegration(Integration):
         )
 
     def _read_config(self, config_path: Path) -> dict:
+        import yaml
+
         existing: dict = {}
         if not config_path.exists():
             return existing
@@ -127,6 +127,7 @@ class HermesIntegration(Integration):
         config["model"] = model_config
 
         config_path.parent.mkdir(parents=True, exist_ok=True)
+        import yaml
         yaml_content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
         config_path.write_text(
             yaml_content.rstrip() + "\n",

@@ -74,13 +74,15 @@ protects the oMNI proxy itself.
 
 ## Installing the `omni` Tool
 
-`omni` is installed from this repo as a Python console script. On Linux/Spark
-hosts, the CLI is mainly a Docker Compose launcher, so the lightweight install
-path is to install the local package without resolving the Mac/MLX runtime
-dependencies:
+`omni` is installed from this repo as a Python console script. The Python
+package is named `omlx` (the install output will say `+ omlx==...`), but the
+install registers both the `omlx` and `omni` commands in your environment. On
+Linux/Spark hosts, the CLI is mainly a Docker Compose launcher, so the
+lightweight install path is to install the local package without resolving the
+Mac/MLX runtime dependencies:
 
 ```bash
-cd /home/bud/omlx-docker
+cd path/to/omlx-docker
 python3 -m pip install -e . --no-deps
 rehash  # zsh only; refreshes command lookup after installing console scripts
 omni --help
@@ -89,7 +91,7 @@ omni --help
 If the shell still cannot find `omni`, run it through Python directly:
 
 ```bash
-cd /home/bud/omlx-docker
+cd path/to/omlx-docker
 python3 -m omlx.omni_cli --help
 python3 -m omlx.omni_cli serve --backend vllm --generate-only
 ```
@@ -97,10 +99,11 @@ python3 -m omlx.omni_cli serve --backend vllm --generate-only
 With `uv`, use an isolated environment and the same no-dependency install:
 
 ```bash
-cd /home/bud/omlx-docker
+cd path/to/omlx-docker
 uv venv --python 3.12
 source .venv/bin/activate
 uv pip install -e . --no-deps
+rehash  # zsh only; refreshes command lookup after installing console scripts
 omni --help
 ```
 

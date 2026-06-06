@@ -691,3 +691,215 @@ def test_vllm_settings_from_args_maps_model_flags():
     assert settings.proxy_port == 9090
     assert settings.hf_home.endswith("/.cache/huggingface")
     assert "${" not in settings.hf_home
+
+
+# ---------------------------------------------------------------------------
+# omni launch subcommand
+# ---------------------------------------------------------------------------
+
+
+def parse_launch(*args):
+    return omni_cli.build_parser().parse_args(["launch", *args])
+
+
+def test_launch_parser_recognizes_list():
+    args = parse_launch("list")
+    assert args.command == "launch"
+    assert args.tool == "list"
+
+
+def test_launch_parser_recognizes_tool_with_model_and_port():
+    args = parse_launch("claude", "--model", "my-model", "--port", "9090")
+    assert args.tool == "claude"
+    assert args.model == "my-model"
+    assert args.port == 9090
+
+
+def test_launch_parser_recognizes_claude_tier_models():
+    args = parse_launch(
+        "claude",
+        "--opus-model", "big",
+        "--sonnet-model", "mid",
+        "--haiku-model", "small",
+    )
+    assert args.opus_model == "big"
+    assert args.sonnet_model == "mid"
+    assert args.haiku_model == "small"
+
+
+def test_launch_parser_host_and_api_key():
+    args = parse_launch("codex", "--host", "myserver", "--api-key", "secret")
+    assert args.host == "myserver"
+    assert args.api_key == "secret"
+
+
+def test_launch_list_prints_integrations(capsys):
+    result = omni_cli.launch_command(parse_launch("list"))
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "claude" in out
+    assert "codex" in out
+
+
+def test_launch_command_exits_when_proxy_unreachable(monkeypatch):
+    import urllib.error
+
+    def fail_open(req, timeout):
+        raise urllib.error.URLError("refused")
+
+    monkeypatch.setattr(omni_cli.urllib.request, "urlopen", fail_open)
+
+    with pytest.raises(SystemExit):
+        omni_cli.launch_command(parse_launch("claude", "--port", "19999"))
+
+
+def test_launch_command_exits_when_no_models(monkeypatch):
+    import io
+    import urllib.error
+
+    health_response = io.BytesIO(b'{"status":"healthy"}')
+    models_response = io.BytesIO(b'{"data":[]}')
+    responses = [health_response, models_response]
+
+    class FakeCtxManager:
+        def __init__(self, data):
+            self._data = data
+
+        def __enter__(self):
+            return self._data
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self):
+            return self._data.read()
+
+    call_count = [0]
+
+    def fake_open(req, timeout):
+        idx = call_count[0]
+        call_count[0] += 1
+        return FakeCtxManager(responses[idx])
+
+    monkeypatch.setattr(omni_cli.urllib.request, "urlopen", fake_open)
+
+    with pytest.raises(SystemExit):
+        omni_cli.launch_command(parse_launch("claude", "--port", "8080"))
+
+
+def test_launch_command_calls_integration_launch(monkeypatch):
+    import io
+    import json as _json
+
+    health_bytes = b'{"status":"healthy"}'
+    models_bytes = _json.dumps({"data": [{"id": "test-model"}]}).encode()
+    responses = [io.BytesIO(health_bytes), io.BytesIO(models_bytes)]
+
+    class FakeCtxManager:
+        def __init__(self, data):
+            self._data = data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self):
+            return self._data.read()
+
+    call_count = [0]
+
+    def fake_open(req, timeout):
+        idx = call_count[0]
+        call_count[0] += 1
+        return FakeCtxManager(responses[idx])
+
+    monkeypatch.setattr(omni_cli.urllib.request, "urlopen", fake_open)
+
+    launched = []
+
+    from omlx.integrations import get_integration
+    real_integration = get_integration("codex")
+    monkeypatch.setattr(real_integration, "is_installed", lambda: True)
+    monkeypatch.setattr(real_integration, "launch", lambda ctx: launched.append(ctx))
+
+    args = parse_launch("codex", "--port", "8080", "--model", "test-model")
+    result = omni_cli.launch_command(args)
+
+    assert result == 0
+    assert len(launched) == 1
+    ctx = launched[0]
+    assert ctx.model == "test-model"
+    assert ctx.port == 8080
+    assert ctx.host == "localhost"
+
+
+def test_launch_command_uses_env_port(monkeypatch):
+    import io
+
+    monkeypatch.setenv("OMLX_PROXY_PORT", "9191")
+
+    def fail_open(req, timeout):
+        raise omni_cli.urllib.error.URLError("refused")
+
+    monkeypatch.setattr(omni_cli.urllib.request, "urlopen", fail_open)
+
+    with pytest.raises(SystemExit):
+        omni_cli.launch_command(parse_launch("claude"))
+
+    # Verify the URL included the env port — the error fires after URL construction
+    # so this just checks the flow doesn't crash before the health check.
+
+
+def test_launch_command_uses_env_api_key(monkeypatch):
+    import io
+    import json as _json
+
+    monkeypatch.setenv("OMLX_PROXY_API_KEY", "env-secret")
+
+    health_bytes = b'{"status":"healthy"}'
+    models_bytes = _json.dumps({"data": [{"id": "m"}]}).encode()
+    responses = [io.BytesIO(health_bytes), io.BytesIO(models_bytes)]
+    seen_headers = []
+
+    class FakeCtx:
+        def __init__(self, data):
+            self._data = data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self):
+            return self._data.read()
+
+    call_count = [0]
+
+    def fake_open(req, timeout):
+        seen_headers.append(req.get_header("Authorization"))
+        idx = call_count[0]
+        call_count[0] += 1
+        return FakeCtx(responses[idx])
+
+    monkeypatch.setattr(omni_cli.urllib.request, "urlopen", fake_open)
+
+    from omlx.integrations import get_integration
+    real_integration = get_integration("claude")
+    monkeypatch.setattr(real_integration, "is_installed", lambda: True)
+    monkeypatch.setattr(real_integration, "launch", lambda ctx: None)
+
+    omni_cli.launch_command(parse_launch("claude", "--port", "8080"))
+
+    assert seen_headers[0] == "Bearer env-secret"
+
+
+def test_top_level_help_documents_launch_command(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        omni_cli.main(["--help"])
+
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "omni launch" in out

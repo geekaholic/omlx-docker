@@ -106,6 +106,7 @@ class CodexIntegration(Integration):
         new_lines.append('name = "oMLX"')
         new_lines.append(f'base_url = "{ctx.openai_base_url}"')
         new_lines.append('env_key = "OMLX_API_KEY"')
+        new_lines.append('wire_api = "responses"')
 
         config_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
         print(f"Config updated: {config_path}")

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -37,6 +39,11 @@ from .backend import (
 )
 from .admin import configure_admin
 from .config import ProxyConfig
+from .responses_adapter import (
+    non_streaming_responses_response,
+    responses_to_chat_body,
+    stream_responses_events,
+)
 from .scaling import anthropic_keepalive_frame, scale_token_count
 
 security = HTTPBearer(auto_error=False)
@@ -112,11 +119,15 @@ def create_app(
     @app.get("/v1/models", dependencies=[Depends(verify_proxy_key)])
     async def list_models(request: Request):
         try:
-            return await backend.get_models(
+            data = await backend.get_models(
                 _backend_authorization(request, backend.config)
             )
         except Exception as exc:
             raise _backend_http_exception(exc)
+        return _enrich_model_list(
+            data,
+            getattr(request.app.state, "proxy_admin_state", None),
+        )
 
     @app.get("/v1/models/status", dependencies=[Depends(verify_proxy_key)])
     async def list_models_status(request: Request):
@@ -255,6 +266,36 @@ def create_app(
         return TokenCountResponse(
             input_tokens=scale_token_count(estimated, backend.config),
         )
+
+    @app.post("/v1/responses", dependencies=[Depends(verify_proxy_key)])
+    async def responses_endpoint(request: Request):
+        try:
+            payload = await request.json()
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+        cc_body = responses_to_chat_body(payload)
+        apply_proxy_request_defaults(
+            cc_body,
+            getattr(request.app.state, "proxy_admin_state", None),
+            include_chat_template=True,
+        )
+        auth = _backend_authorization(request, backend.config)
+        resp_id = f"resp_{uuid.uuid4().hex}"
+        created_at = int(time.time())
+        model = payload.get("model") or cc_body.get("model", "")
+
+        if cc_body.get("stream"):
+            return StreamingResponse(
+                stream_responses_events(backend, cc_body, auth, resp_id, model, created_at),
+                media_type="text/event-stream",
+            )
+
+        try:
+            data = await backend.chat_completion(cc_body, auth)
+        except Exception as exc:
+            raise _backend_http_exception(exc)
+        return non_streaming_responses_response(data, resp_id, created_at)
 
     @app.api_route(
         "/v1/chat/completions",
@@ -565,6 +606,46 @@ def _map_anthropic_tool_choice(value: Any) -> str | dict[str, Any]:
 def estimate_tokens(messages: list[dict[str, Any]], tools: Any = None) -> int:
     text = json.dumps({"messages": messages, "tools": tools}, ensure_ascii=False)
     return max(1, len(text) // 4)
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _enrich_model_list(data: dict[str, Any], admin_state: Any) -> dict[str, Any]:
+    """Add context_window / max_context_window to each /v1/models entry.
+
+    Codex (and other clients) use these fields to determine context limits
+    for custom providers. Priority: admin per-model setting > admin global
+    override > backend-reported max_model_len.
+    """
+    items = data.get("data")
+    if not isinstance(items, list):
+        return data
+    enriched = []
+    for item in items:
+        if not isinstance(item, dict):
+            enriched.append(item)
+            continue
+        model_id = str(item.get("id", ""))
+        ctx: int | None = None
+        if admin_state is not None:
+            per_model = (admin_state.model_settings or {}).get(model_id, {}) or {}
+            ctx = _int_or_none(per_model.get("max_context_window"))
+            if ctx is None:
+                global_ov = admin_state.global_overrides or {}
+                ctx = _int_or_none(global_ov.get("sampling_max_context_window"))
+        if ctx is None:
+            ctx = _int_or_none(item.get("max_model_len"))
+        if ctx is not None:
+            item = {**item, "context_window": ctx, "max_context_window": ctx}
+        enriched.append(item)
+    return {**data, "data": enriched}
 
 
 def _backend_http_exception(exc: Exception) -> HTTPException:
