@@ -119,8 +119,8 @@ python3 -m pytest tests/test_omni_cli.py -q
 
 ## Quickstart: vLLM Sidecar
 
-Use `omni serve` to generate a local vLLM Compose file and launch oMNI plus a
-vLLM OpenAI server sidecar on Linux/NVIDIA hosts.
+Use `omni serve --backend vllm` to generate a local vLLM Compose file and launch
+oMNI plus a vLLM OpenAI server sidecar on Linux/NVIDIA hosts.
 
 ```bash
 omni serve --backend vllm \
@@ -133,6 +133,7 @@ explicit env file:
 
 - `docker/docker-compose.vllm.yml` - generated Compose stack, ignored by git.
 - `docker/docker-compose.vllm.env` - last-used vLLM launch settings, ignored by git.
+- `docker/omni-serve.json` - last-used `omni serve` backend/compose selection, ignored by git.
 
 If `docker/docker-compose.vllm.env` already exists, omitted `omni serve` flags
 reuse values from that file. Passing a flag such as `--model`,
@@ -213,9 +214,18 @@ Use `omni status` to view the containers for the active oMNI Compose stack:
 omni status
 ```
 
-By default, `omni status` uses the generated `docker/docker-compose.vllm.yml`
-when it exists, otherwise it falls back to `docker/docker-compose.proxy.yml`. To
-inspect a specific stack:
+By default, a first `omni serve` with no backend flags launches
+`docker/docker-compose.proxy.yml` against the Ollama-compatible
+`http://host.docker.internal:11434/v1` backend URL. Explicit backend launches are
+remembered in `docker/omni-serve.json`, so future plain `omni serve` invocations
+reuse the last backend and compose file. Proxy launch environment is persisted in
+`docker/docker-compose.proxy.env`; vLLM launch environment remains persisted in
+`docker/docker-compose.vllm.env`.
+
+By default, `omni status` uses the last saved compose file when present. Without
+saved state it uses the generated `docker/docker-compose.vllm.yml` when it
+exists, otherwise it falls back to `docker/docker-compose.proxy.yml`. To inspect
+a specific stack:
 
 ```bash
 omni status --compose-file docker/docker-compose.proxy.yml
@@ -362,6 +372,8 @@ regression suites for the Linux proxy path.
 | `docker/docker-compose.vllm.template.yml` | Default template for generated vLLM compose files |
 | `docker/docker-compose.vllm.yml` | Local generated vLLM sidecar compose file, ignored by git |
 | `docker/docker-compose.vllm.env` | Local generated vLLM launch settings, ignored by git |
+| `docker/docker-compose.proxy.env` | Local proxy launch settings, ignored by git |
+| `docker/omni-serve.json` | Last `omni serve` backend/compose selection, ignored by git |
 | `docker/proxy.env.example` | Example environment values |
 | `tests/test_proxy.py` | Proxy regression tests |
 | `LINUX_PROXY_REMAINING_WORK.md` | Current backlog |

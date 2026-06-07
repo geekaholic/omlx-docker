@@ -254,6 +254,12 @@ class TestExceptionHandlers:
         """Create a test client for the FastAPI app."""
         return TestClient(app, raise_server_exceptions=False)
 
+    def test_root_redirects_to_admin_dashboard(self, client):
+        """Root browser path should redirect to the admin dashboard."""
+        response = client.get("/", follow_redirects=False)
+        assert response.status_code == 302
+        assert response.headers["location"] == "/admin/dashboard"
+
     def test_http_exception_logged(self, client, caplog):
         """Test that HTTPException responses are logged."""
         # /v1/models requires startup, so a 404 on a non-existent route works

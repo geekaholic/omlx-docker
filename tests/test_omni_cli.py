@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the Linux/proxy-first omni CLI."""
 
-from pathlib import Path
-
 import pytest
 
 from omlx import omni_cli
@@ -11,6 +9,20 @@ from omlx.proxy.vllm_compose import VllmComposeSettings, write_vllm_compose
 
 def parse_args(*args):
     return omni_cli.build_parser().parse_args(["serve", *args])
+
+
+@pytest.fixture(autouse=True)
+def isolate_omni_local_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        omni_cli,
+        "DEFAULT_SERVE_STATE_FILE",
+        tmp_path / "omni-serve.json",
+    )
+    monkeypatch.setattr(
+        omni_cli,
+        "DEFAULT_PROXY_ENV_FILE",
+        tmp_path / "docker-compose.proxy.env",
+    )
 
 
 def test_top_level_help_documents_serve_options(capsys):
@@ -65,6 +77,19 @@ def test_default_control_compose_file_prefers_generated_vllm(monkeypatch, tmp_pa
     assert omni_cli.default_control_compose_file() == vllm_compose
 
     vllm_compose.unlink()
+
+    assert omni_cli.default_control_compose_file() == proxy_compose
+
+
+def test_default_control_compose_file_prefers_saved_state(monkeypatch, tmp_path):
+    proxy_compose = tmp_path / "docker-compose.proxy.yml"
+    vllm_compose = tmp_path / "docker-compose.vllm.yml"
+    proxy_compose.write_text("services: {}")
+    vllm_compose.write_text("services: {}")
+    monkeypatch.setattr(omni_cli, "DEFAULT_PROXY_COMPOSE", proxy_compose)
+    monkeypatch.setattr(omni_cli, "DEFAULT_VLLM_COMPOSE", vllm_compose)
+
+    omni_cli.save_serve_state(backend="ollama", compose_file=proxy_compose)
 
     assert omni_cli.default_control_compose_file() == proxy_compose
 
@@ -403,6 +428,58 @@ def test_vllm_generate_only_writes_compose(tmp_path, capsys):
     assert "docker compose --env-file" in capsys.readouterr().out
 
 
+def test_serve_without_backend_defaults_to_proxy_stack(capsys):
+    result = omni_cli.main(["serve", "--generate-only", "--no-build"])
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert "OMLX_BACKEND_URL=http://host.docker.internal:11434/v1" in output
+    assert f"--env-file {omni_cli.DEFAULT_PROXY_ENV_FILE}" in output
+    assert f"-f {omni_cli.DEFAULT_PROXY_COMPOSE}" in output
+
+    env = omni_cli.load_env_file(omni_cli.DEFAULT_PROXY_ENV_FILE)
+    assert env["OMLX_BACKEND_URL"] == "http://host.docker.internal:11434/v1"
+    assert env["OMLX_PROXY_PORT"] == "8080"
+
+    state = omni_cli.load_serve_state()
+    assert state["backend"] == "ollama"
+    assert state["compose_file"] == str(omni_cli.DEFAULT_PROXY_COMPOSE)
+
+
+def test_vllm_serve_persists_last_backend(tmp_path):
+    compose_file = tmp_path / "docker-compose.vllm.yml"
+
+    result = omni_cli.main([
+        "serve",
+        "--backend",
+        "vllm",
+        "--compose-file",
+        str(compose_file),
+        "--generate-only",
+        "--no-build",
+    ])
+
+    assert result == 0
+    state = omni_cli.load_serve_state()
+    assert state["backend"] == "vllm"
+    assert state["compose_file"] == str(compose_file)
+
+
+def test_plain_serve_reuses_saved_vllm_backend(tmp_path, capsys):
+    compose_file = tmp_path / "docker-compose.vllm.yml"
+    env_file = compose_file.with_suffix(".env")
+    omni_cli.save_serve_state(backend="vllm", compose_file=compose_file)
+
+    result = omni_cli.main(["serve", "--generate-only", "--no-build"])
+
+    assert result == 0
+    assert compose_file.exists()
+    assert env_file.exists()
+    output = capsys.readouterr().out
+    assert f"--env-file {env_file}" in output
+    assert f"-f {compose_file}" in output
+
+
 def test_vllm_generate_only_writes_env_file_defaults(tmp_path, capsys):
     compose_file = tmp_path / "docker-compose.vllm.yml"
     env_file = compose_file.with_suffix(".env")
@@ -651,7 +728,93 @@ def test_ollama_proxy_backend_defaults(capsys):
     assert result == 0
     output = capsys.readouterr().out
     assert "OMLX_BACKEND_URL=http://host.docker.internal:11434/v1" in output
-    assert "docker compose -f" in output
+    assert "docker compose --env-file" in output
+
+
+def test_proxy_serve_preserves_existing_env_when_flags_omitted(tmp_path):
+    compose_file = tmp_path / "docker-compose.proxy.yml"
+    env_file = compose_file.with_suffix(".env")
+    compose_file.write_text("services: {}")
+    omni_cli.write_generic_env_file(
+        env_file,
+        {
+            "OMLX_BACKEND_URL": "https://api.example.test/v1",
+            "OMLX_BACKEND_API_KEY": "backend-secret",
+            "OMLX_PROXY_API_KEY": "proxy-secret",
+            "OMLX_PROXY_PORT": "8080",
+            "OMLX_CONTEXT_SCALING": "true",
+            "OMLX_TARGET_CONTEXT_SIZE": "123456",
+            "OMLX_ACTUAL_CONTEXT_SIZE": "32768",
+            "OMLX_SSE_KEEPALIVE_MODE": "comment",
+        },
+        omni_cli.PROXY_ENV_KEYS,
+    )
+
+    result = omni_cli.main([
+        "serve",
+        "--backend",
+        "openai",
+        "--compose-file",
+        str(compose_file),
+        "--proxy-port",
+        "9090",
+        "--generate-only",
+        "--no-build",
+    ])
+
+    assert result == 0
+    env = omni_cli.load_env_file(env_file)
+    assert env["OMLX_BACKEND_URL"] == "https://api.example.test/v1"
+    assert env["OMLX_BACKEND_API_KEY"] == "backend-secret"
+    assert env["OMLX_PROXY_API_KEY"] == "proxy-secret"
+    assert env["OMLX_PROXY_PORT"] == "9090"
+    assert env["OMLX_CONTEXT_SCALING"] == "true"
+
+
+def test_proxy_serve_writes_backend_url_and_recalls_it(tmp_path):
+    compose_file = tmp_path / "docker-compose.proxy.yml"
+    env_file = compose_file.with_suffix(".env")
+    compose_file.write_text("services: {}")
+
+    result = omni_cli.main([
+        "serve",
+        "--backend",
+        "openai",
+        "--backend-url",
+        "https://api.example.test/v1",
+        "--compose-file",
+        str(compose_file),
+        "--generate-only",
+        "--no-build",
+    ])
+
+    assert result == 0
+    env = omni_cli.load_env_file(env_file)
+    assert env["OMLX_BACKEND_URL"] == "https://api.example.test/v1"
+
+    result = omni_cli.main(["serve", "--proxy-port", "9191", "--generate-only", "--no-build"])
+
+    assert result == 0
+    env = omni_cli.load_env_file(env_file)
+    assert env["OMLX_BACKEND_URL"] == "https://api.example.test/v1"
+    assert env["OMLX_PROXY_PORT"] == "9191"
+
+
+def test_proxy_dry_run_does_not_write_state_or_env(tmp_path):
+    compose_file = tmp_path / "docker-compose.proxy.yml"
+    env_file = compose_file.with_suffix(".env")
+    compose_file.write_text("services: {}")
+
+    result = omni_cli.main([
+        "serve",
+        "--compose-file",
+        str(compose_file),
+        "--dry-run",
+    ])
+
+    assert result == 0
+    assert not env_file.exists()
+    assert not omni_cli.DEFAULT_SERVE_STATE_FILE.exists()
 
 
 def test_openai_proxy_requires_backend_url():
@@ -755,7 +918,6 @@ def test_launch_command_exits_when_proxy_unreachable(monkeypatch):
 
 def test_launch_command_exits_when_no_models(monkeypatch):
     import io
-    import urllib.error
 
     health_response = io.BytesIO(b'{"status":"healthy"}')
     models_response = io.BytesIO(b'{"data":[]}')
@@ -836,8 +998,6 @@ def test_launch_command_calls_integration_launch(monkeypatch):
 
 
 def test_launch_command_uses_env_port(monkeypatch):
-    import io
-
     monkeypatch.setenv("OMLX_PROXY_PORT", "9191")
 
     def fail_open(req, timeout):

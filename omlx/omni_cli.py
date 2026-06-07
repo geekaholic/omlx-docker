@@ -10,22 +10,24 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping, Sequence
 
 from ._version import __version__
 from .proxy.vllm_compose import (
     VllmComposeSettings,
-    default_vllm_environment as _shared_default_vllm_environment,
     known_vllm_env,
     load_vllm_env_file,
     render_vllm_compose_for_path,
     render_vllm_env_file,
     vllm_env_from_compose,
-    vllm_environment,
     vllm_settings_from_env,
     write_vllm_compose_for_path,
     write_vllm_env_file,
+)
+from .proxy.vllm_compose import (
+    default_vllm_environment as _shared_default_vllm_environment,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +35,58 @@ DOCKER_DIR = REPO_ROOT / "docker"
 DEFAULT_PROXY_COMPOSE = DOCKER_DIR / "docker-compose.proxy.yml"
 DEFAULT_VLLM_COMPOSE = DOCKER_DIR / "docker-compose.vllm.yml"
 DEFAULT_VLLM_ENV_FILE = DOCKER_DIR / "docker-compose.vllm.env"
+DEFAULT_PROXY_ENV_FILE = DOCKER_DIR / "docker-compose.proxy.env"
+DEFAULT_SERVE_STATE_FILE = DOCKER_DIR / "omni-serve.json"
+
+SERVE_STATE_VERSION = 1
+PROXY_BACKENDS = {"openai", "ollama", "llamacpp"}
+BACKENDS = {"vllm", *PROXY_BACKENDS}
+PROXY_ENV_KEYS = (
+    "OMLX_BACKEND_URL",
+    "OMLX_BACKEND_API_KEY",
+    "OMLX_PROXY_API_KEY",
+    "OMLX_PROXY_PORT",
+    "OMLX_CONTEXT_SCALING",
+    "OMLX_TARGET_CONTEXT_SIZE",
+    "OMLX_ACTUAL_CONTEXT_SIZE",
+    "OMLX_SSE_KEEPALIVE_MODE",
+)
+VLLM_SPECIFIC_ARG_ATTRS = (
+    "vllm_image",
+    "model",
+    "served_model_name",
+    "port",
+    "max_model_len",
+    "gpu_memory_utilization",
+    "max_num_seqs",
+    "hf_home",
+    "generation_config",
+    "default_chat_template_kwargs",
+    "trust_remote_code",
+    "enforce_eager",
+    "enable_auto_tool_choice",
+    "tool_call_parser",
+    "reasoning_parser",
+    "dtype",
+    "tokenizer",
+    "tokenizer_mode",
+    "revision",
+    "load_format",
+    "quantization",
+    "download_dir",
+    "max_num_batched_tokens",
+    "enable_chunked_prefill",
+    "enable_prefix_caching",
+    "kv_cache_dtype",
+    "cpu_offload_gb",
+    "swap_space",
+    "tensor_parallel_size",
+    "pipeline_parallel_size",
+    "uvicorn_log_level",
+    "disable_log_stats",
+    "extra_args_json",
+    "hf_endpoint",
+)
 
 
 TOP_LEVEL_HELP = """
@@ -110,6 +164,7 @@ Proxy behavior options:
   --sse-keepalive-mode {ping,comment,off}
 
 Examples:
+  omni serve
   omni serve --backend vllm --model Qwen/Qwen3-1.7B --served-model-name qwen3
   omni serve --backend ollama
   omni serve --backend llamacpp --backend-url http://host.docker.internal:8000/v1
@@ -131,7 +186,8 @@ argparse's detailed option descriptions.
 SERVE_DESCRIPTION = """
 Bootstrap oMNI with Docker Compose. vLLM is generated as a local sidecar
 compose file; OpenAI, Ollama, and llama.cpp use the proxy compose against an
-external OpenAI-compatible backend.
+external OpenAI-compatible backend. A first `omni serve` uses the proxy compose;
+later runs reuse the last saved serve backend unless flags choose another one.
 """.strip()
 
 
@@ -159,8 +215,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--backend",
         choices=["vllm", "openai", "ollama", "llamacpp"],
-        default="vllm",
-        help="Backend to launch or proxy to (default: vllm)",
+        default=None,
+        help="Backend to launch or proxy to (default: last used, then ollama proxy)",
     )
     serve.add_argument(
         "--backend-url",
@@ -451,6 +507,55 @@ def default_compose_file(backend: str) -> Path:
     return DEFAULT_PROXY_COMPOSE
 
 
+def _path_from_state(value: object) -> Path | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return Path(value).expanduser()
+
+
+def load_serve_state(path: Path | None = None) -> dict[str, str]:
+    state_path = path or DEFAULT_SERVE_STATE_FILE
+    if not state_path.exists():
+        return {}
+    try:
+        raw = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    backend = raw.get("backend")
+    if backend not in BACKENDS:
+        return {}
+    state: dict[str, str] = {"backend": str(backend)}
+    compose_file = raw.get("compose_file")
+    if isinstance(compose_file, str) and compose_file.strip():
+        state["compose_file"] = compose_file
+    return state
+
+
+def save_serve_state(
+    *,
+    backend: str,
+    compose_file: Path,
+    path: Path | None = None,
+) -> Path:
+    if backend not in BACKENDS:
+        raise ValueError(f"Unknown backend: {backend}")
+    state_path = path or DEFAULT_SERVE_STATE_FILE
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": SERVE_STATE_VERSION,
+        "backend": backend,
+        "compose_file": str(compose_file),
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    state_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return state_path
+
+
 def compose_command(compose_file: Path, *, foreground: bool, build: bool) -> list[str]:
     command = ["docker", "compose", "-f", str(compose_file), "up"]
     if not foreground:
@@ -460,13 +565,7 @@ def compose_command(compose_file: Path, *, foreground: bool, build: bool) -> lis
     return command
 
 
-def vllm_env_file_for_compose(compose_file: Path) -> Path:
-    if compose_file.resolve() == DEFAULT_VLLM_COMPOSE.resolve():
-        return DEFAULT_VLLM_ENV_FILE
-    return compose_file.with_suffix(".env")
-
-
-def vllm_compose_command(
+def compose_env_command(
     compose_file: Path,
     env_file: Path,
     *,
@@ -487,6 +586,33 @@ def vllm_compose_command(
     if build:
         command.append("--build")
     return command
+
+
+def vllm_env_file_for_compose(compose_file: Path) -> Path:
+    if compose_file.resolve() == DEFAULT_VLLM_COMPOSE.resolve():
+        return DEFAULT_VLLM_ENV_FILE
+    return compose_file.with_suffix(".env")
+
+
+def proxy_env_file_for_compose(compose_file: Path) -> Path:
+    if compose_file.resolve() == DEFAULT_PROXY_COMPOSE.resolve():
+        return DEFAULT_PROXY_ENV_FILE
+    return compose_file.with_suffix(".env")
+
+
+def vllm_compose_command(
+    compose_file: Path,
+    env_file: Path,
+    *,
+    foreground: bool,
+    build: bool,
+) -> list[str]:
+    return compose_env_command(
+        compose_file,
+        env_file,
+        foreground=foreground,
+        build=build,
+    )
 
 
 
@@ -577,7 +703,112 @@ def vllm_cli_environment(args: argparse.Namespace) -> dict[str, str]:
     return values
 
 
+def has_vllm_specific_args(args: argparse.Namespace) -> bool:
+    return any(getattr(args, attr, None) is not None for attr in VLLM_SPECIFIC_ARG_ATTRS)
+
+
+def resolve_serve_backend(
+    args: argparse.Namespace,
+    state: Mapping[str, str] | None = None,
+) -> str:
+    if args.backend:
+        return args.backend
+    if has_vllm_specific_args(args):
+        return "vllm"
+    if args.backend_url:
+        state_backend = (state or {}).get("backend")
+        if state_backend in PROXY_BACKENDS:
+            return state_backend
+        return "openai"
+    state_backend = (state or {}).get("backend")
+    if state_backend in BACKENDS:
+        return str(state_backend)
+    return "ollama"
+
+
+def compose_file_for_serve_backend(
+    args: argparse.Namespace,
+    backend: str,
+    state: Mapping[str, str] | None = None,
+) -> Path:
+    if args.compose_file:
+        return Path(args.compose_file).expanduser()
+    if (state or {}).get("backend") == backend:
+        state_compose = _path_from_state((state or {}).get("compose_file"))
+        if state_compose is not None:
+            return state_compose
+    return default_compose_file(backend)
+
+
+def default_proxy_environment(backend: str) -> dict[str, str]:
+    return {
+        "OMLX_BACKEND_URL": (
+            "http://host.docker.internal:11434/v1" if backend == "ollama" else ""
+        ),
+        "OMLX_BACKEND_API_KEY": "",
+        "OMLX_PROXY_API_KEY": "",
+        "OMLX_PROXY_PORT": str(VllmComposeSettings.proxy_port),
+        "OMLX_CONTEXT_SCALING": "false",
+        "OMLX_TARGET_CONTEXT_SIZE": str(VllmComposeSettings.target_context_size),
+        "OMLX_ACTUAL_CONTEXT_SIZE": "32768",
+        "OMLX_SSE_KEEPALIVE_MODE": VllmComposeSettings.sse_keepalive_mode,
+    }
+
+
+def proxy_cli_environment(args: argparse.Namespace) -> dict[str, str]:
+    values: dict[str, str] = {}
+    mappings = {
+        "backend_url": "OMLX_BACKEND_URL",
+        "backend_api_key": "OMLX_BACKEND_API_KEY",
+        "api_key": "OMLX_PROXY_API_KEY",
+        "proxy_port": "OMLX_PROXY_PORT",
+        "target_context_size": "OMLX_TARGET_CONTEXT_SIZE",
+        "sse_keepalive_mode": "OMLX_SSE_KEEPALIVE_MODE",
+    }
+    for attr, key in mappings.items():
+        value = getattr(args, attr, None)
+        if value is not None:
+            values[key] = str(value)
+    if args.context_scaling:
+        values["OMLX_CONTEXT_SCALING"] = "true"
+    return values
+
+
+def render_generic_env_file(
+    values: Mapping[str, str],
+    keys: Sequence[str],
+    *,
+    include_header: bool = False,
+) -> str:
+    lines: list[str] = []
+    if include_header:
+        lines.append("# Generated by omni. Edit with `omni serve` flags.")
+    for key in keys:
+        value = str(values.get(key, ""))
+        if "\n" in value or "\r" in value:
+            raise ValueError(f"Environment value for {key} cannot contain newlines")
+        lines.append(f"{key}={value}")
+    return "\n".join(lines) + "\n"
+
+
+def write_generic_env_file(
+    path: Path,
+    values: Mapping[str, str],
+    keys: Sequence[str],
+) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        render_generic_env_file(values, keys, include_header=True),
+        encoding="utf-8",
+    )
+    return path
+
+
 def default_control_compose_file() -> Path:
+    state = load_serve_state()
+    state_compose = _path_from_state(state.get("compose_file"))
+    if state_compose is not None and state_compose.exists():
+        return state_compose
     if DEFAULT_VLLM_COMPOSE.exists():
         return DEFAULT_VLLM_COMPOSE
     return DEFAULT_PROXY_COMPOSE
@@ -629,29 +860,30 @@ def restart_services_for_target(target: str, services: Sequence[str]) -> list[st
     return services_for_target(target, services)
 
 
-def proxy_backend_url(args: argparse.Namespace) -> str:
-    if args.backend == "ollama":
-        return args.backend_url or "http://host.docker.internal:11434/v1"
-    if args.backend_url:
-        return args.backend_url
-    raise SystemExit(f"--backend-url is required for --backend {args.backend}")
+def proxy_backend_url(backend: str, values: Mapping[str, str]) -> str:
+    backend_url = values.get("OMLX_BACKEND_URL", "").strip()
+    if backend == "ollama":
+        return backend_url or "http://host.docker.internal:11434/v1"
+    if backend_url:
+        return backend_url
+    raise SystemExit(f"--backend-url is required for --backend {backend}")
 
 
-def proxy_environment(args: argparse.Namespace) -> dict[str, str]:
-    return {
-        "OMLX_BACKEND_URL": proxy_backend_url(args),
-        "OMLX_BACKEND_API_KEY": args.backend_api_key or "",
-        "OMLX_PROXY_API_KEY": args.api_key or "",
-        "OMLX_PROXY_PORT": str(args.proxy_port or VllmComposeSettings.proxy_port),
-        "OMLX_CONTEXT_SCALING": _bool_str(args.context_scaling),
-        "OMLX_TARGET_CONTEXT_SIZE": str(
-            args.target_context_size or VllmComposeSettings.target_context_size
-        ),
-        "OMLX_ACTUAL_CONTEXT_SIZE": "32768",
-        "OMLX_SSE_KEEPALIVE_MODE": (
-            args.sse_keepalive_mode or VllmComposeSettings.sse_keepalive_mode
-        ),
-    }
+def proxy_environment(
+    args: argparse.Namespace,
+    *,
+    backend: str | None = None,
+    existing_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    effective_backend = backend or args.backend or "ollama"
+    values = default_proxy_environment(effective_backend)
+    if existing_env is not None:
+        values.update(
+            {key: str(existing_env[key]) for key in PROXY_ENV_KEYS if key in existing_env}
+        )
+    values.update(proxy_cli_environment(args))
+    values["OMLX_BACKEND_URL"] = proxy_backend_url(effective_backend, values)
+    return values
 
 
 def vllm_settings_from_args(
@@ -815,10 +1047,11 @@ def launch_command(args: argparse.Namespace) -> int:
 
 
 def serve_command(args: argparse.Namespace) -> int:
-    compose_file = Path(args.compose_file) if args.compose_file else default_compose_file(args.backend)
-    command = compose_command(compose_file, foreground=args.foreground, build=not args.no_build)
+    state = load_serve_state()
+    backend = resolve_serve_backend(args, state)
+    compose_file = compose_file_for_serve_backend(args, backend, state)
 
-    if args.backend == "vllm":
+    if backend == "vllm":
         env_file = vllm_env_file_for_compose(compose_file)
         merged_env = merged_vllm_environment(
             args,
@@ -840,6 +1073,7 @@ def serve_command(args: argparse.Namespace) -> int:
         else:
             write_vllm_compose_for_path(compose_file, settings)
             write_env_file(env_file, merged_env)
+            save_serve_state(backend=backend, compose_file=compose_file)
             print(f"Wrote {compose_file}")
             print(f"Wrote {env_file}")
         return run_compose(
@@ -849,15 +1083,31 @@ def serve_command(args: argparse.Namespace) -> int:
             generate_only=args.generate_only,
         )
 
-    env_overrides = proxy_environment(args)
     if not compose_file.exists():
         raise SystemExit(f"Compose file not found: {compose_file}")
+    env_file = proxy_env_file_for_compose(compose_file)
+    existing_env = load_env_file(env_file)
+    env_overrides = proxy_environment(
+        args,
+        backend=backend,
+        existing_env=existing_env,
+    )
+    command = compose_env_command(
+        compose_file,
+        env_file,
+        foreground=args.foreground,
+        build=not args.no_build,
+    )
     if args.dry_run or args.generate_only:
         for key in sorted(env_overrides):
             print(f"{key}={env_overrides[key]}")
+    if not args.dry_run:
+        write_generic_env_file(env_file, env_overrides, PROXY_ENV_KEYS)
+        save_serve_state(backend=backend, compose_file=compose_file)
+        print(f"Wrote {env_file}")
     return run_compose(
         command,
-        env_overrides,
+        {},
         dry_run=args.dry_run,
         generate_only=args.generate_only,
     )

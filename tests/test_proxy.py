@@ -73,6 +73,23 @@ def test_scale_token_count_uses_target_context_ratio():
 
 
 @pytest.mark.asyncio
+async def test_proxy_root_redirects_to_admin_dashboard():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"root redirect should not reach backend: {request.url.path}")
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/admin/dashboard"
+
+
+@pytest.mark.asyncio
 async def test_anthropic_endpoint_probes_do_not_return_405():
     async def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"probe should not reach backend: {request.url.path}")

@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
 
@@ -69,6 +69,10 @@ def create_app(
         lifespan=lifespan,
     )
     configure_admin(app, backend, proxy_config)
+
+    @app.get("/", include_in_schema=False)
+    async def root_redirect():
+        return RedirectResponse(url="/admin/dashboard", status_code=302)
 
     async def verify_proxy_key(
         credentials: HTTPAuthorizationCredentials = Depends(security),

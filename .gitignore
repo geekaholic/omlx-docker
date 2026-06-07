@@ -124,3 +124,5 @@ tq_batch_memory.md
 # Generated local Docker Compose files
 docker/docker-compose.vllm.yml
 docker/docker-compose.vllm.env
+docker/docker-compose.proxy.env
+docker/omni-serve.json

@@ -471,6 +471,11 @@ set_admin_getters(
 app.include_router(admin_router)
 
 
+@app.get("/", include_in_schema=False)
+async def root_redirect():
+    return RedirectResponse(url="/admin/dashboard", status_code=302)
+
+
 @app.exception_handler(_RedirectToLogin)
 async def redirect_to_login_handler(request, exc):
     """Redirect unauthenticated browser requests to the admin login page."""
