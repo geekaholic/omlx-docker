@@ -108,72 +108,117 @@
                                     </div>
                                     <span class="text-sm text-neutral-700 font-mono break-all text-right" x-text="globalSettings.proxy.state_path || 'disabled'"></span>
                                 </div>
-                                <div x-show="globalSettings.proxy.backend_type === 'vllm'" x-cloak class="px-4 sm:px-6 py-4 bg-neutral-50/70">
+                                <div x-show="globalSettings.proxy.backend_type === 'vllm' || globalSettings.proxy.backend_type === 'llama.cpp'" x-cloak class="px-4 sm:px-6 py-4 bg-neutral-50/70">
                                     <div class="mb-3">
-                                        <label class="text-sm font-medium text-neutral-700">vLLM Compose</label>
-                                        <p class="text-xs text-neutral-400 mt-0.5">Saved settings update docker/docker-compose.vllm.env and regenerate docker/docker-compose.vllm.yml. Restart the Compose stack for vLLM launch changes.</p>
+                                        <label class="text-sm font-medium text-neutral-700" x-text="globalSettings.proxy.backend_type === 'llama.cpp' ? 'llama.cpp Compose' : 'vLLM Compose'"></label>
+                                        <p class="text-xs text-neutral-400 mt-0.5">Saved settings update the generated sidecar env file and regenerate the sidecar compose file. Restart the Compose stack to apply launch changes.</p>
                                     </div>
                                     <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
                                         <label class="text-xs text-neutral-500">Image
-                                            <input type="text" x-model="globalSettings.proxy.vllm.image" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg">
+                                            <input type="text" x-model="globalSettings.proxy.sidecar.image" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg">
                                         </label>
                                         <label class="text-xs text-neutral-500">Model
-                                            <input type="text" x-model="globalSettings.proxy.vllm.model" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg">
+                                            <input type="text" x-model="globalSettings.proxy.sidecar.model" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" :placeholder="globalSettings.proxy.backend_type === 'llama.cpp' ? 'owner/repo:QUANT or model.gguf' : 'owner/repo or container path'">
                                         </label>
                                         <label class="text-xs text-neutral-500">Served Name
-                                            <input type="text" x-model="globalSettings.proxy.vllm.served_model_name" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg">
+                                            <input type="text" x-model="globalSettings.proxy.sidecar.served_model_name" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg">
                                         </label>
                                         <label class="text-xs text-neutral-500">HF Cache
-                                            <input type="text" x-model="globalSettings.proxy.vllm.hf_home" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg">
+                                            <input type="text" x-model="globalSettings.proxy.sidecar.hf_home" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg">
                                         </label>
-                                        <label class="text-xs text-neutral-500">Max Model Len
-                                            <input type="number" x-model.number="globalSettings.proxy.vllm.max_model_len" min="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
+                                        <label class="text-xs text-neutral-500">Context Length
+                                            <input type="number" x-model.number="globalSettings.proxy.sidecar.context_length" min="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
                                         </label>
-                                        <label class="text-xs text-neutral-500">Max Seqs
-                                            <input type="number" x-model.number="globalSettings.proxy.vllm.max_num_seqs" min="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
+                                        <label class="text-xs text-neutral-500">Max Parallel
+                                            <input type="number" x-model.number="globalSettings.proxy.sidecar.max_parallel" min="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
                                         </label>
+                                        <label class="text-xs text-neutral-500">Backend Port
+                                            <input type="number" x-model.number="globalSettings.proxy.sidecar.backend_port" min="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
+                                        </label>
+                                    </div>
+                                    <div x-show="globalSettings.proxy.backend_type === 'vllm'" x-cloak class="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-3">
                                         <label class="text-xs text-neutral-500">GPU Memory Utilization
-                                            <input type="number" x-model.number="globalSettings.proxy.vllm.gpu_memory_utilization" min="0.1" max="1" step="0.01" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
-                                        </label>
-                                        <label class="text-xs text-neutral-500">vLLM Port
-                                            <input type="number" x-model.number="globalSettings.proxy.vllm.port" min="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
+                                            <input type="number" x-model.number="globalSettings.proxy.sidecar.gpu_memory_utilization" min="0.1" max="1" step="0.01" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
                                         </label>
                                         <label class="text-xs text-neutral-500">Generation Config
-                                            <select x-model="globalSettings.proxy.vllm.generation_config" class="mt-1 w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg bg-white">
+                                            <select x-model="globalSettings.proxy.sidecar.generation_config" class="mt-1 w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg bg-white">
                                                 <option value="vllm">vllm defaults</option>
                                                 <option value="auto">model generation_config.json</option>
                                             </select>
                                         </label>
                                         <label class="text-xs text-neutral-500">Default Chat Template Kwargs
-                                            <input type="text" x-model="globalSettings.proxy.vllm.default_chat_template_kwargs" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder='{"enable_thinking":false}'>
+                                            <input type="text" x-model="globalSettings.proxy.sidecar.default_chat_template_kwargs" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder='{"enable_thinking":false}'>
                                         </label>
                                         <label class="flex items-center justify-between gap-3 text-xs text-neutral-500 px-3 py-2 border border-neutral-200 rounded-lg bg-white">
                                             <span>Trust remote code</span>
-                                            <input type="checkbox" x-model="globalSettings.proxy.vllm.trust_remote_code">
+                                            <input type="checkbox" x-model="globalSettings.proxy.sidecar.trust_remote_code">
                                         </label>
                                         <label class="flex items-center justify-between gap-3 text-xs text-neutral-500 px-3 py-2 border border-neutral-200 rounded-lg bg-white">
                                             <span>Enforce eager</span>
-                                            <input type="checkbox" x-model="globalSettings.proxy.vllm.enforce_eager">
+                                            <input type="checkbox" x-model="globalSettings.proxy.sidecar.enforce_eager">
                                         </label>
                                         <label class="flex items-center justify-between gap-3 text-xs text-neutral-500 px-3 py-2 border border-neutral-200 rounded-lg bg-white">
                                             <span>Auto tool choice</span>
-                                            <input type="checkbox" x-model="globalSettings.proxy.vllm.enable_auto_tool_choice">
+                                            <input type="checkbox" x-model="globalSettings.proxy.sidecar.enable_auto_tool_choice">
                                         </label>
                                         <label class="text-xs text-neutral-500">Tool parser
-                                            <input type="text" x-model="globalSettings.proxy.vllm.tool_call_parser" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg">
+                                            <input type="text" x-model="globalSettings.proxy.sidecar.tool_call_parser" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg">
                                         </label>
                                         <label class="text-xs text-neutral-500">Reasoning parser
-                                            <input type="text" x-model="globalSettings.proxy.vllm.reasoning_parser" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
+                                            <input type="text" x-model="globalSettings.proxy.sidecar.reasoning_parser" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
                                         </label>
                                     </div>
-                                    <div x-data="{ open: false }" class="mt-4 border border-neutral-200 rounded-lg bg-white overflow-hidden">
+                                    <div x-show="globalSettings.proxy.backend_type === 'llama.cpp'" x-cloak class="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-3">
+                                        <label class="text-xs text-neutral-500">GPU Layers (999 = all)
+                                            <input type="number" x-model.number="globalSettings.proxy.sidecar.n_gpu_layers" min="0" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">Flash Attention
+                                            <select x-model="globalSettings.proxy.sidecar.flash_attn" class="mt-1 w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg bg-white">
+                                                <option value="">auto</option>
+                                                <option value="on">on</option>
+                                                <option value="off">off</option>
+                                            </select>
+                                        </label>
+                                        <label class="text-xs text-neutral-500">KV Cache K Type
+                                            <input type="text" x-model="globalSettings.proxy.sidecar.cache_type_k" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="f16 (default), q8_0, q4_0">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">KV Cache V Type
+                                            <input type="text" x-model="globalSettings.proxy.sidecar.cache_type_v" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="f16 (default), q8_0, q4_0">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">Threads
+                                            <input type="text" x-model="globalSettings.proxy.sidecar.threads" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg" placeholder="auto">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">Batch Size
+                                            <input type="text" x-model="globalSettings.proxy.sidecar.batch_size" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg" placeholder="default">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">uBatch Size
+                                            <input type="text" x-model="globalSettings.proxy.sidecar.ubatch_size" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg" placeholder="default">
+                                        </label>
+                                        <label class="flex items-center justify-between gap-3 text-xs text-neutral-500 px-3 py-2 border border-neutral-200 rounded-lg bg-white">
+                                            <span>Jinja templates (tool calling)</span>
+                                            <input type="checkbox" x-model="globalSettings.proxy.sidecar.jinja">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">Reasoning Format
+                                            <input type="text" x-model="globalSettings.proxy.sidecar.reasoning_format" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="auto">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">GGUF Download Cache
+                                            <input type="text" x-model="globalSettings.proxy.sidecar.cache_dir" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg">
+                                        </label>
+                                        <label class="text-xs text-neutral-500">Local Model Dir (mounted at /models)
+                                            <input type="text" x-model="globalSettings.proxy.sidecar.model_dir" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="defaults to GGUF cache">
+                                        </label>
+                                        <label class="text-xs text-neutral-500 lg:col-span-2">Extra llama-server args
+                                            <input type="text" x-model="globalSettings.proxy.sidecar.extra_args" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="--mlock --no-mmap">
+                                        </label>
+                                    </div>
+                                    <div x-show="globalSettings.proxy.backend_type === 'vllm'" x-cloak x-data="{ open: false }" class="mt-4 border border-neutral-200 rounded-lg bg-white overflow-hidden">
                                         <button type="button" @click="open = !open" class="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-neutral-600 hover:bg-neutral-50">
                                             <span>vLLM Advanced</span>
                                             <i data-lucide="chevron-down" class="w-3.5 h-3.5 transition-transform" :class="open && 'rotate-180'"></i>
                                         </button>
                                         <div x-show="open" x-collapse x-cloak class="grid grid-cols-1 lg:grid-cols-2 gap-3 p-3 border-t border-neutral-200">
                                             <label class="text-xs text-neutral-500">Dtype
-                                                <select x-model="globalSettings.proxy.vllm.dtype" class="mt-1 w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg bg-white">
+                                                <select x-model="globalSettings.proxy.sidecar.dtype" class="mt-1 w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg bg-white">
                                                     <option value="">vLLM default</option>
                                                     <option value="auto">auto</option>
                                                     <option value="bfloat16">bfloat16</option>
@@ -184,68 +229,68 @@
                                                 </select>
                                             </label>
                                             <label class="text-xs text-neutral-500">Tokenizer
-                                                <input type="text" x-model="globalSettings.proxy.vllm.tokenizer" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
+                                                <input type="text" x-model="globalSettings.proxy.sidecar.tokenizer" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
                                             </label>
                                             <label class="text-xs text-neutral-500">Tokenizer mode
-                                                <input type="text" x-model="globalSettings.proxy.vllm.tokenizer_mode" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="auto">
+                                                <input type="text" x-model="globalSettings.proxy.sidecar.tokenizer_mode" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="auto">
                                             </label>
                                             <label class="text-xs text-neutral-500">Revision
-                                                <input type="text" x-model="globalSettings.proxy.vllm.revision" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
+                                                <input type="text" x-model="globalSettings.proxy.sidecar.revision" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
                                             </label>
                                             <label class="text-xs text-neutral-500">Load format
-                                                <input type="text" x-model="globalSettings.proxy.vllm.load_format" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
+                                                <input type="text" x-model="globalSettings.proxy.sidecar.load_format" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
                                             </label>
                                             <label class="text-xs text-neutral-500">Quantization
-                                                <input type="text" x-model="globalSettings.proxy.vllm.quantization" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
+                                                <input type="text" x-model="globalSettings.proxy.sidecar.quantization" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
                                             </label>
                                             <label class="text-xs text-neutral-500">Download dir
-                                                <input type="text" x-model="globalSettings.proxy.vllm.download_dir" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
+                                                <input type="text" x-model="globalSettings.proxy.sidecar.download_dir" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
                                             </label>
                                             <label class="text-xs text-neutral-500">Max batched tokens
-                                                <input type="text" x-model="globalSettings.proxy.vllm.max_num_batched_tokens" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg" placeholder="optional">
+                                                <input type="text" x-model="globalSettings.proxy.sidecar.max_num_batched_tokens" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg" placeholder="optional">
                                             </label>
                                             <label class="text-xs text-neutral-500">Chunked prefill
-                                                <select x-model="globalSettings.proxy.vllm.enable_chunked_prefill" class="mt-1 w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg bg-white">
+                                                <select x-model="globalSettings.proxy.sidecar.enable_chunked_prefill" class="mt-1 w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg bg-white">
                                                     <option value="">vLLM default</option>
                                                     <option :value="true">enabled</option>
                                                     <option :value="false">disabled</option>
                                                 </select>
                                             </label>
                                             <label class="text-xs text-neutral-500">Prefix caching
-                                                <select x-model="globalSettings.proxy.vllm.enable_prefix_caching" class="mt-1 w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg bg-white">
+                                                <select x-model="globalSettings.proxy.sidecar.enable_prefix_caching" class="mt-1 w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg bg-white">
                                                     <option value="">vLLM default</option>
                                                     <option :value="true">enabled</option>
                                                     <option :value="false">disabled</option>
                                                 </select>
                                             </label>
                                             <label class="text-xs text-neutral-500">KV cache dtype
-                                                <input type="text" x-model="globalSettings.proxy.vllm.kv_cache_dtype" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="auto">
+                                                <input type="text" x-model="globalSettings.proxy.sidecar.kv_cache_dtype" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="auto">
                                             </label>
                                             <label class="text-xs text-neutral-500">CPU offload GB
-                                                <input type="number" x-model.number="globalSettings.proxy.vllm.cpu_offload_gb" min="0" step="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
+                                                <input type="number" x-model.number="globalSettings.proxy.sidecar.cpu_offload_gb" min="0" step="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
                                             </label>
                                             <label class="text-xs text-neutral-500">Swap space GB
-                                                <input type="number" x-model.number="globalSettings.proxy.vllm.swap_space" min="0" step="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
+                                                <input type="number" x-model.number="globalSettings.proxy.sidecar.swap_space" min="0" step="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
                                             </label>
                                             <label class="text-xs text-neutral-500">Tensor parallel
-                                                <input type="number" x-model.number="globalSettings.proxy.vllm.tensor_parallel_size" min="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
+                                                <input type="number" x-model.number="globalSettings.proxy.sidecar.tensor_parallel_size" min="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
                                             </label>
                                             <label class="text-xs text-neutral-500">Pipeline parallel
-                                                <input type="number" x-model.number="globalSettings.proxy.vllm.pipeline_parallel_size" min="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
+                                                <input type="number" x-model.number="globalSettings.proxy.sidecar.pipeline_parallel_size" min="1" class="mt-1 w-full px-3 py-2 text-xs text-right border border-neutral-200 rounded-lg">
                                             </label>
                                             <label class="text-xs text-neutral-500">Uvicorn log level
-                                                <input type="text" x-model="globalSettings.proxy.vllm.uvicorn_log_level" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
+                                                <input type="text" x-model="globalSettings.proxy.sidecar.uvicorn_log_level" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder="optional">
                                             </label>
                                             <label class="flex items-center justify-between gap-3 text-xs text-neutral-500 px-3 py-2 border border-neutral-200 rounded-lg bg-white">
                                                 <span>Disable log stats</span>
-                                                <input type="checkbox" x-model="globalSettings.proxy.vllm.disable_log_stats">
+                                                <input type="checkbox" x-model="globalSettings.proxy.sidecar.disable_log_stats">
                                             </label>
                                             <label class="text-xs text-neutral-500 lg:col-span-2">Extra args JSON
-                                                <input type="text" x-model="globalSettings.proxy.vllm.extra_args_json" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder='["--flag","value"]'>
+                                                <input type="text" x-model="globalSettings.proxy.sidecar.extra_args_json" class="mt-1 w-full px-3 py-2 text-xs font-mono border border-neutral-200 rounded-lg" placeholder='["--flag","value"]'>
                                             </label>
                                         </div>
                                     </div>
-                                    <p class="text-xs text-neutral-400 mt-3" x-text="globalSettings.proxy.vllm.compose_output_path ? 'Output: ' + globalSettings.proxy.vllm.compose_output_path : 'Compose output path is not mounted in this container.'"></p>
+                                    <p class="text-xs text-neutral-400 mt-3" x-text="globalSettings.proxy.sidecar.compose_output_path ? 'Output: ' + globalSettings.proxy.sidecar.compose_output_path : 'Compose output path is not mounted in this container.'"></p>
                                 </div>
                             </div>
                         </div>

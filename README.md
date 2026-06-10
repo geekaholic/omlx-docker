@@ -137,7 +137,7 @@ explicit env file:
 
 If `docker/docker-compose.vllm.env` already exists, omitted `omni serve` flags
 reuse values from that file. Passing a flag such as `--model`,
-`--served-model-name`, or `--max-model-len` updates only the corresponding env
+`--served-model-name`, or `--context-length` updates only the corresponding env
 value. On first run, missing values use the built-in defaults. The proxy talks
 to vLLM at `http://vllm:8000/v1` inside the compose network and publishes oMNI
 on port `8080`. The compose file bind-mounts the host Hugging Face cache at
@@ -146,17 +146,64 @@ on port `8080`. The compose file bind-mounts the host Hugging Face cache at
 Restart the vLLM container after changing vLLM launch settings; proxy backend
 settings and proxy sampling defaults apply live in the running proxy.
 
-Useful environment variables:
+The sidecar compose uses `gpus: all` and `ipc: host`, so Docker must be
+configured with NVIDIA Container Toolkit on Linux. Use `omni serve --backend vllm`
+for vLLM sidecar launches.
+
+## Quickstart: llama.cpp Sidecar
+
+Use `omni serve --backend llamacpp` to generate a local llama.cpp Compose file
+and launch oMNI plus a `llama-server` sidecar. The model is either a Hugging
+Face GGUF repo (`owner/repo[:quantTag]`, downloaded by llama.cpp via `-hf` and
+cached in the mounted `~/.cache/llama.cpp`) or a local `.gguf` path (passed via
+`-m`; relative paths resolve inside the read-only `/models` mount):
+
+```bash
+omni serve --backend llamacpp \
+  --model ggml-org/Qwen3-1.7B-GGUF:Q8_0 \
+  --served-model-name qwen \
+  --context-length 16384
+
+# Local GGUF file from the llama.cpp cache / model dir mount
+omni serve --backend llamacpp --model qwen3.gguf \
+  --llamacpp-model-dir ~/gguf-models
+```
+
+Generated files mirror the vLLM workflow:
+
+- `docker/docker-compose.llamacpp.yml` - generated Compose stack, ignored by git.
+- `docker/docker-compose.llamacpp.env` - last-used llama.cpp launch settings, ignored by git.
+
+The host Hugging Face cache (`OMNI_HF_HOME`) is mounted into both the vLLM and
+llama.cpp containers, and `~/.cache/llama.cpp` persists `-hf` downloads, so
+switching backends never re-downloads models. With `--backend llamacpp
+--backend-url URL`, the command instead proxies to an external llama.cpp server
+and generates no sidecar compose.
+
+## Sidecar Environment Variables
+
+Portable settings carry the `OMNI_` prefix and apply to whichever managed
+sidecar backend is selected:
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `OMNI_MODEL` | per backend | Model id/path (vLLM: HF id or container path; llama.cpp: GGUF repo `owner/repo[:quant]` or `.gguf` path) |
+| `OMNI_SERVED_MODEL_NAME` | `qwen` | API-visible model name |
+| `OMNI_CONTEXT_LENGTH` | `8192` | Context length (vLLM `--max-model-len`, llama.cpp `--ctx-size`) |
+| `OMNI_MAX_PARALLEL` | `4` | Max concurrent sequences (vLLM `--max-num-seqs`, llama.cpp `--parallel`) |
+| `OMNI_BACKEND_PORT` | `8000` | Host port published for the backend container |
+| `OMNI_HF_HOME` | `${HOME}/.cache/huggingface` | Host Hugging Face cache to mount into the backend |
+| `OMNI_HF_ENDPOINT` | empty | Hugging Face endpoint exposed as `HF_ENDPOINT` |
+| `OMNI_HTTP_PROXY` / `OMNI_HTTPS_PROXY` | empty | Proxy env passed to proxy and backend containers |
+| `OMNI_NO_PROXY` | empty | No-proxy host list for both containers |
+| `OMNI_CA_BUNDLE` | empty | CA bundle path exposed as `REQUESTS_CA_BUNDLE`/`SSL_CERT_FILE` (llama.cpp: `CURL_CA_BUNDLE`) |
+
+vLLM-specific settings:
 
 | Variable | Default | Purpose |
 |---|---:|---|
 | `VLLM_IMAGE` | `vllm/vllm-openai:latest` | vLLM container image |
-| `VLLM_MODEL` | `Qwen/Qwen3-1.7B` | Hugging Face model id or container-local path |
-| `VLLM_SERVED_MODEL_NAME` | `qwen` | API-visible model name |
-| `VLLM_MAX_MODEL_LEN` | `8192` | vLLM context length |
 | `VLLM_GPU_MEMORY_UTILIZATION` | `0.80` | vLLM GPU memory fraction |
-| `VLLM_MAX_NUM_SEQS` | `4` | vLLM max concurrent sequences |
-| `VLLM_HF_HOME` | `${HOME}/.cache/huggingface` | Host Hugging Face cache to mount |
 | `VLLM_GENERATION_CONFIG` | `vllm` | Use vLLM defaults instead of model `generation_config.json` |
 | `VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS` | `{"enable_thinking":false}` | Disables Qwen thinking output in chat templates |
 | `VLLM_TRUST_REMOTE_CODE` | `true` | Add `--trust-remote-code` |
@@ -181,10 +228,27 @@ Useful environment variables:
 | `VLLM_UVICORN_LOG_LEVEL` | empty | Optional vLLM API log level |
 | `VLLM_DISABLE_LOG_STATS` | `false` | Add `--disable-log-stats` when true |
 | `VLLM_EXTRA_ARGS_JSON` | `[]` | Raw extra vLLM args as a JSON array appended last |
-| `VLLM_HTTP_PROXY` / `VLLM_HTTPS_PROXY` | empty | Proxy env passed to proxy and vLLM containers |
-| `VLLM_NO_PROXY` | empty | No-proxy host list for both containers |
-| `VLLM_CA_BUNDLE` | empty | CA bundle path exposed as `REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE` |
-| `VLLM_HF_ENDPOINT` | empty | Hugging Face endpoint exposed as `HF_ENDPOINT` |
+
+llama.cpp-specific settings:
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `LLAMACPP_IMAGE` | `ghcr.io/ggml-org/llama.cpp:server-cuda` | llama.cpp server image (use `:server` for CPU, `:server-vulkan` for non-NVIDIA GPUs) |
+| `LLAMACPP_N_GPU_LAYERS` | `999` | Layers offloaded to the GPU (`999` = all) |
+| `LLAMACPP_FLASH_ATTN` | empty (auto) | `--flash-attn on/off` when set |
+| `LLAMACPP_CACHE_TYPE_K` / `LLAMACPP_CACHE_TYPE_V` | empty (f16) | KV cache quantization, e.g. `q8_0` |
+| `LLAMACPP_THREADS` | empty (auto) | CPU threads |
+| `LLAMACPP_BATCH_SIZE` / `LLAMACPP_UBATCH_SIZE` | empty | Logical/physical batch sizes |
+| `LLAMACPP_JINJA` | `true` | `--jinja` chat templates (required for tool calling) |
+| `LLAMACPP_REASONING_FORMAT` | empty (auto) | `--reasoning-format` for thinking models |
+| `LLAMACPP_CACHE_DIR` | `${HOME}/.cache/llama.cpp` | Host cache for `-hf` GGUF downloads |
+| `LLAMACPP_MODEL_DIR` | cache dir | Host dir mounted read-only at `/models` for local `.gguf` files |
+| `LLAMACPP_EXTRA_ARGS` | empty | Raw llama-server args appended last (whitespace-split, unlike `VLLM_EXTRA_ARGS_JSON`) |
+
+Proxy defaults shared by both stacks:
+
+| Variable | Default | Purpose |
+|---|---:|---|
 | `OMLX_SAMPLING_MAX_TOKENS` | `32768` | Proxy default max output tokens when request omits it |
 | `OMLX_SAMPLING_TEMPERATURE` | `1.0` | Proxy default temperature when request omits it |
 | `OMLX_SAMPLING_TOP_P` | `1.0` | Proxy default top-p when request omits it |
@@ -192,19 +256,20 @@ Useful environment variables:
 | `OMLX_SAMPLING_REPETITION_PENALTY` | `1.0` | Proxy default repetition penalty when request omits it |
 | `HF_TOKEN` | empty | Hugging Face token for gated models |
 
-The admin settings page edits the same env-backed vLLM launch and proxy default
-settings, then regenerates `docker/docker-compose.vllm.yml`. Original oMLX
-sampling defaults such as temperature, top-p, top-k, repetition penalty, and max
-tokens are persisted in `docker/docker-compose.vllm.env` as `OMLX_SAMPLING_*`
-values and applied by the oMNI proxy to forwarded chat/completion requests when
-the client omits those fields. vLLM launch settings still require a
-backend/container restart. The generated vLLM entrypoint exports Hugging Face,
-proxy, and CA bundle environment variables only when configured, avoiding empty
-URL values such as `HF_ENDPOINT=` inside the vLLM process.
+The admin settings page edits the same env-backed sidecar launch and proxy
+default settings, then regenerates the active stack's compose file. Sampling
+defaults such as temperature, top-p, top-k, repetition penalty, and max tokens
+are persisted in the generated `.env` file as `OMLX_SAMPLING_*` values and
+applied by the oMNI proxy to forwarded chat/completion requests when the client
+omits those fields. Backend launch settings still require a backend/container
+restart. The generated entrypoints export Hugging Face, proxy, and CA bundle
+environment variables only when configured, avoiding empty URL values such as
+`HF_ENDPOINT=` inside the backend process.
 
-The sidecar compose uses `gpus: all` and `ipc: host`, so Docker must be
-configured with NVIDIA Container Toolkit on Linux. Use `omni serve --backend vllm`
-for vLLM sidecar launches.
+Note: earlier releases used `VLLM_`-prefixed names for the portable settings
+(`VLLM_MODEL`, `VLLM_MAX_MODEL_LEN`, `VLLM_PORT`, ...). Those names are no
+longer read; rerun `omni serve` with your flags (or re-save the admin settings)
+to regenerate the env file with the `OMNI_` names.
 
 ## Managing the Docker Stack
 
@@ -219,8 +284,8 @@ By default, a first `omni serve` with no backend flags launches
 `http://host.docker.internal:11434/v1` backend URL. Explicit backend launches are
 remembered in `docker/omni-serve.json`, so future plain `omni serve` invocations
 reuse the last backend and compose file. Proxy launch environment is persisted in
-`docker/docker-compose.proxy.env`; vLLM launch environment remains persisted in
-`docker/docker-compose.vllm.env`.
+`docker/docker-compose.proxy.env`; sidecar launch environments are persisted in
+`docker/docker-compose.vllm.env` and `docker/docker-compose.llamacpp.env`.
 
 By default, `omni status` uses the last saved compose file when present. Without
 saved state it uses the generated `docker/docker-compose.vllm.yml` when it
@@ -259,10 +324,10 @@ omni stop --target backend
 omni stop --target both
 ```
 
-For the vLLM sidecar stack, `--target backend` reads logs from, restarts, or
-stops the `vllm` service. For OpenAI, Ollama, and llama.cpp proxy stacks, the
-backend is external and not managed by this repo, so use `--target proxy` or
-inspect/restart/stop the backend with its own tooling.
+For the vLLM and llama.cpp sidecar stacks, `--target backend` reads logs from,
+restarts, or stops the `vllm` or `llamacpp` service. For OpenAI, Ollama, and
+external llama.cpp proxy stacks, the backend is not managed by this repo, so use
+`--target proxy` or inspect/restart/stop the backend with its own tooling.
 
 ## Running Without Docker
 
@@ -338,11 +403,13 @@ counts, running/waiting requests, and GPU cache usage.
 
 ### llama.cpp Server
 
-llama.cpp server is a target backend when launched with OpenAI-compatible
-endpoints. Current support assumes an externally managed server; a managed
-sidecar has not been added yet. Compatibility still needs more real-backend
-testing, especially around model listing, streaming behavior, tool calling, and
-metrics.
+llama.cpp runs either as a managed sidecar (`omni serve --backend llamacpp`,
+which generates and launches `docker/docker-compose.llamacpp.yml`) or as an
+externally managed server (`omni serve --backend llamacpp --backend-url URL`).
+The managed sidecar starts `llama-server` with `--jinja` by default so
+OpenAI-compatible tool calling works with modern chat templates. Compatibility
+still needs more real-backend testing, especially around model listing,
+streaming behavior, tool calling, and metrics.
 
 ## Development
 
@@ -370,8 +437,11 @@ regression suites for the Linux proxy path.
 | `docker/Dockerfile.proxy` | Minimal proxy image |
 | `docker/docker-compose.proxy.yml` | Proxy with external backend |
 | `docker/docker-compose.vllm.template.yml` | Default template for generated vLLM compose files |
+| `docker/docker-compose.llamacpp.template.yml` | Default template for generated llama.cpp compose files |
 | `docker/docker-compose.vllm.yml` | Local generated vLLM sidecar compose file, ignored by git |
 | `docker/docker-compose.vllm.env` | Local generated vLLM launch settings, ignored by git |
+| `docker/docker-compose.llamacpp.yml` | Local generated llama.cpp sidecar compose file, ignored by git |
+| `docker/docker-compose.llamacpp.env` | Local generated llama.cpp launch settings, ignored by git |
 | `docker/docker-compose.proxy.env` | Local proxy launch settings, ignored by git |
 | `docker/omni-serve.json` | Last `omni serve` backend/compose selection, ignored by git |
 | `docker/proxy.env.example` | Example environment values |
@@ -391,10 +461,11 @@ Working:
 - Proxy backend status and backend metrics panel.
 - Ollama backend support when Ollama exposes its OpenAI-compatible API.
 - vLLM-compatible Prometheus metrics parsing from `/metrics`.
-- Optional vLLM sidecar compose generation for NVIDIA hosts.
-- `omni` CLI for generating vLLM stacks and managing Compose containers.
-- Admin controls for backend URL/API key/type and vLLM launch settings.
-- Env-file persistence for vLLM launch settings and proxy sampling defaults.
+- Optional vLLM and llama.cpp sidecar compose generation for NVIDIA hosts.
+- `omni` CLI for generating sidecar stacks and managing Compose containers.
+- Admin controls for backend URL/API key/type and sidecar launch settings.
+- Env-file persistence for sidecar launch settings and proxy sampling defaults.
+- Backend-portable `OMNI_*` settings shared between vLLM and llama.cpp sidecars.
 - Context token scaling for Claude Code style workflows.
 - SSE keepalive support for long-running requests.
 
@@ -403,8 +474,8 @@ Still in progress:
 - Cleaner proxy-mode UI that hides native MLX-only controls.
 - More complete real-backend validation for vLLM, llama.cpp server, and Ollama.
 - Spark/Linux runbooks with known-good model examples and troubleshooting.
-- llama.cpp lifecycle decision: external-only backend versus managed sidecar.
-- Formal package/module rename from `omlx` toward `omni`.
+- Formal package/module rename from `omlx` toward `omni` (including the
+  remaining `OMLX_*` proxy env vars).
 - Removing unused macOS/MLX-native code from this fork.
 
 See [LINUX_PROXY_REMAINING_WORK.md](LINUX_PROXY_REMAINING_WORK.md) for the

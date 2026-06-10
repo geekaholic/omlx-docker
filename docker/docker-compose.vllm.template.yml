@@ -3,19 +3,20 @@
 services:
   omlx-proxy:
     build:
-      context: ..
+      context: ".."
       dockerfile: docker/Dockerfile.proxy
     ports:
       - "${OMLX_PROXY_PORT:-8080}:8080"
     environment:
       OMLX_BACKEND_URL: "http://vllm:8000/v1"
+      OMLX_SIDECAR_BACKEND: "vllm"
       OMLX_BACKEND_API_KEY: "${OMLX_BACKEND_API_KEY:-}"
       OMLX_PROXY_API_KEY: "${OMLX_PROXY_API_KEY:-}"
       OMLX_PROXY_HOST: "0.0.0.0"
       OMLX_PROXY_PORT: "8080"
       OMLX_CONTEXT_SCALING: "${OMLX_CONTEXT_SCALING:-false}"
       OMLX_TARGET_CONTEXT_SIZE: "${OMLX_TARGET_CONTEXT_SIZE:-200000}"
-      OMLX_ACTUAL_CONTEXT_SIZE: "${VLLM_MAX_MODEL_LEN:-8192}"
+      OMLX_ACTUAL_CONTEXT_SIZE: "${OMNI_CONTEXT_LENGTH:-8192}"
       OMLX_SSE_KEEPALIVE_MODE: "${OMLX_SSE_KEEPALIVE_MODE:-ping}"
       OMLX_SAMPLING_MAX_TOKENS: "${OMLX_SAMPLING_MAX_TOKENS:-32768}"
       OMLX_SAMPLING_TEMPERATURE: "${OMLX_SAMPLING_TEMPERATURE:-1.0}"
@@ -23,34 +24,39 @@ services:
       OMLX_SAMPLING_TOP_K: "${OMLX_SAMPLING_TOP_K:-0}"
       OMLX_SAMPLING_REPETITION_PENALTY: "${OMLX_SAMPLING_REPETITION_PENALTY:-1.0}"
       OMLX_PROXY_STATE_PATH: "/data/proxy-state.json"
-      OMLX_VLLM_COMPOSE_OUTPUT_PATH: "/compose-output/docker-compose.vllm.yml"
-      OMLX_VLLM_ENV_OUTPUT_PATH: "/compose-output/docker-compose.vllm.env"
-      HTTP_PROXY: "${VLLM_HTTP_PROXY:-}"
-      HTTPS_PROXY: "${VLLM_HTTPS_PROXY:-}"
-      NO_PROXY: "${VLLM_NO_PROXY:-}"
-      REQUESTS_CA_BUNDLE: "${VLLM_CA_BUNDLE:-}"
-      SSL_CERT_FILE: "${VLLM_CA_BUNDLE:-}"
+      OMLX_COMPOSE_OUTPUT_PATH: "/compose-output/docker-compose.vllm.yml"
+      OMLX_ENV_OUTPUT_PATH: "/compose-output/docker-compose.vllm.env"
+      HTTP_PROXY: "${OMNI_HTTP_PROXY:-}"
+      HTTPS_PROXY: "${OMNI_HTTPS_PROXY:-}"
+      NO_PROXY: "${OMNI_NO_PROXY:-}"
+      REQUESTS_CA_BUNDLE: "${OMNI_CA_BUNDLE:-}"
+      SSL_CERT_FILE: "${OMNI_CA_BUNDLE:-}"
     volumes:
       - proxy-state:/data
-      - ../docker:/compose-output
+      - "../docker:/compose-output"
     depends_on:
       - vllm
 
   vllm:
     image: "${VLLM_IMAGE:-vllm/vllm-openai:latest}"
     ports:
-      - "${VLLM_PORT:-8000}:8000"
+      - "${OMNI_BACKEND_PORT:-8000}:8000"
     ipc: host
     gpus: all
     environment:
+      OMNI_MODEL: "${OMNI_MODEL:-Qwen/Qwen3-1.7B}"
+      OMNI_SERVED_MODEL_NAME: "${OMNI_SERVED_MODEL_NAME:-qwen}"
+      OMNI_CONTEXT_LENGTH: "${OMNI_CONTEXT_LENGTH:-8192}"
+      OMNI_MAX_PARALLEL: "${OMNI_MAX_PARALLEL:-4}"
+      OMNI_BACKEND_PORT: "${OMNI_BACKEND_PORT:-8000}"
+      OMNI_HF_HOME: "${OMNI_HF_HOME:-${HOME}/.cache/huggingface}"
+      OMNI_HF_ENDPOINT: "${OMNI_HF_ENDPOINT:-}"
+      OMNI_HTTP_PROXY: "${OMNI_HTTP_PROXY:-}"
+      OMNI_HTTPS_PROXY: "${OMNI_HTTPS_PROXY:-}"
+      OMNI_NO_PROXY: "${OMNI_NO_PROXY:-}"
+      OMNI_CA_BUNDLE: "${OMNI_CA_BUNDLE:-}"
       VLLM_IMAGE: "${VLLM_IMAGE:-vllm/vllm-openai:latest}"
-      VLLM_MODEL: "${VLLM_MODEL:-Qwen/Qwen3-1.7B}"
-      VLLM_SERVED_MODEL_NAME: "${VLLM_SERVED_MODEL_NAME:-qwen}"
-      VLLM_MAX_MODEL_LEN: "${VLLM_MAX_MODEL_LEN:-8192}"
       VLLM_GPU_MEMORY_UTILIZATION: "${VLLM_GPU_MEMORY_UTILIZATION:-0.8}"
-      VLLM_MAX_NUM_SEQS: "${VLLM_MAX_NUM_SEQS:-4}"
-      VLLM_PORT: "${VLLM_PORT:-8000}"
-      VLLM_HF_HOME: "${VLLM_HF_HOME:-${HOME}/.cache/huggingface}"
       VLLM_GENERATION_CONFIG: "${VLLM_GENERATION_CONFIG:-vllm}"
       VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS: "${VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS:-{\"enable_thinking\":false}}"
       VLLM_TRUST_REMOTE_CODE: "${VLLM_TRUST_REMOTE_CODE:-true}"
@@ -76,11 +82,6 @@ services:
       VLLM_UVICORN_LOG_LEVEL: "${VLLM_UVICORN_LOG_LEVEL:-}"
       VLLM_DISABLE_LOG_STATS: "${VLLM_DISABLE_LOG_STATS:-false}"
       VLLM_EXTRA_ARGS_JSON: "${VLLM_EXTRA_ARGS_JSON:-[]}"
-      VLLM_HTTP_PROXY: "${VLLM_HTTP_PROXY:-}"
-      VLLM_HTTPS_PROXY: "${VLLM_HTTPS_PROXY:-}"
-      VLLM_NO_PROXY: "${VLLM_NO_PROXY:-}"
-      VLLM_CA_BUNDLE: "${VLLM_CA_BUNDLE:-}"
-      VLLM_HF_ENDPOINT: "${VLLM_HF_ENDPOINT:-}"
       OMLX_PROXY_PORT: "${OMLX_PROXY_PORT:-8080}"
       OMLX_PROXY_API_KEY: "${OMLX_PROXY_API_KEY:-}"
       OMLX_BACKEND_API_KEY: "${OMLX_BACKEND_API_KEY:-}"
@@ -96,45 +97,45 @@ services:
       HUGGING_FACE_HUB_TOKEN: "${HUGGING_FACE_HUB_TOKEN:-${HF_TOKEN:-}}"
       HF_HOME: "/root/.cache/huggingface"
     volumes:
-      - "${VLLM_HF_HOME:-${HOME}/.cache/huggingface}:/root/.cache/huggingface"
+      - "${OMNI_HF_HOME:-${HOME}/.cache/huggingface}:/root/.cache/huggingface"
     entrypoint: ["/bin/sh", "-lc"]
     command:
       - |
         set -eu
-        if [ -n "$${VLLM_HF_ENDPOINT:-}" ]; then
-          export HF_ENDPOINT="$${VLLM_HF_ENDPOINT}"
+        if [ -n "$${OMNI_HF_ENDPOINT:-}" ]; then
+          export HF_ENDPOINT="$${OMNI_HF_ENDPOINT}"
         else
           unset HF_ENDPOINT
         fi
-        if [ -n "$${VLLM_HTTP_PROXY:-}" ]; then
-          export HTTP_PROXY="$${VLLM_HTTP_PROXY}"
+        if [ -n "$${OMNI_HTTP_PROXY:-}" ]; then
+          export HTTP_PROXY="$${OMNI_HTTP_PROXY}"
         else
           unset HTTP_PROXY
         fi
-        if [ -n "$${VLLM_HTTPS_PROXY:-}" ]; then
-          export HTTPS_PROXY="$${VLLM_HTTPS_PROXY}"
+        if [ -n "$${OMNI_HTTPS_PROXY:-}" ]; then
+          export HTTPS_PROXY="$${OMNI_HTTPS_PROXY}"
         else
           unset HTTPS_PROXY
         fi
-        if [ -n "$${VLLM_NO_PROXY:-}" ]; then
-          export NO_PROXY="$${VLLM_NO_PROXY}"
+        if [ -n "$${OMNI_NO_PROXY:-}" ]; then
+          export NO_PROXY="$${OMNI_NO_PROXY}"
         else
           unset NO_PROXY
         fi
-        if [ -n "$${VLLM_CA_BUNDLE:-}" ]; then
-          export REQUESTS_CA_BUNDLE="$${VLLM_CA_BUNDLE}"
-          export SSL_CERT_FILE="$${VLLM_CA_BUNDLE}"
+        if [ -n "$${OMNI_CA_BUNDLE:-}" ]; then
+          export REQUESTS_CA_BUNDLE="$${OMNI_CA_BUNDLE}"
+          export SSL_CERT_FILE="$${OMNI_CA_BUNDLE}"
         else
           unset REQUESTS_CA_BUNDLE
           unset SSL_CERT_FILE
         fi
-        set -- "$${VLLM_MODEL:?Set VLLM_MODEL to a Hugging Face model id or local container path}"
+        set -- "$${OMNI_MODEL:?Set OMNI_MODEL to a Hugging Face model id or local container path}"
         set -- "$${@}" --host 0.0.0.0
         set -- "$${@}" --port 8000
-        set -- "$${@}" --served-model-name "$${VLLM_SERVED_MODEL_NAME:-$${VLLM_MODEL}}"
-        set -- "$${@}" --max-model-len "$${VLLM_MAX_MODEL_LEN:-8192}"
+        set -- "$${@}" --served-model-name "$${OMNI_SERVED_MODEL_NAME:-$${OMNI_MODEL}}"
+        set -- "$${@}" --max-model-len "$${OMNI_CONTEXT_LENGTH:-8192}"
         set -- "$${@}" --gpu-memory-utilization "$${VLLM_GPU_MEMORY_UTILIZATION:-0.80}"
-        set -- "$${@}" --max-num-seqs "$${VLLM_MAX_NUM_SEQS:-4}"
+        set -- "$${@}" --max-num-seqs "$${OMNI_MAX_PARALLEL:-4}"
         set -- "$${@}" --generation-config "$${VLLM_GENERATION_CONFIG:-vllm}"
         if [ -n "$${VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS:-}" ]; then
           set -- "$${@}" --default-chat-template-kwargs "$${VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS}"
@@ -213,7 +214,8 @@ services:
           extra_args=$$(python3 -c 'import json, shlex, sys; print(" ".join(shlex.quote(str(x)) for x in json.loads(sys.argv[1])))' "$${VLLM_EXTRA_ARGS_JSON}")
           eval "set -- \"\$$@\" $${extra_args}"
         fi
-        unset VLLM_IMAGE VLLM_MODEL VLLM_SERVED_MODEL_NAME VLLM_MAX_MODEL_LEN VLLM_GPU_MEMORY_UTILIZATION VLLM_MAX_NUM_SEQS VLLM_PORT VLLM_HF_HOME VLLM_GENERATION_CONFIG VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS VLLM_TRUST_REMOTE_CODE VLLM_ENFORCE_EAGER VLLM_ENABLE_AUTO_TOOL_CHOICE VLLM_TOOL_CALL_PARSER VLLM_REASONING_PARSER VLLM_DTYPE VLLM_TOKENIZER VLLM_TOKENIZER_MODE VLLM_REVISION VLLM_LOAD_FORMAT VLLM_QUANTIZATION VLLM_DOWNLOAD_DIR VLLM_MAX_NUM_BATCHED_TOKENS VLLM_ENABLE_CHUNKED_PREFILL VLLM_ENABLE_PREFIX_CACHING VLLM_KV_CACHE_DTYPE VLLM_CPU_OFFLOAD_GB VLLM_SWAP_SPACE VLLM_TENSOR_PARALLEL_SIZE VLLM_PIPELINE_PARALLEL_SIZE VLLM_UVICORN_LOG_LEVEL VLLM_DISABLE_LOG_STATS VLLM_EXTRA_ARGS_JSON VLLM_HTTP_PROXY VLLM_HTTPS_PROXY VLLM_NO_PROXY VLLM_CA_BUNDLE VLLM_HF_ENDPOINT VLLM_BUILD_COMMIT VLLM_BUILD_PIPELINE VLLM_BUILD_URL VLLM_IMAGE_TAG
+        unset OMNI_MODEL OMNI_SERVED_MODEL_NAME OMNI_CONTEXT_LENGTH OMNI_MAX_PARALLEL OMNI_BACKEND_PORT OMNI_HF_HOME OMNI_HF_ENDPOINT OMNI_HTTP_PROXY OMNI_HTTPS_PROXY OMNI_NO_PROXY OMNI_CA_BUNDLE
+        unset VLLM_IMAGE VLLM_GPU_MEMORY_UTILIZATION VLLM_GENERATION_CONFIG VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS VLLM_TRUST_REMOTE_CODE VLLM_ENFORCE_EAGER VLLM_ENABLE_AUTO_TOOL_CHOICE VLLM_TOOL_CALL_PARSER VLLM_REASONING_PARSER VLLM_DTYPE VLLM_TOKENIZER VLLM_TOKENIZER_MODE VLLM_REVISION VLLM_LOAD_FORMAT VLLM_QUANTIZATION VLLM_DOWNLOAD_DIR VLLM_MAX_NUM_BATCHED_TOKENS VLLM_ENABLE_CHUNKED_PREFILL VLLM_ENABLE_PREFIX_CACHING VLLM_KV_CACHE_DTYPE VLLM_CPU_OFFLOAD_GB VLLM_SWAP_SPACE VLLM_TENSOR_PARALLEL_SIZE VLLM_PIPELINE_PARALLEL_SIZE VLLM_UVICORN_LOG_LEVEL VLLM_DISABLE_LOG_STATS VLLM_EXTRA_ARGS_JSON VLLM_BUILD_COMMIT VLLM_BUILD_PIPELINE VLLM_BUILD_URL VLLM_IMAGE_TAG
         unset OMLX_PROXY_PORT OMLX_PROXY_API_KEY OMLX_BACKEND_API_KEY OMLX_CONTEXT_SCALING OMLX_TARGET_CONTEXT_SIZE OMLX_SSE_KEEPALIVE_MODE OMLX_SAMPLING_MAX_TOKENS OMLX_SAMPLING_TEMPERATURE OMLX_SAMPLING_TOP_P OMLX_SAMPLING_TOP_K OMLX_SAMPLING_REPETITION_PENALTY
         exec vllm serve "$${@}"
 

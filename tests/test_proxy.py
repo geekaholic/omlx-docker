@@ -12,6 +12,7 @@ from omlx.proxy.backend import OpenAIBackend
 from omlx.proxy.config import ProxyConfig
 from omlx.proxy.metrics import parse_prometheus_text, select_prometheus_metrics
 from omlx.proxy.scaling import scale_token_count
+from omlx.proxy.llamacpp_compose import load_llamacpp_env_file
 from omlx.proxy.vllm_compose import (
     VllmComposeSettings,
     load_vllm_env_file,
@@ -682,15 +683,15 @@ async def test_admin_vllm_settings_reflect_generated_env_file(monkeypatch, tmp_p
     monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
     compose_path = tmp_path / "docker-compose.vllm.yml"
     env_path = tmp_path / "docker-compose.vllm.env"
-    monkeypatch.setenv("OMLX_VLLM_COMPOSE_OUTPUT_PATH", str(compose_path))
-    monkeypatch.setenv("OMLX_VLLM_ENV_OUTPUT_PATH", str(env_path))
+    monkeypatch.setenv("OMLX_COMPOSE_OUTPUT_PATH", str(compose_path))
+    monkeypatch.setenv("OMLX_ENV_OUTPUT_PATH", str(env_path))
 
     write_vllm_compose(
         compose_path,
         VllmComposeSettings(
             model="example/compose-model",
             served_model_name="compose-name",
-            max_model_len=16384,
+            context_length=16384,
         ),
     )
     write_vllm_env_file(
@@ -699,7 +700,7 @@ async def test_admin_vllm_settings_reflect_generated_env_file(monkeypatch, tmp_p
             VllmComposeSettings(
                 model="example/env-model",
                 served_model_name="env-name",
-                max_model_len=32768,
+                context_length=32768,
                 hf_home="/cache/from-env",
             )
         ),
@@ -715,20 +716,23 @@ async def test_admin_vllm_settings_reflect_generated_env_file(monkeypatch, tmp_p
     ) as client:
         response = await client.get("/admin/api/global-settings")
         assert response.status_code == 200
-        vllm = response.json()["proxy"]["vllm"]
-        assert vllm["model"] == "example/env-model"
-        assert vllm["served_model_name"] == "env-name"
-        assert vllm["max_model_len"] == 32768
-        assert vllm["hf_home"] == "/cache/from-env"
-        assert vllm["compose_output_path"] == str(compose_path)
-        assert vllm["env_output_path"] == str(env_path)
+        payload = response.json()["proxy"]
+        assert payload["sidecar_backend"] == "vllm"
+        sidecar = payload["sidecar"]
+        assert sidecar["model"] == "example/env-model"
+        assert sidecar["served_model_name"] == "env-name"
+        assert sidecar["context_length"] == 32768
+        assert sidecar["hf_home"] == "/cache/from-env"
+        assert sidecar["compose_output_path"] == str(compose_path)
+        assert sidecar["env_output_path"] == str(env_path)
 
-        response = await client.get("/admin/api/proxy/vllm-compose")
+        response = await client.get("/admin/api/proxy/sidecar-compose")
         assert response.status_code == 200
         data = response.json()
+        assert data["backend"] == "vllm"
         assert data["settings"]["model"] == "example/env-model"
         assert data["env_output_path"] == str(env_path)
-        assert "VLLM_MODEL=example/env-model" in data["env_content"]
+        assert "OMNI_MODEL=example/env-model" in data["env_content"]
 
 
 @pytest.mark.asyncio
@@ -736,8 +740,8 @@ async def test_admin_vllm_settings_save_writes_env_and_compose(monkeypatch, tmp_
     monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
     compose_path = tmp_path / "docker-compose.vllm.yml"
     env_path = tmp_path / "docker-compose.vllm.env"
-    monkeypatch.setenv("OMLX_VLLM_COMPOSE_OUTPUT_PATH", str(compose_path))
-    monkeypatch.setenv("OMLX_VLLM_ENV_OUTPUT_PATH", str(env_path))
+    monkeypatch.setenv("OMLX_COMPOSE_OUTPUT_PATH", str(compose_path))
+    monkeypatch.setenv("OMLX_ENV_OUTPUT_PATH", str(env_path))
 
     write_vllm_env_file(
         env_path,
@@ -764,12 +768,12 @@ async def test_admin_vllm_settings_save_writes_env_and_compose(monkeypatch, tmp_
             json={
                 "proxy_backend_url": "http://backend/v1",
                 "proxy_backend_type": "vllm",
-                "vllm_model": "example/admin-model",
-                "vllm_served_model_name": "admin-name",
-                "vllm_max_model_len": 24576,
+                "omni_model": "example/admin-model",
+                "omni_served_model_name": "admin-name",
+                "omni_context_length": 24576,
                 "vllm_gpu_memory_utilization": 0.72,
-                "vllm_max_num_seqs": 8,
-                "vllm_hf_home": "/cache/admin",
+                "omni_max_parallel": 8,
+                "omni_hf_home": "/cache/admin",
                 "sampling_top_p": 0.77,
                 "sampling_top_k": 42,
             },
@@ -778,26 +782,80 @@ async def test_admin_vllm_settings_save_writes_env_and_compose(monkeypatch, tmp_
     assert response.status_code == 200
     data = response.json()
     assert data["requires_restart"] is True
-    assert "vllm_env_file" in data["runtime_applied"]
-    assert "vllm_compose_file" in data["runtime_applied"]
+    assert "sidecar_env_file" in data["runtime_applied"]
+    assert "sidecar_compose_file" in data["runtime_applied"]
     assert data["compose"]["env_written"] is True
     assert data["compose"]["compose_written"] is True
 
     env = load_vllm_env_file(env_path)
-    assert env["VLLM_MODEL"] == "example/admin-model"
-    assert env["VLLM_SERVED_MODEL_NAME"] == "admin-name"
-    assert env["VLLM_MAX_MODEL_LEN"] == "24576"
-    assert env["VLLM_HF_HOME"] == "/cache/admin"
+    assert env["OMNI_MODEL"] == "example/admin-model"
+    assert env["OMNI_SERVED_MODEL_NAME"] == "admin-name"
+    assert env["OMNI_CONTEXT_LENGTH"] == "24576"
+    assert env["OMNI_HF_HOME"] == "/cache/admin"
     assert env["OMLX_SAMPLING_TOP_P"] == "0.77"
     assert env["OMLX_SAMPLING_TOP_K"] == "42"
     assert env["VLLM_TOOL_CALL_PARSER"] == "existing-parser"
     assert env["VLLM_REASONING_PARSER"] == "existing-reasoner"
 
     content = compose_path.read_text(encoding="utf-8")
-    assert 'OMLX_VLLM_ENV_OUTPUT_PATH: "/compose-output/docker-compose.vllm.env"' in content
+    assert 'OMLX_ENV_OUTPUT_PATH: "/compose-output/docker-compose.vllm.env"' in content
     assert "example/admin-model" in content
     assert "OMLX_SAMPLING_TOP_P" in content
     assert "0.77" in content
+
+
+@pytest.mark.asyncio
+async def test_admin_llamacpp_settings_save_writes_env_and_compose(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+    compose_path = tmp_path / "docker-compose.llamacpp.yml"
+    env_path = tmp_path / "docker-compose.llamacpp.env"
+    monkeypatch.setenv("OMLX_SIDECAR_BACKEND", "llamacpp")
+    monkeypatch.setenv("OMLX_COMPOSE_OUTPUT_PATH", str(compose_path))
+    monkeypatch.setenv("OMLX_ENV_OUTPUT_PATH", str(env_path))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/admin/api/proxy/sidecar-compose")
+        assert response.status_code == 200
+        assert response.json()["backend"] == "llamacpp"
+
+        response = await client.post(
+            "/admin/api/global-settings",
+            json={
+                "proxy_backend_url": "http://backend/v1",
+                "proxy_backend_type": "llama.cpp",
+                "omni_model": "ggml-org/Qwen3-1.7B-GGUF:Q8_0",
+                "omni_context_length": 16384,
+                "llamacpp_n_gpu_layers": 80,
+                "llamacpp_flash_attn": "on",
+                "llamacpp_jinja": False,
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["requires_restart"] is True
+    assert data["compose"]["backend"] == "llamacpp"
+    assert data["compose"]["env_written"] is True
+    assert data["compose"]["compose_written"] is True
+
+    env = load_llamacpp_env_file(env_path)
+    assert env["OMNI_MODEL"] == "ggml-org/Qwen3-1.7B-GGUF:Q8_0"
+    assert env["OMNI_CONTEXT_LENGTH"] == "16384"
+    assert env["LLAMACPP_N_GPU_LAYERS"] == "80"
+    assert env["LLAMACPP_FLASH_ATTN"] == "on"
+    assert env["LLAMACPP_JINJA"] == "false"
+
+    content = compose_path.read_text(encoding="utf-8")
+    assert "  llamacpp:" in content
+    assert 'OMLX_BACKEND_URL: "http://llamacpp:8000/v1"' in content
+    assert "ggml-org/Qwen3-1.7B-GGUF:Q8_0" in content
 
 
 @pytest.mark.asyncio

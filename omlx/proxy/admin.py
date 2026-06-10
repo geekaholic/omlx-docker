@@ -20,16 +20,12 @@ from omlx._version import __version__
 from .backend import OpenAIBackend
 from .config import ProxyConfig
 from .metrics import collect_backend_metrics
-from .vllm_compose import (
-    load_vllm_env_file,
-    render_vllm_compose,
-    render_vllm_env_file,
-    settings_from_overrides,
-    vllm_env_from_compose,
-    vllm_environment,
-    vllm_settings_from_env,
-    write_vllm_compose,
-    write_vllm_env_file,
+from .sidecar_compose import (
+    backend_spec,
+    env_from_compose,
+    load_env_file,
+    render_env_file,
+    write_env_file,
 )
 
 ADMIN_DIR = Path(__file__).resolve().parents[1] / "admin"
@@ -187,24 +183,27 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
         metrics["latency_ms"] = round((time.monotonic() - started) * 1000, 1)
         return metrics
 
-    @router.get("/api/proxy/vllm-compose")
-    async def proxy_vllm_compose():
-        settings = _vllm_settings_from_files(state)
-        compose_path = _vllm_compose_output_path()
-        env_path = _vllm_env_output_path()
-        env_values = vllm_environment(settings)
+    @router.get("/api/proxy/sidecar-compose")
+    async def proxy_sidecar_compose():
+        backend_name = _sidecar_backend(state)
+        spec = backend_spec(backend_name)
+        settings = _sidecar_settings_from_files(state)
+        compose_path = _compose_output_path()
+        env_path = _env_output_path()
+        env_values = spec.environment(settings)
         return {
+            "backend": backend_name,
             "settings": settings.__dict__,
-            "content": render_vllm_compose(settings),
-            "env_content": render_vllm_env_file(env_values),
+            "content": spec.render_compose(settings),
+            "env_content": render_env_file(env_values, spec.env_keys),
             "output_path": str(compose_path) if compose_path else None,
             "env_output_path": str(env_path) if env_path else None,
             "writable": bool(compose_path or env_path),
         }
 
-    @router.post("/api/proxy/vllm-compose/regenerate")
-    async def regenerate_proxy_vllm_compose():
-        result = _write_vllm_compose_if_configured(state)
+    @router.post("/api/proxy/sidecar-compose/regenerate")
+    async def regenerate_proxy_sidecar_compose():
+        result = _write_sidecar_compose_if_configured(state)
         status = 200 if result.get("written") or not result.get("error") else 500
         return JSONResponse(result, status_code=status)
 
@@ -233,24 +232,24 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
                 "claude_code_target_context_size"
             ]
         backend_type = proxy_updates.get("proxy_backend_type") or _proxy_backend_type(state)
-        vllm_updates = (
-            _extract_vllm_compose_updates(payload)
-            if backend_type == "vllm"
+        sidecar_updates = (
+            _extract_sidecar_compose_updates(payload, _sidecar_backend(state))
+            if backend_type in ("vllm", "llama.cpp")
             else {}
         )
-        if vllm_updates:
-            state.global_overrides.update(vllm_updates)
+        if sidecar_updates:
+            state.global_overrides.update(sidecar_updates)
         state.log("updated proxy admin settings")
         state.save()
-        compose_settings = _vllm_settings_from_files(state, vllm_updates)
-        compose_result = _write_vllm_compose_if_configured(state, compose_settings)
+        compose_settings = _sidecar_settings_from_files(state, sidecar_updates)
+        compose_result = _write_sidecar_compose_if_configured(state, compose_settings)
         runtime_applied = ["proxy_admin_settings"]
         if proxy_updates:
             runtime_applied.append("proxy_backend_config")
         if compose_result.get("env_written"):
-            runtime_applied.append("vllm_env_file")
+            runtime_applied.append("sidecar_env_file")
         if compose_result.get("compose_written"):
-            runtime_applied.append("vllm_compose_file")
+            runtime_applied.append("sidecar_compose_file")
         return {
             "status": "ok",
             "message": (
@@ -260,8 +259,8 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             ),
             "runtime_applied": runtime_applied,
             "compose": compose_result,
-            "requires_restart": bool(vllm_updates),
-            "restart_required_settings": ["proxy_host", "proxy_port", "vllm"],
+            "requires_restart": bool(sidecar_updates),
+            "restart_required_settings": ["proxy_host", "proxy_port", "sidecar"],
         }
 
     @router.get("/api/models")
@@ -568,155 +567,222 @@ def _extract_proxy_backend_updates(payload: dict[str, Any]) -> dict[str, Any]:
     return updates
 
 
-def _extract_vllm_compose_updates(payload: dict[str, Any]) -> dict[str, Any]:
-    fields = {
-        "vllm_image",
-        "vllm_model",
-        "vllm_served_model_name",
-        "vllm_max_model_len",
-        "vllm_gpu_memory_utilization",
-        "vllm_max_num_seqs",
-        "vllm_port",
-        "vllm_hf_home",
-        "vllm_generation_config",
-        "vllm_default_chat_template_kwargs",
-        "vllm_trust_remote_code",
-        "vllm_enforce_eager",
-        "vllm_enable_auto_tool_choice",
-        "vllm_tool_call_parser",
-        "vllm_reasoning_parser",
-        "vllm_dtype",
-        "vllm_tokenizer",
-        "vllm_tokenizer_mode",
-        "vllm_revision",
-        "vllm_load_format",
-        "vllm_quantization",
-        "vllm_download_dir",
-        "vllm_max_num_batched_tokens",
-        "vllm_enable_chunked_prefill",
-        "vllm_enable_prefix_caching",
-        "vllm_kv_cache_dtype",
-        "vllm_cpu_offload_gb",
-        "vllm_swap_space",
-        "vllm_tensor_parallel_size",
-        "vllm_pipeline_parallel_size",
-        "vllm_uvicorn_log_level",
-        "vllm_disable_log_stats",
-        "vllm_extra_args_json",
-        "network_http_proxy",
-        "network_https_proxy",
-        "network_no_proxy",
-        "network_ca_bundle",
-        "huggingface_endpoint",
-        "sampling_max_tokens",
-        "sampling_temperature",
-        "sampling_top_p",
-        "sampling_top_k",
-        "sampling_repetition_penalty",
-    }
+_COMMON_UPDATE_FIELDS = (
+    "omni_model",
+    "omni_served_model_name",
+    "omni_context_length",
+    "omni_max_parallel",
+    "omni_backend_port",
+    "omni_hf_home",
+    "network_http_proxy",
+    "network_https_proxy",
+    "network_no_proxy",
+    "network_ca_bundle",
+    "huggingface_endpoint",
+    "sampling_max_tokens",
+    "sampling_temperature",
+    "sampling_top_p",
+    "sampling_top_k",
+    "sampling_repetition_penalty",
+)
+
+_VLLM_UPDATE_FIELDS = (
+    "vllm_image",
+    "vllm_gpu_memory_utilization",
+    "vllm_generation_config",
+    "vllm_default_chat_template_kwargs",
+    "vllm_trust_remote_code",
+    "vllm_enforce_eager",
+    "vllm_enable_auto_tool_choice",
+    "vllm_tool_call_parser",
+    "vllm_reasoning_parser",
+    "vllm_dtype",
+    "vllm_tokenizer",
+    "vllm_tokenizer_mode",
+    "vllm_revision",
+    "vllm_load_format",
+    "vllm_quantization",
+    "vllm_download_dir",
+    "vllm_max_num_batched_tokens",
+    "vllm_enable_chunked_prefill",
+    "vllm_enable_prefix_caching",
+    "vllm_kv_cache_dtype",
+    "vllm_cpu_offload_gb",
+    "vllm_swap_space",
+    "vllm_tensor_parallel_size",
+    "vllm_pipeline_parallel_size",
+    "vllm_uvicorn_log_level",
+    "vllm_disable_log_stats",
+    "vllm_extra_args_json",
+)
+
+_LLAMACPP_UPDATE_FIELDS = (
+    "llamacpp_image",
+    "llamacpp_n_gpu_layers",
+    "llamacpp_flash_attn",
+    "llamacpp_cache_type_k",
+    "llamacpp_cache_type_v",
+    "llamacpp_threads",
+    "llamacpp_batch_size",
+    "llamacpp_ubatch_size",
+    "llamacpp_jinja",
+    "llamacpp_reasoning_format",
+    "llamacpp_cache_dir",
+    "llamacpp_model_dir",
+    "llamacpp_extra_args",
+)
+
+
+def _extract_sidecar_compose_updates(
+    payload: dict[str, Any],
+    backend: str,
+) -> dict[str, Any]:
+    fields = set(_COMMON_UPDATE_FIELDS)
+    if backend == "llamacpp":
+        fields.update(_LLAMACPP_UPDATE_FIELDS)
+    else:
+        fields.update(_VLLM_UPDATE_FIELDS)
     updates = {key: payload[key] for key in fields if key in payload}
     if not updates:
         return {}
-    if "sampling_max_context_window" in payload and "vllm_max_model_len" not in updates:
-        updates["vllm_max_model_len"] = payload["sampling_max_context_window"]
-    if "max_concurrent_requests" in payload and "vllm_max_num_seqs" not in updates:
-        updates["vllm_max_num_seqs"] = payload["max_concurrent_requests"]
-    if "chunked_prefill" in payload and "vllm_enable_chunked_prefill" not in updates:
+    if "sampling_max_context_window" in payload and "omni_context_length" not in updates:
+        updates["omni_context_length"] = payload["sampling_max_context_window"]
+    if "max_concurrent_requests" in payload and "omni_max_parallel" not in updates:
+        updates["omni_max_parallel"] = payload["max_concurrent_requests"]
+    if (
+        backend != "llamacpp"
+        and "chunked_prefill" in payload
+        and "vllm_enable_chunked_prefill" not in updates
+    ):
         updates["vllm_enable_chunked_prefill"] = payload["chunked_prefill"]
     return updates
 
 
-def _vllm_settings_payload(state: ProxyAdminState) -> dict[str, Any]:
-    settings = _vllm_settings_from_files(state)
-    compose_path = _vllm_compose_output_path()
-    env_path = _vllm_env_output_path()
+def _sidecar_settings_payload(state: ProxyAdminState) -> dict[str, Any]:
+    settings = _sidecar_settings_from_files(state)
+    compose_path = _compose_output_path()
+    env_path = _env_output_path()
     payload = settings.__dict__.copy()
     payload["compose_output_path"] = str(compose_path) if compose_path else None
     payload["env_output_path"] = str(env_path) if env_path else None
     return payload
 
 
-def _vllm_settings_from_files(
+def _sidecar_settings_from_files(
     state: ProxyAdminState,
     updates: dict[str, Any] | None = None,
 ):
-    values = vllm_environment(settings_from_overrides(state.global_overrides))
-    compose_path = _vllm_compose_output_path()
+    backend = _sidecar_backend(state)
+    spec = backend_spec(backend)
+    values = spec.environment(spec.settings_from_overrides(state.global_overrides))
+    compose_path = _compose_output_path()
     if compose_path is not None:
-        values.update(vllm_env_from_compose(compose_path))
-    env_path = _vllm_env_output_path()
+        values.update(env_from_compose(compose_path, spec.env_keys))
+    env_path = _env_output_path()
     if env_path is not None:
-        values.update(load_vllm_env_file(env_path))
+        values.update(load_env_file(env_path))
     if updates:
-        values.update(_vllm_env_from_admin_updates(updates))
-    return vllm_settings_from_env(values)
+        values.update(_sidecar_env_from_admin_updates(updates, backend))
+    return spec.settings_from_env(values)
 
 
-def _vllm_env_from_admin_updates(updates: dict[str, Any]) -> dict[str, str]:
-    field_map = {
-        "vllm_image": "VLLM_IMAGE",
-        "vllm_model": "VLLM_MODEL",
-        "vllm_served_model_name": "VLLM_SERVED_MODEL_NAME",
-        "vllm_max_model_len": "VLLM_MAX_MODEL_LEN",
-        "vllm_gpu_memory_utilization": "VLLM_GPU_MEMORY_UTILIZATION",
-        "vllm_max_num_seqs": "VLLM_MAX_NUM_SEQS",
-        "vllm_port": "VLLM_PORT",
-        "vllm_hf_home": "VLLM_HF_HOME",
-        "vllm_generation_config": "VLLM_GENERATION_CONFIG",
-        "vllm_default_chat_template_kwargs": "VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS",
-        "vllm_trust_remote_code": "VLLM_TRUST_REMOTE_CODE",
-        "vllm_enforce_eager": "VLLM_ENFORCE_EAGER",
-        "vllm_enable_auto_tool_choice": "VLLM_ENABLE_AUTO_TOOL_CHOICE",
-        "vllm_tool_call_parser": "VLLM_TOOL_CALL_PARSER",
-        "vllm_reasoning_parser": "VLLM_REASONING_PARSER",
-        "vllm_dtype": "VLLM_DTYPE",
-        "vllm_tokenizer": "VLLM_TOKENIZER",
-        "vllm_tokenizer_mode": "VLLM_TOKENIZER_MODE",
-        "vllm_revision": "VLLM_REVISION",
-        "vllm_load_format": "VLLM_LOAD_FORMAT",
-        "vllm_quantization": "VLLM_QUANTIZATION",
-        "vllm_download_dir": "VLLM_DOWNLOAD_DIR",
-        "vllm_max_num_batched_tokens": "VLLM_MAX_NUM_BATCHED_TOKENS",
-        "vllm_enable_chunked_prefill": "VLLM_ENABLE_CHUNKED_PREFILL",
-        "vllm_enable_prefix_caching": "VLLM_ENABLE_PREFIX_CACHING",
-        "vllm_kv_cache_dtype": "VLLM_KV_CACHE_DTYPE",
-        "vllm_cpu_offload_gb": "VLLM_CPU_OFFLOAD_GB",
-        "vllm_swap_space": "VLLM_SWAP_SPACE",
-        "vllm_tensor_parallel_size": "VLLM_TENSOR_PARALLEL_SIZE",
-        "vllm_pipeline_parallel_size": "VLLM_PIPELINE_PARALLEL_SIZE",
-        "vllm_uvicorn_log_level": "VLLM_UVICORN_LOG_LEVEL",
-        "vllm_disable_log_stats": "VLLM_DISABLE_LOG_STATS",
-        "vllm_extra_args_json": "VLLM_EXTRA_ARGS_JSON",
-        "network_http_proxy": "VLLM_HTTP_PROXY",
-        "network_https_proxy": "VLLM_HTTPS_PROXY",
-        "network_no_proxy": "VLLM_NO_PROXY",
-        "network_ca_bundle": "VLLM_CA_BUNDLE",
-        "huggingface_endpoint": "VLLM_HF_ENDPOINT",
-        "sampling_max_tokens": "OMLX_SAMPLING_MAX_TOKENS",
-        "sampling_temperature": "OMLX_SAMPLING_TEMPERATURE",
-        "sampling_top_p": "OMLX_SAMPLING_TOP_P",
-        "sampling_top_k": "OMLX_SAMPLING_TOP_K",
-        "sampling_repetition_penalty": "OMLX_SAMPLING_REPETITION_PENALTY",
-    }
-    bool_fields = {
-        "vllm_trust_remote_code",
-        "vllm_enforce_eager",
-        "vllm_enable_auto_tool_choice",
-        "vllm_enable_chunked_prefill",
-        "vllm_enable_prefix_caching",
-        "vllm_disable_log_stats",
-    }
-    optional_bool_fields = {
-        "vllm_enable_chunked_prefill",
-        "vllm_enable_prefix_caching",
-    }
+_COMMON_UPDATE_ENV_MAP = {
+    "omni_model": "OMNI_MODEL",
+    "omni_served_model_name": "OMNI_SERVED_MODEL_NAME",
+    "omni_context_length": "OMNI_CONTEXT_LENGTH",
+    "omni_max_parallel": "OMNI_MAX_PARALLEL",
+    "omni_backend_port": "OMNI_BACKEND_PORT",
+    "omni_hf_home": "OMNI_HF_HOME",
+    "network_http_proxy": "OMNI_HTTP_PROXY",
+    "network_https_proxy": "OMNI_HTTPS_PROXY",
+    "network_no_proxy": "OMNI_NO_PROXY",
+    "network_ca_bundle": "OMNI_CA_BUNDLE",
+    "huggingface_endpoint": "OMNI_HF_ENDPOINT",
+    "sampling_max_tokens": "OMLX_SAMPLING_MAX_TOKENS",
+    "sampling_temperature": "OMLX_SAMPLING_TEMPERATURE",
+    "sampling_top_p": "OMLX_SAMPLING_TOP_P",
+    "sampling_top_k": "OMLX_SAMPLING_TOP_K",
+    "sampling_repetition_penalty": "OMLX_SAMPLING_REPETITION_PENALTY",
+}
+
+_VLLM_UPDATE_ENV_MAP = {
+    "vllm_image": "VLLM_IMAGE",
+    "vllm_gpu_memory_utilization": "VLLM_GPU_MEMORY_UTILIZATION",
+    "vllm_generation_config": "VLLM_GENERATION_CONFIG",
+    "vllm_default_chat_template_kwargs": "VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS",
+    "vllm_trust_remote_code": "VLLM_TRUST_REMOTE_CODE",
+    "vllm_enforce_eager": "VLLM_ENFORCE_EAGER",
+    "vllm_enable_auto_tool_choice": "VLLM_ENABLE_AUTO_TOOL_CHOICE",
+    "vllm_tool_call_parser": "VLLM_TOOL_CALL_PARSER",
+    "vllm_reasoning_parser": "VLLM_REASONING_PARSER",
+    "vllm_dtype": "VLLM_DTYPE",
+    "vllm_tokenizer": "VLLM_TOKENIZER",
+    "vllm_tokenizer_mode": "VLLM_TOKENIZER_MODE",
+    "vllm_revision": "VLLM_REVISION",
+    "vllm_load_format": "VLLM_LOAD_FORMAT",
+    "vllm_quantization": "VLLM_QUANTIZATION",
+    "vllm_download_dir": "VLLM_DOWNLOAD_DIR",
+    "vllm_max_num_batched_tokens": "VLLM_MAX_NUM_BATCHED_TOKENS",
+    "vllm_enable_chunked_prefill": "VLLM_ENABLE_CHUNKED_PREFILL",
+    "vllm_enable_prefix_caching": "VLLM_ENABLE_PREFIX_CACHING",
+    "vllm_kv_cache_dtype": "VLLM_KV_CACHE_DTYPE",
+    "vllm_cpu_offload_gb": "VLLM_CPU_OFFLOAD_GB",
+    "vllm_swap_space": "VLLM_SWAP_SPACE",
+    "vllm_tensor_parallel_size": "VLLM_TENSOR_PARALLEL_SIZE",
+    "vllm_pipeline_parallel_size": "VLLM_PIPELINE_PARALLEL_SIZE",
+    "vllm_uvicorn_log_level": "VLLM_UVICORN_LOG_LEVEL",
+    "vllm_disable_log_stats": "VLLM_DISABLE_LOG_STATS",
+    "vllm_extra_args_json": "VLLM_EXTRA_ARGS_JSON",
+}
+
+_LLAMACPP_UPDATE_ENV_MAP = {
+    "llamacpp_image": "LLAMACPP_IMAGE",
+    "llamacpp_n_gpu_layers": "LLAMACPP_N_GPU_LAYERS",
+    "llamacpp_flash_attn": "LLAMACPP_FLASH_ATTN",
+    "llamacpp_cache_type_k": "LLAMACPP_CACHE_TYPE_K",
+    "llamacpp_cache_type_v": "LLAMACPP_CACHE_TYPE_V",
+    "llamacpp_threads": "LLAMACPP_THREADS",
+    "llamacpp_batch_size": "LLAMACPP_BATCH_SIZE",
+    "llamacpp_ubatch_size": "LLAMACPP_UBATCH_SIZE",
+    "llamacpp_jinja": "LLAMACPP_JINJA",
+    "llamacpp_reasoning_format": "LLAMACPP_REASONING_FORMAT",
+    "llamacpp_cache_dir": "LLAMACPP_CACHE_DIR",
+    "llamacpp_model_dir": "LLAMACPP_MODEL_DIR",
+    "llamacpp_extra_args": "LLAMACPP_EXTRA_ARGS",
+}
+
+_BOOL_UPDATE_FIELDS = {
+    "vllm_trust_remote_code",
+    "vllm_enforce_eager",
+    "vllm_enable_auto_tool_choice",
+    "vllm_enable_chunked_prefill",
+    "vllm_enable_prefix_caching",
+    "vllm_disable_log_stats",
+    "llamacpp_jinja",
+}
+
+_OPTIONAL_BOOL_UPDATE_FIELDS = {
+    "vllm_enable_chunked_prefill",
+    "vllm_enable_prefix_caching",
+}
+
+
+def _sidecar_env_from_admin_updates(
+    updates: dict[str, Any],
+    backend: str,
+) -> dict[str, str]:
+    field_map = dict(_COMMON_UPDATE_ENV_MAP)
+    if backend == "llamacpp":
+        field_map.update(_LLAMACPP_UPDATE_ENV_MAP)
+    else:
+        field_map.update(_VLLM_UPDATE_ENV_MAP)
     env = {}
     for field, env_key in field_map.items():
         if field not in updates:
             continue
         value = updates[field]
-        if field in bool_fields:
-            if field in optional_bool_fields and (value is None or value == ""):
+        if field in _BOOL_UPDATE_FIELDS:
+            if field in _OPTIONAL_BOOL_UPDATE_FIELDS and (value is None or value == ""):
                 env[env_key] = ""
             else:
                 env[env_key] = "true" if _truthy(value) else "false"
@@ -731,27 +797,40 @@ def _truthy(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _vllm_compose_output_path() -> Path | None:
-    value = os.getenv("OMLX_VLLM_COMPOSE_OUTPUT_PATH", "").strip()
+def _sidecar_backend(state: ProxyAdminState) -> str:
+    value = os.getenv("OMLX_SIDECAR_BACKEND", "").strip().lower()
+    if value in ("vllm", "llamacpp"):
+        return value
+    backend_type = _proxy_backend_type(state)
+    if backend_type == "llama.cpp":
+        return "llamacpp"
+    return "vllm"
+
+
+def _compose_output_path() -> Path | None:
+    value = os.getenv("OMLX_COMPOSE_OUTPUT_PATH", "").strip()
     if not value:
         return None
     return Path(value)
 
 
-def _vllm_env_output_path() -> Path | None:
-    value = os.getenv("OMLX_VLLM_ENV_OUTPUT_PATH", "").strip()
+def _env_output_path() -> Path | None:
+    value = os.getenv("OMLX_ENV_OUTPUT_PATH", "").strip()
     if not value:
         return None
     return Path(value)
 
 
-def _write_vllm_compose_if_configured(
+def _write_sidecar_compose_if_configured(
     state: ProxyAdminState,
     settings=None,
 ) -> dict[str, Any]:
-    compose_path = _vllm_compose_output_path()
-    env_path = _vllm_env_output_path()
+    backend = _sidecar_backend(state)
+    spec = backend_spec(backend)
+    compose_path = _compose_output_path()
+    env_path = _env_output_path()
     result: dict[str, Any] = {
+        "backend": backend,
         "written": False,
         "compose_written": False,
         "env_written": False,
@@ -761,27 +840,27 @@ def _write_vllm_compose_if_configured(
     if compose_path is None and env_path is None:
         return result
 
-    settings = settings or _vllm_settings_from_files(state)
+    settings = settings or _sidecar_settings_from_files(state)
     errors = []
     if env_path is not None:
         try:
-            written_env = write_vllm_env_file(env_path, vllm_environment(settings))
+            written_env = write_env_file(env_path, spec.environment(settings), spec.env_keys)
         except Exception as exc:
-            state.log(f"failed to write vLLM env file: {exc}")
+            state.log(f"failed to write {backend} env file: {exc}")
             errors.append(str(exc))
         else:
-            state.log(f"wrote vLLM env file {written_env}")
+            state.log(f"wrote {backend} env file {written_env}")
             result["env_written"] = True
             result["env_output_path"] = str(written_env)
 
     if compose_path is not None:
         try:
-            written_compose = write_vllm_compose(compose_path, settings)
+            written_compose = spec.write_compose(compose_path, settings)
         except Exception as exc:
-            state.log(f"failed to write vLLM compose file: {exc}")
+            state.log(f"failed to write {backend} compose file: {exc}")
             errors.append(str(exc))
         else:
-            state.log(f"wrote vLLM compose file {written_compose}")
+            state.log(f"wrote {backend} compose file {written_compose}")
             result["compose_written"] = True
             result["output_path"] = str(written_compose)
 
@@ -881,7 +960,7 @@ def _global_settings_payload(
     state: ProxyAdminState,
 ) -> dict[str, Any]:
     overrides = state.global_overrides
-    vllm_settings = _vllm_settings_from_files(state)
+    sidecar_settings = _sidecar_settings_from_files(state)
     return {
         "base_path": "",
         "server": {
@@ -899,7 +978,8 @@ def _global_settings_payload(
             "backend_api_key_set": bool(config.backend_api_key),
             "state_path": str(state.state_path) if state.state_path else None,
             "capabilities": _capabilities(),
-            "vllm": _vllm_settings_payload(state),
+            "sidecar_backend": _sidecar_backend(state),
+            "sidecar": _sidecar_settings_payload(state),
         },
         "model": {
             "model_dirs": [config.normalized_backend_url],
@@ -914,12 +994,12 @@ def _global_settings_payload(
         "scheduler": {
             "max_concurrent_requests": overrides.get(
                 "max_concurrent_requests",
-                vllm_settings.max_num_seqs,
+                sidecar_settings.max_parallel,
             ),
             "embedding_batch_size": 0,
             "chunked_prefill": overrides.get(
                 "chunked_prefill",
-                bool(vllm_settings.enable_chunked_prefill),
+                bool(getattr(sidecar_settings, "enable_chunked_prefill", False)),
             ),
         },
         "cache": {
@@ -931,18 +1011,18 @@ def _global_settings_payload(
             "initial_cache_blocks": 0,
         },
         "mcp": {"config_path": ""},
-        "huggingface": {"endpoint": vllm_settings.hf_endpoint},
+        "huggingface": {"endpoint": sidecar_settings.hf_endpoint},
         "modelscope": {"endpoint": ""},
         "network": {
-            "http_proxy": vllm_settings.http_proxy,
-            "https_proxy": vllm_settings.https_proxy,
-            "no_proxy": vllm_settings.no_proxy,
-            "ca_bundle": vllm_settings.ca_bundle,
+            "http_proxy": sidecar_settings.http_proxy,
+            "https_proxy": sidecar_settings.https_proxy,
+            "no_proxy": sidecar_settings.no_proxy,
+            "ca_bundle": sidecar_settings.ca_bundle,
         },
         "sampling": {
             "max_context_window": overrides.get(
                 "sampling_max_context_window",
-                vllm_settings.max_model_len,
+                sidecar_settings.context_length,
             ),
             "max_tokens": overrides.get("sampling_max_tokens", config.actual_context_size),
             "temperature": overrides.get("sampling_temperature", 1.0),

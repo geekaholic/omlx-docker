@@ -15,19 +15,27 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ._version import __version__
+from .proxy import (  # noqa: F401  (registers backend specs)
+    llamacpp_compose,
+    vllm_compose,
+)
+from .proxy.sidecar_compose import (
+    backend_spec,
+    env_from_compose,
+    known_env,
+    load_env_file,
+    render_env_file,
+    write_env_file,
+)
 from .proxy.vllm_compose import (
     VllmComposeSettings,
-    known_vllm_env,
-    load_vllm_env_file,
-    render_vllm_compose_for_path,
-    render_vllm_env_file,
-    vllm_env_from_compose,
     vllm_settings_from_env,
-    write_vllm_compose_for_path,
-    write_vllm_env_file,
 )
 from .proxy.vllm_compose import (
     default_vllm_environment as _shared_default_vllm_environment,
+)
+from .proxy.vllm_compose import (
+    write_vllm_compose_for_path as write_vllm_compose_for_path,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -35,12 +43,20 @@ DOCKER_DIR = REPO_ROOT / "docker"
 DEFAULT_PROXY_COMPOSE = DOCKER_DIR / "docker-compose.proxy.yml"
 DEFAULT_VLLM_COMPOSE = DOCKER_DIR / "docker-compose.vllm.yml"
 DEFAULT_VLLM_ENV_FILE = DOCKER_DIR / "docker-compose.vllm.env"
+DEFAULT_LLAMACPP_COMPOSE = DOCKER_DIR / "docker-compose.llamacpp.yml"
+DEFAULT_LLAMACPP_ENV_FILE = DOCKER_DIR / "docker-compose.llamacpp.env"
 DEFAULT_PROXY_ENV_FILE = DOCKER_DIR / "docker-compose.proxy.env"
 DEFAULT_SERVE_STATE_FILE = DOCKER_DIR / "omni-serve.json"
 
 SERVE_STATE_VERSION = 1
-PROXY_BACKENDS = {"openai", "ollama", "llamacpp"}
-BACKENDS = {"vllm", *PROXY_BACKENDS}
+MANAGED_BACKENDS = {"vllm", "llamacpp"}
+URL_BACKENDS = {"openai", "ollama", "llamacpp"}
+BACKENDS = MANAGED_BACKENDS | URL_BACKENDS
+# Backwards-compatible alias; llamacpp belongs to both groups (managed sidecar
+# without --backend-url, plain proxy with it).
+PROXY_BACKENDS = URL_BACKENDS
+SERVE_MODES = {"managed", "proxy"}
+MANAGED_SERVICE_NAMES = ("vllm", "llamacpp")
 PROXY_ENV_KEYS = (
     "OMLX_BACKEND_URL",
     "OMLX_BACKEND_API_KEY",
@@ -51,15 +67,18 @@ PROXY_ENV_KEYS = (
     "OMLX_ACTUAL_CONTEXT_SIZE",
     "OMLX_SSE_KEEPALIVE_MODE",
 )
-VLLM_SPECIFIC_ARG_ATTRS = (
-    "vllm_image",
+PORTABLE_ARG_ATTRS = (
     "model",
     "served_model_name",
     "port",
-    "max_model_len",
-    "gpu_memory_utilization",
-    "max_num_seqs",
+    "context_length",
+    "max_parallel",
     "hf_home",
+    "hf_endpoint",
+)
+VLLM_SPECIFIC_ARG_ATTRS = (
+    "vllm_image",
+    "gpu_memory_utilization",
     "generation_config",
     "default_chat_template_kwargs",
     "trust_remote_code",
@@ -85,7 +104,21 @@ VLLM_SPECIFIC_ARG_ATTRS = (
     "uvicorn_log_level",
     "disable_log_stats",
     "extra_args_json",
-    "hf_endpoint",
+)
+LLAMACPP_SPECIFIC_ARG_ATTRS = (
+    "llamacpp_image",
+    "n_gpu_layers",
+    "flash_attn",
+    "cache_type_k",
+    "cache_type_v",
+    "threads",
+    "batch_size",
+    "ubatch_size",
+    "jinja",
+    "reasoning_format",
+    "llamacpp_cache_dir",
+    "llamacpp_model_dir",
+    "llamacpp_extra_args",
 )
 
 
@@ -100,12 +133,13 @@ Command quick reference:
 
 Backends:
   vllm       Generate docker/docker-compose.vllm.yml and launch vLLM + proxy.
+  llamacpp   Generate docker/docker-compose.llamacpp.yml and launch llama.cpp + proxy.
+             With --backend-url, proxy to an external llama.cpp server instead.
   ollama     Launch the proxy against Ollama at http://host.docker.internal:11434/v1 by default.
   openai     Launch the proxy against an OpenAI-compatible HTTPS endpoint. Requires --backend-url.
-  llamacpp   Launch the proxy against a llama.cpp OpenAI-compatible server. Requires --backend-url.
 
 Common serve options:
-  --backend {vllm,openai,ollama,llamacpp}
+  --backend {vllm,llamacpp,openai,ollama}
   --backend-url URL
   --backend-api-key KEY
   --api-key KEY
@@ -116,15 +150,17 @@ Common serve options:
   --generate-only
   --dry-run
 
-vLLM serve options:
+Portable backend options (vLLM and llama.cpp):
   --model MODEL
   --served-model-name NAME
-  --vllm-image IMAGE
   --port PORT
-  --max-model-len TOKENS
-  --gpu-memory-utilization FRACTION
-  --max-num-seqs COUNT
+  --context-length TOKENS
+  --max-parallel COUNT
   --hf-home PATH
+
+vLLM serve options:
+  --vllm-image IMAGE
+  --gpu-memory-utilization FRACTION
   --generation-config {vllm,auto}
   --default-chat-template-kwargs JSON
   --trust-remote-code | --no-trust-remote-code
@@ -151,6 +187,21 @@ vLLM serve options:
   --disable-log-stats
   --extra-args-json JSON_ARRAY
 
+llama.cpp serve options:
+  --llamacpp-image IMAGE
+  --n-gpu-layers COUNT
+  --flash-attn {on,off,auto}
+  --cache-type-k TYPE
+  --cache-type-v TYPE
+  --threads COUNT
+  --batch-size SIZE
+  --ubatch-size SIZE
+  --jinja | --no-jinja
+  --reasoning-format FORMAT
+  --llamacpp-cache-dir PATH
+  --llamacpp-model-dir PATH
+  --llamacpp-extra-args "ARGS"
+
 Proxy/network options:
   --http-proxy URL
   --https-proxy URL
@@ -166,6 +217,8 @@ Proxy behavior options:
 Examples:
   omni serve
   omni serve --backend vllm --model Qwen/Qwen3-1.7B --served-model-name qwen3
+  omni serve --backend llamacpp --model ggml-org/Qwen3-1.7B-GGUF:Q8_0
+  omni serve --backend llamacpp --model /models/qwen3.gguf --context-length 16384
   omni serve --backend ollama
   omni serve --backend llamacpp --backend-url http://host.docker.internal:8000/v1
   omni launch list
@@ -184,10 +237,11 @@ argparse's detailed option descriptions.
 """.strip()
 
 SERVE_DESCRIPTION = """
-Bootstrap oMNI with Docker Compose. vLLM is generated as a local sidecar
-compose file; OpenAI, Ollama, and llama.cpp use the proxy compose against an
-external OpenAI-compatible backend. A first `omni serve` uses the proxy compose;
-later runs reuse the last saved serve backend unless flags choose another one.
+Bootstrap oMNI with Docker Compose. vLLM and llama.cpp are generated as local
+sidecar compose files; OpenAI, Ollama, and llama.cpp with --backend-url use the
+proxy compose against an external OpenAI-compatible backend. A first
+`omni serve` uses the proxy compose; later runs reuse the last saved serve
+backend unless flags choose another one.
 """.strip()
 
 
@@ -214,7 +268,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve.add_argument(
         "--backend",
-        choices=["vllm", "openai", "ollama", "llamacpp"],
+        choices=["vllm", "llamacpp", "openai", "ollama"],
         default=None,
         help="Backend to launch or proxy to (default: last used, then ollama proxy)",
     )
@@ -229,7 +283,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--compose-file",
         default=None,
-        help="Compose file path. Defaults to generated vLLM compose or proxy compose.",
+        help="Compose file path. Defaults to the generated sidecar compose or proxy compose.",
     )
     serve.add_argument(
         "--foreground",
@@ -255,19 +309,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print generated content and command without writing or launching",
     )
 
-    serve.add_argument("--model", default=None, help="vLLM model id or container-local path")
+    serve.add_argument(
+        "--model",
+        default=None,
+        help="Model id or container-local path (llama.cpp: owner/repo[:quant] or .gguf path)",
+    )
     serve.add_argument("--served-model-name", default=None, help="API-visible model name")
+    serve.add_argument("--port", type=int, default=None, help="Host backend port")
+    serve.add_argument(
+        "--context-length",
+        type=int,
+        default=None,
+        help="Model context length (vLLM --max-model-len, llama.cpp --ctx-size)",
+    )
+    serve.add_argument(
+        "--max-parallel",
+        type=int,
+        default=None,
+        help="Max concurrent sequences (vLLM --max-num-seqs, llama.cpp --parallel)",
+    )
+    serve.add_argument("--hf-home", default=None, help="Host Hugging Face cache directory")
+
     serve.add_argument("--vllm-image", default=None, help="vLLM container image")
-    serve.add_argument("--port", type=int, default=None, help="Host vLLM port")
-    serve.add_argument("--max-model-len", type=int, default=None, help="vLLM max model length")
     serve.add_argument(
         "--gpu-memory-utilization",
         type=float,
         default=None,
         help="vLLM GPU memory utilization",
     )
-    serve.add_argument("--max-num-seqs", type=int, default=None, help="vLLM max sequences")
-    serve.add_argument("--hf-home", default=None, help="Host Hugging Face cache directory")
     serve.add_argument(
         "--generation-config",
         choices=["vllm", "auto"],
@@ -361,11 +430,60 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help='Raw vLLM args as a JSON array, appended last, e.g. ["--foo","bar"]',
     )
-    serve.add_argument("--http-proxy", default=None, help="HTTP proxy for proxy and vLLM containers")
-    serve.add_argument("--https-proxy", default=None, help="HTTPS proxy for proxy and vLLM containers")
+
+    serve.add_argument("--llamacpp-image", default=None, help="llama.cpp server container image")
+    serve.add_argument(
+        "--n-gpu-layers",
+        type=int,
+        default=None,
+        help="llama.cpp layers to offload to the GPU (999 = all)",
+    )
+    serve.add_argument(
+        "--flash-attn",
+        choices=["on", "off", "auto"],
+        default=None,
+        help="llama.cpp flash attention mode",
+    )
+    serve.add_argument("--cache-type-k", default=None, help="llama.cpp KV cache K type (e.g. q8_0)")
+    serve.add_argument("--cache-type-v", default=None, help="llama.cpp KV cache V type (e.g. q8_0)")
+    serve.add_argument("--threads", type=int, default=None, help="llama.cpp CPU threads")
+    serve.add_argument("--batch-size", type=int, default=None, help="llama.cpp logical batch size")
+    serve.add_argument("--ubatch-size", type=int, default=None, help="llama.cpp physical batch size")
+    serve.add_argument(
+        "--jinja",
+        dest="jinja",
+        action="store_true",
+        default=None,
+        help="Enable llama.cpp jinja chat templates and tool calling (default)",
+    )
+    serve.add_argument(
+        "--no-jinja",
+        dest="jinja",
+        action="store_false",
+        help="Disable llama.cpp jinja chat templates",
+    )
+    serve.add_argument("--reasoning-format", default=None, help="llama.cpp reasoning format")
+    serve.add_argument(
+        "--llamacpp-cache-dir",
+        default=None,
+        help="Host llama.cpp download cache directory (-hf downloads persist here)",
+    )
+    serve.add_argument(
+        "--llamacpp-model-dir",
+        default=None,
+        help="Host directory mounted read-only at /models for local .gguf files",
+    )
+    serve.add_argument(
+        "--llamacpp-extra-args",
+        default=None,
+        help="Raw llama-server args appended last (whitespace separated)",
+    )
+
+    serve.add_argument("--http-proxy", default=None, help="HTTP proxy for proxy and backend containers")
+    serve.add_argument("--https-proxy", default=None, help="HTTPS proxy for proxy and backend containers")
     serve.add_argument("--no-proxy", default=None, help="Comma-separated hosts that bypass proxy")
     serve.add_argument("--ca-bundle", default=None, help="CA bundle path for TLS verification")
-    serve.add_argument("--hf-endpoint", default=None, help="Hugging Face endpoint for vLLM downloads")
+    serve.add_argument("--hf-endpoint", default=None, help="Hugging Face endpoint for model downloads")
     serve.add_argument(
         "--context-scaling",
         action="store_true",
@@ -424,13 +542,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show Docker Compose container status for the oMNI stack",
         description=(
             "Show Docker Compose container status. Defaults to the generated "
-            "vLLM compose file when present, otherwise the proxy compose file."
+            "sidecar compose file when present, otherwise the proxy compose file."
         ),
     )
     status.add_argument(
         "--compose-file",
         default=None,
-        help="Compose file path. Defaults to generated vLLM compose or proxy compose.",
+        help="Compose file path. Defaults to the generated sidecar compose or proxy compose.",
     )
 
     logs = subparsers.add_parser(
@@ -456,7 +574,7 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument(
         "--compose-file",
         default=None,
-        help="Compose file path. Defaults to generated vLLM compose or proxy compose.",
+        help="Compose file path. Defaults to the generated sidecar compose or proxy compose.",
     )
 
     restart = subparsers.add_parser(
@@ -476,7 +594,7 @@ def build_parser() -> argparse.ArgumentParser:
     restart.add_argument(
         "--compose-file",
         default=None,
-        help="Compose file path. Defaults to generated vLLM compose or proxy compose.",
+        help="Compose file path. Defaults to the generated sidecar compose or proxy compose.",
     )
 
     stop = subparsers.add_parser(
@@ -496,14 +614,16 @@ def build_parser() -> argparse.ArgumentParser:
     stop.add_argument(
         "--compose-file",
         default=None,
-        help="Compose file path. Defaults to generated vLLM compose or proxy compose.",
+        help="Compose file path. Defaults to the generated sidecar compose or proxy compose.",
     )
     return parser
 
 
-def default_compose_file(backend: str) -> Path:
-    if backend == "vllm":
-        return DEFAULT_VLLM_COMPOSE
+def default_compose_file(backend: str, mode: str = "managed") -> Path:
+    if mode == "managed" and backend in MANAGED_BACKENDS:
+        if backend == "vllm":
+            return DEFAULT_VLLM_COMPOSE
+        return DEFAULT_LLAMACPP_COMPOSE
     return DEFAULT_PROXY_COMPOSE
 
 
@@ -527,6 +647,12 @@ def load_serve_state(path: Path | None = None) -> dict[str, str]:
     if backend not in BACKENDS:
         return {}
     state: dict[str, str] = {"backend": str(backend)}
+    mode = raw.get("mode")
+    if mode not in SERVE_MODES:
+        # State files written before llama.cpp became a managed sidecar lack a
+        # mode; only vLLM was managed back then.
+        mode = "managed" if backend == "vllm" else "proxy"
+    state["mode"] = str(mode)
     compose_file = raw.get("compose_file")
     if isinstance(compose_file, str) and compose_file.strip():
         state["compose_file"] = compose_file
@@ -537,15 +663,21 @@ def save_serve_state(
     *,
     backend: str,
     compose_file: Path,
+    mode: str | None = None,
     path: Path | None = None,
 ) -> Path:
     if backend not in BACKENDS:
         raise ValueError(f"Unknown backend: {backend}")
+    if mode is None:
+        mode = "managed" if backend in MANAGED_BACKENDS else "proxy"
+    if mode not in SERVE_MODES:
+        raise ValueError(f"Unknown serve mode: {mode}")
     state_path = path or DEFAULT_SERVE_STATE_FILE
     state_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": SERVE_STATE_VERSION,
         "backend": backend,
+        "mode": mode,
         "compose_file": str(compose_file),
         "updated_at": datetime.now(UTC).isoformat(),
     }
@@ -588,9 +720,14 @@ def compose_env_command(
     return command
 
 
-def vllm_env_file_for_compose(compose_file: Path) -> Path:
-    if compose_file.resolve() == DEFAULT_VLLM_COMPOSE.resolve():
+def sidecar_env_file_for_compose(backend: str, compose_file: Path) -> Path:
+    if backend == "vllm" and compose_file.resolve() == DEFAULT_VLLM_COMPOSE.resolve():
         return DEFAULT_VLLM_ENV_FILE
+    if (
+        backend == "llamacpp"
+        and compose_file.resolve() == DEFAULT_LLAMACPP_COMPOSE.resolve()
+    ):
+        return DEFAULT_LLAMACPP_ENV_FILE
     return compose_file.with_suffix(".env")
 
 
@@ -600,29 +737,25 @@ def proxy_env_file_for_compose(compose_file: Path) -> Path:
     return compose_file.with_suffix(".env")
 
 
-def vllm_compose_command(
-    compose_file: Path,
-    env_file: Path,
-    *,
-    foreground: bool,
-    build: bool,
-) -> list[str]:
-    return compose_env_command(
-        compose_file,
-        env_file,
-        foreground=foreground,
-        build=build,
-    )
-
-
-
-load_env_file = load_vllm_env_file
-write_env_file = write_vllm_env_file
-render_env_file = render_vllm_env_file
-
-
 def default_vllm_environment() -> dict[str, str]:
     return _shared_default_vllm_environment(expand_hf_home=True)
+
+
+def merged_sidecar_environment(
+    backend: str,
+    args: argparse.Namespace,
+    *,
+    env_file: Path | None = None,
+    compose_file: Path | None = None,
+) -> dict[str, str]:
+    spec = backend_spec(backend)
+    values = spec.default_environment(expand_hf_home=True)
+    if env_file is not None:
+        values.update(known_env(load_env_file(env_file), spec.env_keys))
+    if env_file is not None and not env_file.exists() and compose_file is not None:
+        values.update(known_env(env_from_compose(compose_file, spec.env_keys), spec.env_keys))
+    values.update(sidecar_cli_environment(backend, args))
+    return values
 
 
 def merged_vllm_environment(
@@ -631,25 +764,49 @@ def merged_vllm_environment(
     env_file: Path | None = None,
     compose_file: Path | None = None,
 ) -> dict[str, str]:
-    values = default_vllm_environment()
-    if env_file is not None:
-        values.update(known_vllm_env(load_env_file(env_file)))
-    if env_file is not None and not env_file.exists() and compose_file is not None:
-        values.update(known_vllm_env(vllm_env_from_compose(compose_file)))
-    values.update(vllm_cli_environment(args))
+    return merged_sidecar_environment(
+        "vllm",
+        args,
+        env_file=env_file,
+        compose_file=compose_file,
+    )
+
+
+def portable_cli_environment(args: argparse.Namespace) -> dict[str, str]:
+    values: dict[str, str] = {}
+    mappings = {
+        "model": "OMNI_MODEL",
+        "served_model_name": "OMNI_SERVED_MODEL_NAME",
+        "context_length": "OMNI_CONTEXT_LENGTH",
+        "max_parallel": "OMNI_MAX_PARALLEL",
+        "port": "OMNI_BACKEND_PORT",
+        "hf_endpoint": "OMNI_HF_ENDPOINT",
+        "http_proxy": "OMNI_HTTP_PROXY",
+        "https_proxy": "OMNI_HTTPS_PROXY",
+        "no_proxy": "OMNI_NO_PROXY",
+        "ca_bundle": "OMNI_CA_BUNDLE",
+        "proxy_port": "OMLX_PROXY_PORT",
+        "api_key": "OMLX_PROXY_API_KEY",
+        "backend_api_key": "OMLX_BACKEND_API_KEY",
+        "target_context_size": "OMLX_TARGET_CONTEXT_SIZE",
+        "sse_keepalive_mode": "OMLX_SSE_KEEPALIVE_MODE",
+    }
+    for attr, key in mappings.items():
+        value = getattr(args, attr, None)
+        if value is not None:
+            values[key] = str(value)
+    if getattr(args, "hf_home", None) is not None:
+        values["OMNI_HF_HOME"] = _host_path(args.hf_home)
+    if getattr(args, "context_scaling", False):
+        values["OMLX_CONTEXT_SCALING"] = "true"
     return values
 
 
 def vllm_cli_environment(args: argparse.Namespace) -> dict[str, str]:
-    values: dict[str, str] = {}
+    values = portable_cli_environment(args)
     mappings = {
         "vllm_image": "VLLM_IMAGE",
-        "model": "VLLM_MODEL",
-        "served_model_name": "VLLM_SERVED_MODEL_NAME",
-        "max_model_len": "VLLM_MAX_MODEL_LEN",
         "gpu_memory_utilization": "VLLM_GPU_MEMORY_UTILIZATION",
-        "max_num_seqs": "VLLM_MAX_NUM_SEQS",
-        "port": "VLLM_PORT",
         "generation_config": "VLLM_GENERATION_CONFIG",
         "default_chat_template_kwargs": "VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS",
         "tool_call_parser": "VLLM_TOOL_CALL_PARSER",
@@ -669,23 +826,11 @@ def vllm_cli_environment(args: argparse.Namespace) -> dict[str, str]:
         "pipeline_parallel_size": "VLLM_PIPELINE_PARALLEL_SIZE",
         "uvicorn_log_level": "VLLM_UVICORN_LOG_LEVEL",
         "extra_args_json": "VLLM_EXTRA_ARGS_JSON",
-        "http_proxy": "VLLM_HTTP_PROXY",
-        "https_proxy": "VLLM_HTTPS_PROXY",
-        "no_proxy": "VLLM_NO_PROXY",
-        "ca_bundle": "VLLM_CA_BUNDLE",
-        "hf_endpoint": "VLLM_HF_ENDPOINT",
-        "proxy_port": "OMLX_PROXY_PORT",
-        "api_key": "OMLX_PROXY_API_KEY",
-        "backend_api_key": "OMLX_BACKEND_API_KEY",
-        "target_context_size": "OMLX_TARGET_CONTEXT_SIZE",
-        "sse_keepalive_mode": "OMLX_SSE_KEEPALIVE_MODE",
     }
     for attr, key in mappings.items():
         value = getattr(args, attr, None)
         if value is not None:
             values[key] = str(value)
-    if args.hf_home is not None:
-        values["VLLM_HF_HOME"] = _host_path(args.hf_home)
     if args.trust_remote_code is not None:
         values["VLLM_TRUST_REMOTE_CODE"] = _bool_str(args.trust_remote_code)
     if args.enforce_eager is not None:
@@ -698,13 +843,56 @@ def vllm_cli_environment(args: argparse.Namespace) -> dict[str, str]:
         values["VLLM_ENABLE_PREFIX_CACHING"] = _bool_str(args.enable_prefix_caching)
     if args.disable_log_stats is not None:
         values["VLLM_DISABLE_LOG_STATS"] = _bool_str(args.disable_log_stats)
-    if args.context_scaling:
-        values["OMLX_CONTEXT_SCALING"] = "true"
     return values
 
 
+def llamacpp_cli_environment(args: argparse.Namespace) -> dict[str, str]:
+    values = portable_cli_environment(args)
+    mappings = {
+        "llamacpp_image": "LLAMACPP_IMAGE",
+        "n_gpu_layers": "LLAMACPP_N_GPU_LAYERS",
+        "flash_attn": "LLAMACPP_FLASH_ATTN",
+        "cache_type_k": "LLAMACPP_CACHE_TYPE_K",
+        "cache_type_v": "LLAMACPP_CACHE_TYPE_V",
+        "threads": "LLAMACPP_THREADS",
+        "batch_size": "LLAMACPP_BATCH_SIZE",
+        "ubatch_size": "LLAMACPP_UBATCH_SIZE",
+        "reasoning_format": "LLAMACPP_REASONING_FORMAT",
+        "llamacpp_extra_args": "LLAMACPP_EXTRA_ARGS",
+    }
+    for attr, key in mappings.items():
+        value = getattr(args, attr, None)
+        if value is not None:
+            values[key] = str(value)
+    if args.jinja is not None:
+        values["LLAMACPP_JINJA"] = _bool_str(args.jinja)
+    if args.llamacpp_cache_dir is not None:
+        values["LLAMACPP_CACHE_DIR"] = _host_path(args.llamacpp_cache_dir)
+    if args.llamacpp_model_dir is not None:
+        values["LLAMACPP_MODEL_DIR"] = _host_path(args.llamacpp_model_dir)
+    return values
+
+
+def sidecar_cli_environment(backend: str, args: argparse.Namespace) -> dict[str, str]:
+    if backend == "llamacpp":
+        return llamacpp_cli_environment(args)
+    return vllm_cli_environment(args)
+
+
+def _has_args(args: argparse.Namespace, attrs: Sequence[str]) -> bool:
+    return any(getattr(args, attr, None) is not None for attr in attrs)
+
+
+def has_portable_args(args: argparse.Namespace) -> bool:
+    return _has_args(args, PORTABLE_ARG_ATTRS)
+
+
 def has_vllm_specific_args(args: argparse.Namespace) -> bool:
-    return any(getattr(args, attr, None) is not None for attr in VLLM_SPECIFIC_ARG_ATTRS)
+    return _has_args(args, VLLM_SPECIFIC_ARG_ATTRS)
+
+
+def has_llamacpp_specific_args(args: argparse.Namespace) -> bool:
+    return _has_args(args, LLAMACPP_SPECIFIC_ARG_ATTRS)
 
 
 def resolve_serve_backend(
@@ -713,31 +901,64 @@ def resolve_serve_backend(
 ) -> str:
     if args.backend:
         return args.backend
+    if has_llamacpp_specific_args(args):
+        return "llamacpp"
     if has_vllm_specific_args(args):
         return "vllm"
     if args.backend_url:
         state_backend = (state or {}).get("backend")
-        if state_backend in PROXY_BACKENDS:
-            return state_backend
+        if state_backend in URL_BACKENDS:
+            return str(state_backend)
         return "openai"
     state_backend = (state or {}).get("backend")
+    if has_portable_args(args):
+        if state_backend in MANAGED_BACKENDS:
+            return str(state_backend)
+        return "vllm"
     if state_backend in BACKENDS:
         return str(state_backend)
     return "ollama"
+
+
+def resolve_serve_mode(
+    args: argparse.Namespace,
+    backend: str,
+    state: Mapping[str, str] | None = None,
+) -> str:
+    if backend not in MANAGED_BACKENDS:
+        return "proxy"
+    if backend == "vllm":
+        return "managed"
+    if args.backend_url:
+        return "proxy"
+    # Backend resolved from saved state with no explicit selection: honor the
+    # saved mode so a proxy-to-external llama.cpp stays a proxy.
+    if (
+        args.backend is None
+        and not has_llamacpp_specific_args(args)
+        and not has_portable_args(args)
+        and (state or {}).get("backend") == backend
+    ):
+        return str((state or {}).get("mode") or "managed")
+    return "managed"
 
 
 def compose_file_for_serve_backend(
     args: argparse.Namespace,
     backend: str,
     state: Mapping[str, str] | None = None,
+    mode: str = "managed",
 ) -> Path:
     if args.compose_file:
         return Path(args.compose_file).expanduser()
-    if (state or {}).get("backend") == backend:
+    if (
+        (state or {}).get("backend") == backend
+        and (state or {}).get("mode", "managed") == mode
+    ):
         state_compose = _path_from_state((state or {}).get("compose_file"))
         if state_compose is not None:
             return state_compose
-    return default_compose_file(backend)
+    return default_compose_file(backend, mode)
 
 
 def default_proxy_environment(backend: str) -> dict[str, str]:
@@ -811,6 +1032,8 @@ def default_control_compose_file() -> Path:
         return state_compose
     if DEFAULT_VLLM_COMPOSE.exists():
         return DEFAULT_VLLM_COMPOSE
+    if DEFAULT_LLAMACPP_COMPOSE.exists():
+        return DEFAULT_LLAMACPP_COMPOSE
     return DEFAULT_PROXY_COMPOSE
 
 
@@ -842,11 +1065,12 @@ def services_for_target(target: str, services: Sequence[str]) -> list[str]:
             raise SystemExit("Proxy service not found in selected compose file")
         return ["omlx-proxy"]
     if target == "backend":
-        if "vllm" not in available:
-            raise SystemExit(
-                "Backend service is external or not managed by this compose stack"
-            )
-        return ["vllm"]
+        for name in MANAGED_SERVICE_NAMES:
+            if name in available:
+                return [name]
+        raise SystemExit(
+            "Backend service is external or not managed by this compose stack"
+        )
     raise SystemExit(f"Unknown service target: {target}")
 
 
@@ -890,10 +1114,17 @@ def vllm_settings_from_args(
     args: argparse.Namespace,
     existing_env: Mapping[str, str] | None = None,
 ) -> VllmComposeSettings:
+    if existing_env is None:
+        return vllm_settings_from_env(
+            merged_vllm_environment(args, env_file=None, compose_file=None)
+        )
+    spec = backend_spec("vllm")
     return vllm_settings_from_env(
-        merged_vllm_environment(args, env_file=None, compose_file=None)
-        if existing_env is None
-        else {**default_vllm_environment(), **known_vllm_env(existing_env), **vllm_cli_environment(args)}
+        {
+            **default_vllm_environment(),
+            **known_env(existing_env, spec.env_keys),
+            **vllm_cli_environment(args),
+        }
     )
 
 
@@ -1049,18 +1280,21 @@ def launch_command(args: argparse.Namespace) -> int:
 def serve_command(args: argparse.Namespace) -> int:
     state = load_serve_state()
     backend = resolve_serve_backend(args, state)
-    compose_file = compose_file_for_serve_backend(args, backend, state)
+    mode = resolve_serve_mode(args, backend, state)
+    compose_file = compose_file_for_serve_backend(args, backend, state, mode)
 
-    if backend == "vllm":
-        env_file = vllm_env_file_for_compose(compose_file)
-        merged_env = merged_vllm_environment(
+    if mode == "managed":
+        spec = backend_spec(backend)
+        env_file = sidecar_env_file_for_compose(backend, compose_file)
+        merged_env = merged_sidecar_environment(
+            backend,
             args,
             env_file=env_file,
             compose_file=compose_file,
         )
-        settings = vllm_settings_from_env(merged_env)
-        compose_content = render_vllm_compose_for_path(compose_file, settings)
-        command = vllm_compose_command(
+        settings = spec.settings_from_env(merged_env)
+        compose_content = spec.render_compose_for_path(compose_file, settings)
+        command = compose_env_command(
             compose_file,
             env_file,
             foreground=args.foreground,
@@ -1069,11 +1303,11 @@ def serve_command(args: argparse.Namespace) -> int:
         if args.dry_run:
             print(compose_content)
             print(f"# Env file: {env_file}")
-            print(render_env_file(merged_env), end="")
+            print(render_env_file(merged_env, spec.env_keys), end="")
         else:
-            write_vllm_compose_for_path(compose_file, settings)
-            write_env_file(env_file, merged_env)
-            save_serve_state(backend=backend, compose_file=compose_file)
+            spec.write_compose_for_path(compose_file, settings)
+            write_env_file(env_file, merged_env, spec.env_keys)
+            save_serve_state(backend=backend, compose_file=compose_file, mode=mode)
             print(f"Wrote {compose_file}")
             print(f"Wrote {env_file}")
         return run_compose(
@@ -1103,7 +1337,7 @@ def serve_command(args: argparse.Namespace) -> int:
             print(f"{key}={env_overrides[key]}")
     if not args.dry_run:
         write_generic_env_file(env_file, env_overrides, PROXY_ENV_KEYS)
-        save_serve_state(backend=backend, compose_file=compose_file)
+        save_serve_state(backend=backend, compose_file=compose_file, mode=mode)
         print(f"Wrote {env_file}")
     return run_compose(
         command,

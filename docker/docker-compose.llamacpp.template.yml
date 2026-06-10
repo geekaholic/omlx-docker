@@ -1,0 +1,187 @@
+# Template defaults for the generated oMNI llama.cpp compose file. Edit docker-compose.llamacpp.template.yml or
+# admin proxy settings, then regenerate instead of hand-editing this file.
+services:
+  omlx-proxy:
+    build:
+      context: ".."
+      dockerfile: docker/Dockerfile.proxy
+    ports:
+      - "${OMLX_PROXY_PORT:-8080}:8080"
+    environment:
+      OMLX_BACKEND_URL: "http://llamacpp:8000/v1"
+      OMLX_SIDECAR_BACKEND: "llamacpp"
+      OMLX_BACKEND_API_KEY: "${OMLX_BACKEND_API_KEY:-}"
+      OMLX_PROXY_API_KEY: "${OMLX_PROXY_API_KEY:-}"
+      OMLX_PROXY_HOST: "0.0.0.0"
+      OMLX_PROXY_PORT: "8080"
+      OMLX_CONTEXT_SCALING: "${OMLX_CONTEXT_SCALING:-false}"
+      OMLX_TARGET_CONTEXT_SIZE: "${OMLX_TARGET_CONTEXT_SIZE:-200000}"
+      OMLX_ACTUAL_CONTEXT_SIZE: "${OMNI_CONTEXT_LENGTH:-8192}"
+      OMLX_SSE_KEEPALIVE_MODE: "${OMLX_SSE_KEEPALIVE_MODE:-ping}"
+      OMLX_SAMPLING_MAX_TOKENS: "${OMLX_SAMPLING_MAX_TOKENS:-32768}"
+      OMLX_SAMPLING_TEMPERATURE: "${OMLX_SAMPLING_TEMPERATURE:-1.0}"
+      OMLX_SAMPLING_TOP_P: "${OMLX_SAMPLING_TOP_P:-1.0}"
+      OMLX_SAMPLING_TOP_K: "${OMLX_SAMPLING_TOP_K:-0}"
+      OMLX_SAMPLING_REPETITION_PENALTY: "${OMLX_SAMPLING_REPETITION_PENALTY:-1.0}"
+      OMLX_PROXY_STATE_PATH: "/data/proxy-state.json"
+      OMLX_COMPOSE_OUTPUT_PATH: "/compose-output/docker-compose.llamacpp.yml"
+      OMLX_ENV_OUTPUT_PATH: "/compose-output/docker-compose.llamacpp.env"
+      HTTP_PROXY: "${OMNI_HTTP_PROXY:-}"
+      HTTPS_PROXY: "${OMNI_HTTPS_PROXY:-}"
+      NO_PROXY: "${OMNI_NO_PROXY:-}"
+      REQUESTS_CA_BUNDLE: "${OMNI_CA_BUNDLE:-}"
+      SSL_CERT_FILE: "${OMNI_CA_BUNDLE:-}"
+    volumes:
+      - proxy-state:/data
+      - "../docker:/compose-output"
+    depends_on:
+      - llamacpp
+
+  llamacpp:
+    image: "${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}"
+    ports:
+      - "${OMNI_BACKEND_PORT:-8000}:8000"
+    gpus: all
+    environment:
+      OMNI_MODEL: "${OMNI_MODEL:-ggml-org/Qwen3-1.7B-GGUF:Q8_0}"
+      OMNI_SERVED_MODEL_NAME: "${OMNI_SERVED_MODEL_NAME:-qwen}"
+      OMNI_CONTEXT_LENGTH: "${OMNI_CONTEXT_LENGTH:-8192}"
+      OMNI_MAX_PARALLEL: "${OMNI_MAX_PARALLEL:-4}"
+      OMNI_BACKEND_PORT: "${OMNI_BACKEND_PORT:-8000}"
+      OMNI_HF_HOME: "${OMNI_HF_HOME:-${HOME}/.cache/huggingface}"
+      OMNI_HF_ENDPOINT: "${OMNI_HF_ENDPOINT:-}"
+      OMNI_HTTP_PROXY: "${OMNI_HTTP_PROXY:-}"
+      OMNI_HTTPS_PROXY: "${OMNI_HTTPS_PROXY:-}"
+      OMNI_NO_PROXY: "${OMNI_NO_PROXY:-}"
+      OMNI_CA_BUNDLE: "${OMNI_CA_BUNDLE:-}"
+      LLAMACPP_IMAGE: "${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}"
+      LLAMACPP_N_GPU_LAYERS: "${LLAMACPP_N_GPU_LAYERS:-999}"
+      LLAMACPP_FLASH_ATTN: "${LLAMACPP_FLASH_ATTN:-}"
+      LLAMACPP_CACHE_TYPE_K: "${LLAMACPP_CACHE_TYPE_K:-}"
+      LLAMACPP_CACHE_TYPE_V: "${LLAMACPP_CACHE_TYPE_V:-}"
+      LLAMACPP_THREADS: "${LLAMACPP_THREADS:-}"
+      LLAMACPP_BATCH_SIZE: "${LLAMACPP_BATCH_SIZE:-}"
+      LLAMACPP_UBATCH_SIZE: "${LLAMACPP_UBATCH_SIZE:-}"
+      LLAMACPP_JINJA: "${LLAMACPP_JINJA:-true}"
+      LLAMACPP_REASONING_FORMAT: "${LLAMACPP_REASONING_FORMAT:-}"
+      LLAMACPP_CACHE_DIR: "${LLAMACPP_CACHE_DIR:-${HOME}/.cache/llama.cpp}"
+      LLAMACPP_MODEL_DIR: "${LLAMACPP_MODEL_DIR:-}"
+      LLAMACPP_EXTRA_ARGS: "${LLAMACPP_EXTRA_ARGS:-}"
+      OMLX_PROXY_PORT: "${OMLX_PROXY_PORT:-8080}"
+      OMLX_PROXY_API_KEY: "${OMLX_PROXY_API_KEY:-}"
+      OMLX_BACKEND_API_KEY: "${OMLX_BACKEND_API_KEY:-}"
+      OMLX_CONTEXT_SCALING: "${OMLX_CONTEXT_SCALING:-false}"
+      OMLX_TARGET_CONTEXT_SIZE: "${OMLX_TARGET_CONTEXT_SIZE:-200000}"
+      OMLX_SSE_KEEPALIVE_MODE: "${OMLX_SSE_KEEPALIVE_MODE:-ping}"
+      OMLX_SAMPLING_MAX_TOKENS: "${OMLX_SAMPLING_MAX_TOKENS:-32768}"
+      OMLX_SAMPLING_TEMPERATURE: "${OMLX_SAMPLING_TEMPERATURE:-1.0}"
+      OMLX_SAMPLING_TOP_P: "${OMLX_SAMPLING_TOP_P:-1.0}"
+      OMLX_SAMPLING_TOP_K: "${OMLX_SAMPLING_TOP_K:-0}"
+      OMLX_SAMPLING_REPETITION_PENALTY: "${OMLX_SAMPLING_REPETITION_PENALTY:-1.0}"
+      HF_TOKEN: "${HF_TOKEN:-}"
+      LLAMA_CACHE: "/root/.cache/llama.cpp"
+      HF_HOME: "/root/.cache/huggingface"
+    volumes:
+      - "${OMNI_HF_HOME:-${HOME}/.cache/huggingface}:/root/.cache/huggingface"
+      - "${LLAMACPP_CACHE_DIR:-${HOME}/.cache/llama.cpp}:/root/.cache/llama.cpp"
+      - "${LLAMACPP_MODEL_DIR:-${LLAMACPP_CACHE_DIR:-${HOME}/.cache/llama.cpp}}:/models:ro"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
+    entrypoint: ["/bin/sh", "-lc"]
+    command:
+      - |
+        set -eu
+        if [ -n "$${OMNI_HF_ENDPOINT:-}" ]; then
+          export HF_ENDPOINT="$${OMNI_HF_ENDPOINT}"
+          export MODEL_ENDPOINT="$${OMNI_HF_ENDPOINT}"
+        else
+          unset HF_ENDPOINT
+          unset MODEL_ENDPOINT
+        fi
+        if [ -n "$${OMNI_HTTP_PROXY:-}" ]; then
+          export HTTP_PROXY="$${OMNI_HTTP_PROXY}"
+          export http_proxy="$${OMNI_HTTP_PROXY}"
+        else
+          unset HTTP_PROXY http_proxy
+        fi
+        if [ -n "$${OMNI_HTTPS_PROXY:-}" ]; then
+          export HTTPS_PROXY="$${OMNI_HTTPS_PROXY}"
+          export https_proxy="$${OMNI_HTTPS_PROXY}"
+        else
+          unset HTTPS_PROXY https_proxy
+        fi
+        if [ -n "$${OMNI_NO_PROXY:-}" ]; then
+          export NO_PROXY="$${OMNI_NO_PROXY}"
+          export no_proxy="$${OMNI_NO_PROXY}"
+        else
+          unset NO_PROXY no_proxy
+        fi
+        if [ -n "$${OMNI_CA_BUNDLE:-}" ]; then
+          export CURL_CA_BUNDLE="$${OMNI_CA_BUNDLE}"
+          export SSL_CERT_FILE="$${OMNI_CA_BUNDLE}"
+        else
+          unset CURL_CA_BUNDLE
+          unset SSL_CERT_FILE
+        fi
+        model="$${OMNI_MODEL:?Set OMNI_MODEL to a GGUF repo (owner/repo[:quantTag]) or a .gguf path}"
+        case "$$model" in
+          *.gguf)
+            case "$$model" in
+              /*) set -- -m "$$model" ;;
+              *) set -- -m "/models/$$model" ;;
+            esac
+            ;;
+          *)
+            set -- -hf "$$model"
+            ;;
+        esac
+        set -- "$${@}" --host 0.0.0.0
+        set -- "$${@}" --port 8000
+        set -- "$${@}" --alias "$${OMNI_SERVED_MODEL_NAME:-$$model}"
+        set -- "$${@}" --ctx-size "$${OMNI_CONTEXT_LENGTH:-8192}"
+        set -- "$${@}" --parallel "$${OMNI_MAX_PARALLEL:-4}"
+        set -- "$${@}" --n-gpu-layers "$${LLAMACPP_N_GPU_LAYERS:-999}"
+        if [ "$${LLAMACPP_JINJA:-true}" = "true" ]; then
+          set -- "$${@}" --jinja
+        fi
+        if [ -n "$${LLAMACPP_FLASH_ATTN:-}" ]; then
+          set -- "$${@}" --flash-attn "$${LLAMACPP_FLASH_ATTN}"
+        fi
+        if [ -n "$${LLAMACPP_CACHE_TYPE_K:-}" ]; then
+          set -- "$${@}" --cache-type-k "$${LLAMACPP_CACHE_TYPE_K}"
+        fi
+        if [ -n "$${LLAMACPP_CACHE_TYPE_V:-}" ]; then
+          set -- "$${@}" --cache-type-v "$${LLAMACPP_CACHE_TYPE_V}"
+        fi
+        if [ -n "$${LLAMACPP_THREADS:-}" ]; then
+          set -- "$${@}" --threads "$${LLAMACPP_THREADS}"
+        fi
+        if [ -n "$${LLAMACPP_BATCH_SIZE:-}" ]; then
+          set -- "$${@}" --batch-size "$${LLAMACPP_BATCH_SIZE}"
+        fi
+        if [ -n "$${LLAMACPP_UBATCH_SIZE:-}" ]; then
+          set -- "$${@}" --ubatch-size "$${LLAMACPP_UBATCH_SIZE}"
+        fi
+        if [ -n "$${LLAMACPP_REASONING_FORMAT:-}" ]; then
+          set -- "$${@}" --reasoning-format "$${LLAMACPP_REASONING_FORMAT}"
+        fi
+        if [ -n "$${OMLX_BACKEND_API_KEY:-}" ]; then
+          set -- "$${@}" --api-key "$${OMLX_BACKEND_API_KEY}"
+        fi
+        if [ -n "$${LLAMACPP_EXTRA_ARGS:-}" ]; then
+          set -- "$${@}" $$LLAMACPP_EXTRA_ARGS
+        fi
+        unset OMNI_MODEL OMNI_SERVED_MODEL_NAME OMNI_CONTEXT_LENGTH OMNI_MAX_PARALLEL OMNI_BACKEND_PORT OMNI_HF_HOME OMNI_HF_ENDPOINT OMNI_HTTP_PROXY OMNI_HTTPS_PROXY OMNI_NO_PROXY OMNI_CA_BUNDLE
+        unset LLAMACPP_IMAGE LLAMACPP_N_GPU_LAYERS LLAMACPP_FLASH_ATTN LLAMACPP_CACHE_TYPE_K LLAMACPP_CACHE_TYPE_V LLAMACPP_THREADS LLAMACPP_BATCH_SIZE LLAMACPP_UBATCH_SIZE LLAMACPP_JINJA LLAMACPP_REASONING_FORMAT LLAMACPP_CACHE_DIR LLAMACPP_MODEL_DIR LLAMACPP_EXTRA_ARGS
+        unset OMLX_PROXY_PORT OMLX_PROXY_API_KEY OMLX_BACKEND_API_KEY OMLX_CONTEXT_SCALING OMLX_TARGET_CONTEXT_SIZE OMLX_SSE_KEEPALIVE_MODE OMLX_SAMPLING_MAX_TOKENS OMLX_SAMPLING_TEMPERATURE OMLX_SAMPLING_TOP_P OMLX_SAMPLING_TOP_K OMLX_SAMPLING_REPETITION_PENALTY
+        if command -v llama-server >/dev/null 2>&1; then
+          exec llama-server "$${@}"
+        fi
+        exec /app/llama-server "$${@}"
+
+volumes:
+  proxy-state:
