@@ -53,6 +53,10 @@
                     backend_api_key_set: false,
                     state_path: '',
                     capabilities: {},
+                    backend_url_defaults: {},
+                    backend_url_locked: ['vllm', 'llama.cpp'],
+                    backend_profiles: {},
+                    docker_socket_available: false,
                     sidecar_backend: 'vllm',
                     sidecar: {
                         // Portable (OMNI_*) settings shared by managed backends
@@ -248,6 +252,23 @@
                 status: 'idle',
                 message: '',
             },
+
+            // Sidecar-backend restart state (proxy mode). Same status values
+            // as restartServer, but polls backend reachability instead of
+            // the proxy's own /health.
+            restartBackend: {
+                status: 'idle',
+                message: '',
+            },
+            // True after a save reported requires_restart: shows the
+            // "restart backend to apply" banner.
+            backendRestartNeeded: false,
+            // Client-side stash of per-backend sidecar image edits; the
+            // server profiles don't carry the image field.
+            _sidecarImageByType: {},
+            // Set while applying server settings so the backend-type watcher
+            // doesn't stash transient values into the profiles.
+            _suppressBackendProfileStash: false,
 
             statsScope: 'session',
             selectedStatsModel: '',
@@ -568,6 +589,11 @@
                     }
                 });
 
+                // Swap per-backend settings when the backend type changes.
+                this.$watch('globalSettings.proxy.backend_type', (newType, oldType) => {
+                    this.onBackendTypeChange(newType, oldType);
+                });
+
                 window.addEventListener('popstate', () => {
                     this.applyTabStateFromUrl();
                 });
@@ -747,6 +773,8 @@
                         const modelDirs = data.model?.model_dirs?.length
                             ? data.model.model_dirs
                             : (data.model?.model_dir ? [data.model.model_dir] : ['']);
+                        this._suppressBackendProfileStash = true;
+                        this.$nextTick(() => { this._suppressBackendProfileStash = false; });
                         this.globalSettings = {
                             ...this.globalSettings,
                             ...data,
@@ -949,6 +977,9 @@
                         await this.loadStats();
                         await this.loadModels();
                         if (this.proxyMode) {
+                            this.backendRestartNeeded = !!data.requires_restart;
+                            // Re-sync saved values and backend profiles.
+                            await this.loadGlobalSettings();
                             await this.loadProxyStatus();
                             await this.loadProxyMetrics();
                         }
@@ -2121,6 +2152,50 @@
                     || this.stats.proxy?.mode === 'proxy';
             },
 
+            get isSidecarBackendType() {
+                const locked = this.globalSettings.proxy?.backend_url_locked
+                    || ['vllm', 'llama.cpp'];
+                return locked.includes(this.globalSettings.proxy?.backend_type);
+            },
+
+            get canRestartBackend() {
+                return this.isSidecarBackendType
+                    && !!this.globalSettings.proxy?.docker_socket_available;
+            },
+
+            defaultBackendUrl(type) {
+                const defaults = this.globalSettings.proxy?.backend_url_defaults || {};
+                return defaults[type] || '';
+            },
+
+            onBackendTypeChange(newType, oldType) {
+                if (this._suppressBackendProfileStash) return;
+                if (!this.proxyMode || !newType || newType === oldType) return;
+                const proxy = this.globalSettings.proxy;
+                const profiles = proxy.backend_profiles = proxy.backend_profiles || {};
+                if (oldType) {
+                    profiles[oldType] = {
+                        ...(profiles[oldType] || {}),
+                        backend_url: proxy.backend_url,
+                        backend_api_key: proxy.backend_api_key,
+                        model: proxy.sidecar?.model ?? '',
+                        served_model_name: proxy.sidecar?.served_model_name ?? '',
+                    };
+                    this._sidecarImageByType[oldType] = proxy.sidecar?.image ?? '';
+                }
+                const profile = profiles[newType] || {};
+                const locked = (proxy.backend_url_locked || []).includes(newType);
+                proxy.backend_url = locked
+                    ? this.defaultBackendUrl(newType)
+                    : (profile.backend_url || this.defaultBackendUrl(newType));
+                proxy.backend_api_key = profile.backend_api_key || '';
+                if (proxy.sidecar) {
+                    proxy.sidecar.model = profile.model ?? '';
+                    proxy.sidecar.served_model_name = profile.served_model_name ?? '';
+                    proxy.sidecar.image = this._sidecarImageByType[newType] ?? '';
+                }
+            },
+
             get proxyCapabilities() {
                 return this.globalSettings.proxy?.capabilities
                     || this.proxyStatus.capabilities
@@ -2162,7 +2237,7 @@
                     return;
                 }
 
-                if (response.status === 503) {
+                if (response.status === 503 || response.status === 501) {
                     let msg = window.t('settings.server.restart_status_unavailable');
                     try {
                         const data = await response.json();
@@ -2233,6 +2308,97 @@
                     // Small delay so the user sees the success state, then
                     // reload to ensure all caches/sessions re-sync.
                     setTimeout(() => window.location.reload(), 500);
+                };
+                tick();
+            },
+
+            async restartBackendStart() {
+                if (this.restartBackend.status === 'restarting'
+                    || this.restartBackend.status === 'waiting') {
+                    return;
+                }
+                if (!window.confirm(window.t('settings.proxy.restart_backend_confirm'))) {
+                    return;
+                }
+
+                this.restartBackend = {
+                    status: 'restarting',
+                    message: window.t('settings.proxy.restart_backend_status_sending'),
+                };
+
+                let response;
+                try {
+                    response = await fetch('/admin/api/sidecar/restart', { method: 'POST' });
+                } catch (err) {
+                    this.restartBackend = {
+                        status: 'error',
+                        message: window.t('settings.proxy.restart_backend_status_failed'),
+                    };
+                    return;
+                }
+
+                if (response.status === 401) {
+                    window.location.href = '/admin';
+                    return;
+                }
+
+                if (response.status !== 202) {
+                    let msg = window.t('settings.proxy.restart_backend_status_failed');
+                    try {
+                        const data = await response.json();
+                        if (data && data.detail) msg = data.detail;
+                    } catch (e) { /* ignore */ }
+                    const status = response.status === 501 ? 'unsupported' : 'error';
+                    this.restartBackend = { status, message: msg };
+                    return;
+                }
+
+                this.restartBackend = {
+                    status: 'waiting',
+                    message: window.t('settings.proxy.restart_backend_status_waiting'),
+                };
+                this._restartBackendPoll();
+            },
+
+            _restartBackendPoll() {
+                // Model reloads can take a while; allow up to 120s.
+                const deadline = Date.now() + 120000;
+                let sawDown = false;
+                const tick = async () => {
+                    if (Date.now() > deadline) {
+                        this.restartBackend = {
+                            status: 'error',
+                            message: window.t('settings.proxy.restart_backend_status_timeout'),
+                        };
+                        return;
+                    }
+                    let reachable = false;
+                    try {
+                        const r = await fetch('/admin/api/proxy/status', { cache: 'no-store' });
+                        if (r.ok) {
+                            const data = await r.json();
+                            this.proxyStatus = { ...this.proxyStatus, ...data };
+                            reachable = !!data.backend_reachable;
+                        }
+                    } catch (e) {
+                        reachable = false;
+                    }
+                    if (!reachable) {
+                        sawDown = true;
+                        setTimeout(tick, 2000);
+                        return;
+                    }
+                    if (!sawDown) {
+                        // Backend hasn't gone down yet — keep polling.
+                        setTimeout(tick, 1000);
+                        return;
+                    }
+                    this.backendRestartNeeded = false;
+                    this.restartBackend = {
+                        status: 'idle',
+                        message: window.t('settings.proxy.restart_backend_status_back'),
+                    };
+                    await this.loadProxyMetrics();
                 };
                 tick();
             },

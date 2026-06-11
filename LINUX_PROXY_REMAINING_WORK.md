@@ -2,7 +2,7 @@
 
 This fork is moving toward a Linux-friendly oMLX UI/proxy that delegates
 inference to remote or sidecar OpenAI-compatible backends such as vLLM,
-llama.cpp server, or Ollama.
+llama.cpp server, or any OpenAI-compatible endpoint (Ollama, for example).
 
 ## Current Decisions
 
@@ -22,8 +22,12 @@ llama.cpp server, or Ollama.
 - Dockerized MLX-free proxy container.
 - OpenAI-compatible passthrough and Anthropic Messages API bridge.
 - Proxy admin dashboard and browser chat UI.
-- Backend URL/API key/type controls with persisted proxy state.
+- Backend URL/API key/type controls with persisted proxy state. The dedicated
+  `ollama` backend type was folded into `openai-compatible`, which defaults to
+  the Ollama endpoint; per-backend settings persist keyed by backend type.
 - Live application of backend URL/API key/type changes.
+- Sidecar backend restart from the admin UI through the Docker Engine API,
+  with the sidecar re-reading its generated env file on restart.
 - Backend status and metrics endpoints, including vLLM Prometheus and Ollama
   native probes.
 - `omni` CLI for `serve`, `status`, `logs`, `restart`, and `stop`.
@@ -35,7 +39,7 @@ llama.cpp server, or Ollama.
 ## Remaining Implementation Steps
 
 1. Test against real backends.
-   - Ollama: verify chat, `/v1/models`, `/admin/api/proxy/metrics`, `/api/tags`, and `/api/ps`.
+   - Ollama (via the OpenAI-compatible backend type): verify chat, `/v1/models`, `/admin/api/proxy/metrics`, `/api/tags`, and `/api/ps`.
    - vLLM: verify chat streaming, tool calls, Prometheus `/metrics`, token counters, cache usage, and restart flows on Spark.
    - llama.cpp server: verify OpenAI compatibility, model listing behavior, streaming, tool calling, and any exposed metrics.
 
@@ -50,7 +54,7 @@ llama.cpp server, or Ollama.
    - If added, mirror the vLLM pattern: template + ignored generated compose/env + `omni serve` flags.
 
 4. Add Spark/Linux runbook coverage.
-   - External Ollama.
+   - External Ollama through the OpenAI-compatible backend type.
    - External vLLM.
    - vLLM sidecar with known-good model examples.
    - llama.cpp server if supported.

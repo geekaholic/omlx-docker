@@ -129,3 +129,29 @@ def test_proxy_service_parity_between_backends():
     assert 'OMLX_COMPOSE_OUTPUT_PATH: "/compose-output/docker-compose.vllm.yml"' in vllm_proxy
     assert "OMLX_ACTUAL_CONTEXT_SIZE" in vllm_proxy
     assert "${OMNI_CONTEXT_LENGTH:-8192}" in vllm_proxy
+
+
+def test_proxy_service_mounts_docker_socket_for_sidecar_restart():
+    for content in (
+        render_vllm_compose(VllmComposeSettings()),
+        render_llamacpp_compose(LlamacppComposeSettings()),
+    ):
+        proxy_block = content.split("  omlx-proxy:", 1)[1]
+        assert "- /var/run/docker.sock:/var/run/docker.sock" in proxy_block
+
+
+def test_sidecar_reloads_env_file_on_restart():
+    cases = (
+        (render_vllm_compose(VllmComposeSettings()), "docker-compose.vllm.env"),
+        (
+            render_llamacpp_compose(LlamacppComposeSettings()),
+            "docker-compose.llamacpp.env",
+        ),
+    )
+    for content, env_name in cases:
+        # The sidecar mounts the generated-files dir read-only and re-exports
+        # the env file at start so a container restart applies saved settings.
+        assert ":/compose-output:ro" in content
+        assert f'if [ -f "/compose-output/{env_name}" ]' in content
+        assert f'done < "/compose-output/{env_name}"' in content
+        assert 'export "$$omni_env_line"' in content

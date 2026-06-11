@@ -32,6 +32,7 @@ from .sidecar_compose import (
     proxy_sidecar_environment,
     register_backend,
     render_env_file,
+    render_env_reload_snippet,
     render_proxy_service,
     write_env_file,
 )
@@ -214,6 +215,7 @@ def render_llamacpp_compose(
         project_context=project_context,
         compose_output_dir=compose_output_dir,
     )
+    env_reload = render_env_reload_snippet(DEFAULT_LLAMACPP_ENV_NAME)
     cache_dir_expr = _compose_default_expr("LLAMACPP_CACHE_DIR", settings.cache_dir)
     model_dir_expr = _compose_default_expr(
         "LLAMACPP_MODEL_DIR",
@@ -237,6 +239,7 @@ services:
       - "{_compose_default_expr('OMNI_HF_HOME', settings.hf_home)}:/root/.cache/huggingface"
       - "{cache_dir_expr}:/root/.cache/llama.cpp"
       - "{model_dir_expr}:/models:ro"
+      - {_yaml_quote(f'{compose_output_dir}:/compose-output:ro')}
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/health"]
       interval: 15s
@@ -247,6 +250,7 @@ services:
     command:
       - |
         set -eu
+{env_reload}
         if [ -n "$${{OMNI_HF_ENDPOINT:-}}" ]; then
           export HF_ENDPOINT="$${{OMNI_HF_ENDPOINT}}"
           export MODEL_ENDPOINT="$${{OMNI_HF_ENDPOINT}}"

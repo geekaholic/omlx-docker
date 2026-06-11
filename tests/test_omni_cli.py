@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the Linux/proxy-first omni CLI."""
 
+import json
+
 import pytest
 
 from omlx import omni_cli
@@ -40,7 +42,7 @@ def test_top_level_help_documents_serve_options(capsys):
     assert "omni logs [--target proxy|backend|both]" in output
     assert "omni restart [--target proxy|backend|both]" in output
     assert "omni stop --target proxy|backend|both" in output
-    assert "--backend {vllm,llamacpp,openai,ollama}" in output
+    assert "--backend {vllm,llamacpp,openai}" in output
     assert "--hf-home PATH" in output
     assert "--sse-keepalive-mode {ping,comment,off}" in output
 
@@ -100,7 +102,7 @@ def test_default_control_compose_file_prefers_saved_state(monkeypatch, tmp_path)
     monkeypatch.setattr(omni_cli, "DEFAULT_PROXY_COMPOSE", proxy_compose)
     monkeypatch.setattr(omni_cli, "DEFAULT_VLLM_COMPOSE", vllm_compose)
 
-    omni_cli.save_serve_state(backend="ollama", compose_file=proxy_compose)
+    omni_cli.save_serve_state(backend="openai", compose_file=proxy_compose)
 
     assert omni_cli.default_control_compose_file() == proxy_compose
 
@@ -453,7 +455,7 @@ def test_serve_without_backend_defaults_to_proxy_stack(capsys):
     assert env["OMLX_PROXY_PORT"] == "8080"
 
     state = omni_cli.load_serve_state()
-    assert state["backend"] == "ollama"
+    assert state["backend"] == "openai"
     assert state["compose_file"] == str(omni_cli.DEFAULT_PROXY_COMPOSE)
 
 
@@ -727,8 +729,8 @@ def test_vllm_settings_from_args_maps_advanced_flags():
     assert settings.hf_endpoint == "https://hf.example"
 
 
-def test_ollama_proxy_backend_defaults(capsys):
-    args = parse_args("--backend", "ollama", "--generate-only", "--no-build")
+def test_openai_proxy_backend_defaults_to_ollama_url(capsys):
+    args = parse_args("--backend", "openai", "--generate-only", "--no-build")
 
     env = omni_cli.proxy_environment(args)
 
@@ -829,11 +831,28 @@ def test_proxy_dry_run_does_not_write_state_or_env(tmp_path):
     assert not omni_cli.DEFAULT_SERVE_STATE_FILE.exists()
 
 
-def test_openai_proxy_requires_backend_url():
-    args = parse_args("--backend", "openai", "--generate-only")
-
+def test_llamacpp_proxy_requires_backend_url():
     with pytest.raises(SystemExit):
-        omni_cli.proxy_environment(args)
+        omni_cli.proxy_backend_url("llamacpp", {})
+
+
+def test_legacy_ollama_serve_state_resolves_to_openai(tmp_path):
+    state_path = tmp_path / "omni-serve.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": omni_cli.SERVE_STATE_VERSION,
+                "backend": "ollama",
+                "mode": "proxy",
+                "compose_file": str(tmp_path / "docker-compose.proxy.yml"),
+            }
+        )
+    )
+
+    state = omni_cli.load_serve_state(state_path)
+
+    assert state["backend"] == "openai"
+    assert state["mode"] == "proxy"
 
 
 def test_compose_command_defaults_to_detached_build(tmp_path):

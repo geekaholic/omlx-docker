@@ -6,6 +6,18 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+# Default backend URLs per backend type. Sidecar URLs match the Docker
+# Compose service names; the openai-compatible default targets Ollama on
+# the Docker host.
+BACKEND_URL_DEFAULTS = {
+    "vllm": "http://vllm:8000/v1",
+    "llama.cpp": "http://llamacpp:8000/v1",
+    "openai-compatible": "http://host.docker.internal:11434/v1",
+}
+
+# Backend types whose URL is managed by the sidecar stack and not editable.
+SIDECAR_BACKEND_TYPES = ("vllm", "llama.cpp")
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
@@ -41,19 +53,15 @@ class ProxyConfig:
     sse_keepalive_mode: str = "ping"
 
     @classmethod
-    def from_env(cls) -> "ProxyConfig":
+    def from_env(cls) -> ProxyConfig:
         backend_url = os.getenv("OMLX_BACKEND_URL", "").strip()
         if not backend_url:
-            raise RuntimeError(
-                "OMLX_BACKEND_URL is required, e.g. http://vllm:8000/v1"
-            )
+            raise RuntimeError("OMLX_BACKEND_URL is required, e.g. http://vllm:8000/v1")
         return cls(
             backend_url=backend_url,
             backend_api_key=os.getenv("OMLX_BACKEND_API_KEY") or None,
             proxy_api_key=(
-                os.getenv("OMLX_PROXY_API_KEY")
-                or os.getenv("OMLX_API_KEY")
-                or None
+                os.getenv("OMLX_PROXY_API_KEY") or os.getenv("OMLX_API_KEY") or None
             ),
             host=os.getenv("OMLX_PROXY_HOST", "0.0.0.0"),
             port=_env_int("OMLX_PROXY_PORT", 8080),
@@ -67,4 +75,3 @@ class ProxyConfig:
     @property
     def normalized_backend_url(self) -> str:
         return self.backend_url.rstrip("/")
-

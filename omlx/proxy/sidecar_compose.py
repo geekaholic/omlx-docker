@@ -381,9 +381,28 @@ def render_proxy_service(
     volumes:
       - proxy-state:/data
       - {_yaml_quote(f'{compose_output_dir}:/compose-output')}
+      # Grants the admin UI control of the sidecar container (restart
+      # backend). Remove if you don't want the proxy to reach the Docker
+      # daemon; the restart button then reports it is unavailable.
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - {backend_service}
 '''
+
+
+def render_env_reload_snippet(env_name: str) -> str:
+    """Shell lines that re-export the regenerated env file at container start.
+
+    Compose bakes the env values in when the container is created; sourcing
+    the bind-mounted env file on every start lets a plain container restart
+    pick up settings saved from the admin UI.
+    """
+    return f'''        if [ -f "/compose-output/{env_name}" ]; then
+          while IFS= read -r omni_env_line; do
+            case "$$omni_env_line" in ''|'#'*) continue;; esac
+            export "$$omni_env_line"
+          done < "/compose-output/{env_name}"
+        fi'''
 
 
 def compose_paths_for_render(

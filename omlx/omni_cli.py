@@ -19,6 +19,7 @@ from .proxy import (  # noqa: F401  (registers backend specs)
     llamacpp_compose,
     vllm_compose,
 )
+from .proxy.config import BACKEND_URL_DEFAULTS
 from .proxy.sidecar_compose import (
     backend_spec,
     env_from_compose,
@@ -50,7 +51,8 @@ DEFAULT_SERVE_STATE_FILE = DOCKER_DIR / "omni-serve.json"
 
 SERVE_STATE_VERSION = 1
 MANAGED_BACKENDS = {"vllm", "llamacpp"}
-URL_BACKENDS = {"openai", "ollama", "llamacpp"}
+URL_BACKENDS = {"openai", "llamacpp"}
+OPENAI_DEFAULT_BACKEND_URL = BACKEND_URL_DEFAULTS["openai-compatible"]
 BACKENDS = MANAGED_BACKENDS | URL_BACKENDS
 # Backwards-compatible alias; llamacpp belongs to both groups (managed sidecar
 # without --backend-url, plain proxy with it).
@@ -135,11 +137,12 @@ Backends:
   vllm       Generate docker/docker-compose.vllm.yml and launch vLLM + proxy.
   llamacpp   Generate docker/docker-compose.llamacpp.yml and launch llama.cpp + proxy.
              With --backend-url, proxy to an external llama.cpp server instead.
-  ollama     Launch the proxy against Ollama at http://host.docker.internal:11434/v1 by default.
-  openai     Launch the proxy against an OpenAI-compatible HTTPS endpoint. Requires --backend-url.
+  openai     Launch the proxy against any OpenAI-compatible endpoint. Defaults to
+             Ollama at http://host.docker.internal:11434/v1; use --backend-url to
+             point elsewhere.
 
 Common serve options:
-  --backend {vllm,llamacpp,openai,ollama}
+  --backend {vllm,llamacpp,openai}
   --backend-url URL
   --backend-api-key KEY
   --api-key KEY
@@ -219,7 +222,8 @@ Examples:
   omni serve --backend vllm --model Qwen/Qwen3-1.7B --served-model-name qwen3
   omni serve --backend llamacpp --model ggml-org/Qwen3-1.7B-GGUF:Q8_0
   omni serve --backend llamacpp --model /models/qwen3.gguf --context-length 16384
-  omni serve --backend ollama
+  omni serve --backend openai
+  omni serve --backend openai --backend-url https://api.example.com/v1
   omni serve --backend llamacpp --backend-url http://host.docker.internal:8000/v1
   omni launch list
   omni launch claude
@@ -238,8 +242,9 @@ argparse's detailed option descriptions.
 
 SERVE_DESCRIPTION = """
 Bootstrap oMNI with Docker Compose. vLLM and llama.cpp are generated as local
-sidecar compose files; OpenAI, Ollama, and llama.cpp with --backend-url use the
-proxy compose against an external OpenAI-compatible backend. A first
+sidecar compose files; openai (any OpenAI-compatible endpoint, Ollama by
+default) and llamacpp with --backend-url use the proxy compose against an
+external OpenAI-compatible backend. A first
 `omni serve` uses the proxy compose; later runs reuse the last saved serve
 backend unless flags choose another one.
 """.strip()
@@ -268,9 +273,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve.add_argument(
         "--backend",
-        choices=["vllm", "llamacpp", "openai", "ollama"],
+        choices=["vllm", "llamacpp", "openai"],
         default=None,
-        help="Backend to launch or proxy to (default: last used, then ollama proxy)",
+        help=(
+            "Backend to launch or proxy to (default: last used, then the "
+            "openai proxy against Ollama)"
+        ),
     )
     serve.add_argument(
         "--backend-url",
@@ -582,7 +590,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Restart the proxy, backend, or both services",
         description=(
             "Restart services in the selected Docker Compose stack. External "
-            "OpenAI, Ollama, and llama.cpp backends are not managed by this command."
+            "OpenAI-compatible and external llama.cpp backends are not "
+            "managed by this command."
         ),
     )
     restart.add_argument(
@@ -602,7 +611,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stop the proxy, backend, or both services",
         description=(
             "Stop services in the selected Docker Compose stack. External "
-            "OpenAI, Ollama, and llama.cpp backends are not managed by this command."
+            "OpenAI-compatible and external llama.cpp backends are not "
+            "managed by this command."
         ),
     )
     stop.add_argument(
@@ -644,6 +654,10 @@ def load_serve_state(path: Path | None = None) -> dict[str, str]:
     if not isinstance(raw, dict):
         return {}
     backend = raw.get("backend")
+    if backend == "ollama":
+        # ollama was folded into the openai backend; it keeps the Ollama
+        # endpoint as its default URL.
+        backend = "openai"
     if backend not in BACKENDS:
         return {}
     state: dict[str, str] = {"backend": str(backend)}
@@ -917,7 +931,7 @@ def resolve_serve_backend(
         return "vllm"
     if state_backend in BACKENDS:
         return str(state_backend)
-    return "ollama"
+    return "openai"
 
 
 def resolve_serve_mode(
@@ -964,7 +978,7 @@ def compose_file_for_serve_backend(
 def default_proxy_environment(backend: str) -> dict[str, str]:
     return {
         "OMLX_BACKEND_URL": (
-            "http://host.docker.internal:11434/v1" if backend == "ollama" else ""
+            OPENAI_DEFAULT_BACKEND_URL if backend == "openai" else ""
         ),
         "OMLX_BACKEND_API_KEY": "",
         "OMLX_PROXY_API_KEY": "",
@@ -1086,8 +1100,8 @@ def restart_services_for_target(target: str, services: Sequence[str]) -> list[st
 
 def proxy_backend_url(backend: str, values: Mapping[str, str]) -> str:
     backend_url = values.get("OMLX_BACKEND_URL", "").strip()
-    if backend == "ollama":
-        return backend_url or "http://host.docker.internal:11434/v1"
+    if backend == "openai":
+        return backend_url or OPENAI_DEFAULT_BACKEND_URL
     if backend_url:
         return backend_url
     raise SystemExit(f"--backend-url is required for --backend {backend}")
@@ -1099,7 +1113,7 @@ def proxy_environment(
     backend: str | None = None,
     existing_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    effective_backend = backend or args.backend or "ollama"
+    effective_backend = backend or args.backend or "openai"
     values = default_proxy_environment(effective_backend)
     if existing_env is not None:
         values.update(

@@ -6,7 +6,8 @@ workflow while removing the requirement that inference run through Apple MLX.
 
 The current direction is proxy-first: oMNI runs as a lightweight FastAPI gateway
 and admin UI in Docker, then delegates inference to an existing LLM backend such
-as vLLM, llama.cpp server, Ollama, or another OpenAI-compatible endpoint.
+as vLLM, llama.cpp server, or any OpenAI-compatible endpoint (Ollama, for
+example).
 
 This repository still contains a lot of upstream oMLX code and the Python
 package/CLI is still named `omlx` for now. The fork is being reshaped toward the
@@ -34,7 +35,8 @@ inference backends.
 The default Docker workflow runs oMNI as a proxy and expects an external backend
 that provides an OpenAI-compatible `/v1` API.
 
-For Docker Desktop on Mac with Ollama running on the host:
+For Docker Desktop on Mac with an OpenAI-compatible backend such as Ollama
+running on the host:
 
 ```bash
 docker compose -f docker/docker-compose.proxy.yml up --build
@@ -280,8 +282,8 @@ omni status
 ```
 
 By default, a first `omni serve` with no backend flags launches
-`docker/docker-compose.proxy.yml` against the Ollama-compatible
-`http://host.docker.internal:11434/v1` backend URL. Explicit backend launches are
+`docker/docker-compose.proxy.yml` with the `openai` backend, which defaults to
+Ollama on the Docker host at `http://host.docker.internal:11434/v1`. Explicit backend launches are
 remembered in `docker/omni-serve.json`, so future plain `omni serve` invocations
 reuse the last backend and compose file. Proxy launch environment is persisted in
 `docker/docker-compose.proxy.env`; sidecar launch environments are persisted in
@@ -325,9 +327,19 @@ omni stop --target both
 ```
 
 For the vLLM and llama.cpp sidecar stacks, `--target backend` reads logs from,
-restarts, or stops the `vllm` or `llamacpp` service. For OpenAI, Ollama, and
+restarts, or stops the `vllm` or `llamacpp` service. For OpenAI-compatible and
 external llama.cpp proxy stacks, the backend is not managed by this repo, so use
 `--target proxy` or inspect/restart/stop the backend with its own tooling.
+
+For the sidecar stacks, the admin dashboard also offers a **Restart Backend**
+button (Settings → Proxy Backend) that restarts the sidecar container through
+the Docker Engine API and applies saved launch settings (model, context length,
+backend flags). Image and port-mapping changes still require recreating the
+stack on the host with `omni serve` or `docker compose up -d`. The generated
+compose files mount `/var/run/docker.sock` into the proxy container to enable
+this; that grants the proxy control over the local Docker daemon, so remove the
+mount if you do not want it — the button then reports that restart is
+unavailable.
 
 ## Running Without Docker
 
@@ -373,6 +385,7 @@ oMNI exposes an OpenAI-compatible API and an Anthropic-compatible bridge.
 | `GET /admin/dashboard` | Working | Proxy-mode admin dashboard |
 | `GET /admin/api/proxy/status` | Working | Backend reachability and model count |
 | `GET /admin/api/proxy/metrics` | Working | vLLM Prometheus and Ollama probes |
+| `POST /admin/api/sidecar/restart` | Working | Restarts the managed vLLM/llama.cpp sidecar container |
 
 Native oMLX endpoints that depend on MLX model loading, local KV cache
 management, quantization, benchmarks, and macOS services are being removed,
@@ -380,16 +393,31 @@ stubbed, or hidden in proxy mode.
 
 ## Backend Notes
 
-### Ollama
+The admin dashboard offers three backend types: **OpenAI-compatible**, **vLLM**,
+and **llama.cpp**. Selecting a type auto-populates the Backend URL: the vLLM and
+llama.cpp sidecar URLs are managed by the Compose stack and shown read-only,
+while the OpenAI-compatible URL is editable and defaults to the Ollama endpoint
+`http://host.docker.internal:11434/v1`. Settings that are unique to a backend
+(backend URL, API key, model, served model name, and the vLLM/llama.cpp launch
+flags) persist per backend type, so switching types back and forth restores each
+backend's last values. Hardware- and model-dependent settings such as context
+length, max parallel, and sampling defaults are shared across backends. In
+OpenAI-compatible "router" mode the sidecar launch settings are hidden, since a
+remote backend manages its own model and runtime.
 
-Ollama works through its OpenAI-compatible API:
+### Ollama (via the OpenAI-compatible backend type)
+
+There is no dedicated Ollama backend type; Ollama works through its
+OpenAI-compatible API. Select **OpenAI-compatible** in the admin settings (the
+URL already defaults to the Ollama endpoint), or point the proxy compose stack
+at it directly:
 
 ```bash
 OMLX_BACKEND_URL=http://host.docker.internal:11434/v1 \
 docker compose -f docker/docker-compose.proxy.yml up --build
 ```
 
-The admin metrics endpoint also probes Ollama-native `/api/tags` and `/api/ps`
+The admin metrics endpoint still probes Ollama-native `/api/tags` and `/api/ps`
 when available, so the dashboard can show available and loaded model counts.
 
 ### vLLM
@@ -459,11 +487,14 @@ Working:
 - Admin dashboard compatibility layer at `/admin/dashboard`.
 - Backend model discovery from `/v1/models`.
 - Proxy backend status and backend metrics panel.
-- Ollama backend support when Ollama exposes its OpenAI-compatible API.
+- Ollama support through the OpenAI-compatible backend type, with native
+  `/api/tags` and `/api/ps` metric probes.
 - vLLM-compatible Prometheus metrics parsing from `/metrics`.
 - Optional vLLM and llama.cpp sidecar compose generation for NVIDIA hosts.
 - `omni` CLI for generating sidecar stacks and managing Compose containers.
-- Admin controls for backend URL/API key/type and sidecar launch settings.
+- Admin controls for backend URL/API key/type and sidecar launch settings,
+  persisted per backend type.
+- Sidecar backend restart from the admin UI via the Docker Engine API.
 - Env-file persistence for sidecar launch settings and proxy sampling defaults.
 - Backend-portable `OMNI_*` settings shared between vLLM and llama.cpp sidecars.
 - Context token scaling for Claude Code style workflows.
@@ -472,7 +503,8 @@ Working:
 Still in progress:
 
 - Cleaner proxy-mode UI that hides native MLX-only controls.
-- More complete real-backend validation for vLLM, llama.cpp server, and Ollama.
+- More complete real-backend validation for vLLM, llama.cpp server, and
+  OpenAI-compatible backends such as Ollama.
 - Spark/Linux runbooks with known-good model examples and troubleshooting.
 - Formal package/module rename from `omlx` toward `omni` (including the
   remaining `OMLX_*` proxy env vars).

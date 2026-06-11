@@ -18,7 +18,13 @@ from fastapi.templating import Jinja2Templates
 from omlx._version import __version__
 
 from .backend import OpenAIBackend
-from .config import ProxyConfig
+from .config import BACKEND_URL_DEFAULTS, SIDECAR_BACKEND_TYPES, ProxyConfig
+from .docker_control import (
+    DockerControlError,
+    DockerUnavailableError,
+    docker_socket_path,
+    restart_compose_service,
+)
 from .metrics import collect_backend_metrics
 from .sidecar_compose import (
     backend_spec,
@@ -39,6 +45,7 @@ class ProxyAdminState:
     started_at: float = field(default_factory=time.time)
     model_settings: dict[str, dict[str, Any]] = field(default_factory=dict)
     global_overrides: dict[str, Any] = field(default_factory=dict)
+    backend_profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
     logs: list[str] = field(default_factory=list)
     state_path: Path | None = None
 
@@ -61,6 +68,16 @@ class ProxyAdminState:
             state.model_settings = data["model_settings"]
         if isinstance(data.get("global_overrides"), dict):
             state.global_overrides = data["global_overrides"]
+        if isinstance(data.get("backend_profiles"), dict):
+            state.backend_profiles = {
+                key: dict(value)
+                for key, value in data["backend_profiles"].items()
+                if isinstance(value, dict)
+            }
+        saved_type = str(state.global_overrides.get("proxy_backend_type") or "")
+        if saved_type.strip().lower() == "ollama":
+            state.global_overrides["proxy_backend_type"] = "openai-compatible"
+            state.log("migrated saved backend type ollama -> openai-compatible")
         state.log(f"loaded state from {path}")
         return state
 
@@ -71,6 +88,7 @@ class ProxyAdminState:
         payload = {
             "model_settings": self.model_settings,
             "global_overrides": self.global_overrides,
+            "backend_profiles": self.backend_profiles,
         }
         self.state_path.write_text(
             json.dumps(payload, indent=2, sort_keys=True),
@@ -218,9 +236,23 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             proxy_updates = _extract_proxy_backend_updates(payload)
         except ValueError as exc:
             return JSONResponse({"detail": str(exc)}, status_code=422)
+        old_type = _proxy_backend_type(state)
+        new_type = proxy_updates.get("proxy_backend_type", old_type)
+        type_changed = new_type != old_type
+        if type_changed:
+            _archive_backend_profile(state, old_type)
+            state.global_overrides.update(_backend_profile_seed(state, new_type))
         state.global_overrides.update(payload)
         if proxy_updates:
             state.global_overrides.update(proxy_updates)
+        if new_type in SIDECAR_BACKEND_TYPES:
+            # Sidecar URLs are managed by the compose stack; the field is
+            # readonly in the UI and enforced here for any other caller.
+            state.global_overrides["proxy_backend_url"] = _default_backend_url(
+                new_type
+            )
+        _archive_backend_profile(state, new_type)
+        if proxy_updates or type_changed:
             backend.config = _config_with_proxy_overrides(backend.config, state)
             app.state.proxy_config = backend.config
         if "claude_code_context_scaling_enabled" in payload:
@@ -231,10 +263,9 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             state.global_overrides["target_context_size"] = payload[
                 "claude_code_target_context_size"
             ]
-        backend_type = proxy_updates.get("proxy_backend_type") or _proxy_backend_type(state)
         sidecar_updates = (
             _extract_sidecar_compose_updates(payload, _sidecar_backend(state))
-            if backend_type in ("vllm", "llama.cpp")
+            if new_type in SIDECAR_BACKEND_TYPES
             else {}
         )
         if sidecar_updates:
@@ -259,7 +290,9 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             ),
             "runtime_applied": runtime_applied,
             "compose": compose_result,
-            "requires_restart": bool(sidecar_updates),
+            "requires_restart": bool(sidecar_updates) or (
+                type_changed and new_type in SIDECAR_BACKEND_TYPES
+            ),
             "restart_required_settings": ["proxy_host", "proxy_port", "sidecar"],
         }
 
@@ -455,6 +488,48 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
         return JSONResponse(
             {"detail": "Restart is managed by Docker/Compose in proxy mode"},
             status_code=501,
+        )
+
+    @router.post("/api/sidecar/restart")
+    async def restart_sidecar():
+        backend_type = _proxy_backend_type(state)
+        if backend_type not in SIDECAR_BACKEND_TYPES:
+            return JSONResponse(
+                {
+                    "detail": (
+                        "No managed sidecar to restart: the proxy routes to a "
+                        "remote OpenAI-compatible backend"
+                    )
+                },
+                status_code=409,
+            )
+        service = _sidecar_backend(state)
+        try:
+            container_id = await restart_compose_service(service)
+        except DockerUnavailableError as exc:
+            return JSONResponse(
+                {
+                    "detail": (
+                        f"{exc} Mount /var/run/docker.sock into the proxy "
+                        "container to enable backend restarts."
+                    )
+                },
+                status_code=501,
+            )
+        except DockerControlError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=502)
+        state.log(f"restarted {service} sidecar container {container_id[:12]}")
+        return JSONResponse(
+            {
+                "status": "restarting",
+                "service": service,
+                "container_id": container_id,
+                "message": (
+                    f"Restarting {service} container. Image and port changes "
+                    "still require recreating the Compose stack on the host."
+                ),
+            },
+            status_code=202,
         )
 
     @router.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
@@ -879,9 +954,13 @@ def _normalize_backend_url(value: str) -> str:
     return value
 
 
+_BACKEND_TYPE_ALIASES = {"ollama": "openai-compatible"}
+
+
 def _normalize_backend_type(value: str) -> str:
-    allowed = {"openai-compatible", "ollama", "vllm", "llama.cpp"}
+    allowed = {"openai-compatible", "vllm", "llama.cpp"}
     value = value.strip().lower() or "openai-compatible"
+    value = _BACKEND_TYPE_ALIASES.get(value, value)
     if value not in allowed:
         return "openai-compatible"
     return value
@@ -891,6 +970,64 @@ def _proxy_backend_type(state: ProxyAdminState) -> str:
     return _normalize_backend_type(
         str(state.global_overrides.get("proxy_backend_type") or "openai-compatible")
     )
+
+
+# Settings that persist per backend type so switching back restores them.
+# vllm_*/llamacpp_* keys stay in the flat overrides; their prefixes already
+# key them by backend.
+_PROFILE_KEYS = (
+    "proxy_backend_url",
+    "proxy_backend_api_key",
+    "omni_model",
+    "omni_served_model_name",
+)
+
+
+def _default_backend_url(backend_type: str) -> str:
+    return BACKEND_URL_DEFAULTS.get(
+        backend_type, BACKEND_URL_DEFAULTS["openai-compatible"]
+    )
+
+
+def _archive_backend_profile(state: ProxyAdminState, backend_type: str) -> None:
+    profile = state.backend_profiles.setdefault(backend_type, {})
+    for key in _PROFILE_KEYS:
+        if key in state.global_overrides:
+            profile[key] = state.global_overrides[key]
+
+
+def _backend_profile_seed(
+    state: ProxyAdminState,
+    backend_type: str,
+) -> dict[str, Any]:
+    stored = state.backend_profiles.get(backend_type, {})
+    seed = {key: stored[key] for key in _PROFILE_KEYS if key in stored}
+    url = str(seed.get("proxy_backend_url") or "").strip()
+    if not url or backend_type in SIDECAR_BACKEND_TYPES:
+        seed["proxy_backend_url"] = _default_backend_url(backend_type)
+    seed.setdefault("proxy_backend_api_key", "")
+    return seed
+
+
+def _backend_profiles_payload(state: ProxyAdminState) -> dict[str, dict[str, Any]]:
+    active_type = _proxy_backend_type(state)
+    payload: dict[str, dict[str, Any]] = {}
+    for backend_type in BACKEND_URL_DEFAULTS:
+        values = dict(state.backend_profiles.get(backend_type, {}))
+        if backend_type == active_type:
+            for key in _PROFILE_KEYS:
+                if key in state.global_overrides:
+                    values[key] = state.global_overrides[key]
+        url = str(values.get("proxy_backend_url") or "").strip()
+        if not url or backend_type in SIDECAR_BACKEND_TYPES:
+            url = _default_backend_url(backend_type)
+        payload[backend_type] = {
+            "backend_url": url,
+            "backend_api_key": str(values.get("proxy_backend_api_key") or ""),
+            "model": values.get("omni_model"),
+            "served_model_name": values.get("omni_served_model_name"),
+        }
+    return payload
 
 
 async def _backend_model_data(backend: OpenAIBackend) -> list[dict[str, Any]]:
@@ -980,6 +1117,10 @@ def _global_settings_payload(
             "capabilities": _capabilities(),
             "sidecar_backend": _sidecar_backend(state),
             "sidecar": _sidecar_settings_payload(state),
+            "backend_url_defaults": dict(BACKEND_URL_DEFAULTS),
+            "backend_url_locked": list(SIDECAR_BACKEND_TYPES),
+            "backend_profiles": _backend_profiles_payload(state),
+            "docker_socket_available": Path(docker_socket_path()).exists(),
         },
         "model": {
             "model_dirs": [config.normalized_backend_url],

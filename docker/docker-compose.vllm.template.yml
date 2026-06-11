@@ -34,6 +34,10 @@ services:
     volumes:
       - proxy-state:/data
       - "../docker:/compose-output"
+      # Grants the admin UI control of the sidecar container (restart
+      # backend). Remove if you don't want the proxy to reach the Docker
+      # daemon; the restart button then reports it is unavailable.
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - vllm
 
@@ -98,10 +102,17 @@ services:
       HF_HOME: "/root/.cache/huggingface"
     volumes:
       - "${OMNI_HF_HOME:-${HOME}/.cache/huggingface}:/root/.cache/huggingface"
+      - "../docker:/compose-output:ro"
     entrypoint: ["/bin/sh", "-lc"]
     command:
       - |
         set -eu
+        if [ -f "/compose-output/docker-compose.vllm.env" ]; then
+          while IFS= read -r omni_env_line; do
+            case "$$omni_env_line" in ''|'#'*) continue;; esac
+            export "$$omni_env_line"
+          done < "/compose-output/docker-compose.vllm.env"
+        fi
         if [ -n "$${OMNI_HF_ENDPOINT:-}" ]; then
           export HF_ENDPOINT="$${OMNI_HF_ENDPOINT}"
         else

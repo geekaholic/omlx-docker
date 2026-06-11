@@ -34,6 +34,10 @@ services:
     volumes:
       - proxy-state:/data
       - "../docker:/compose-output"
+      # Grants the admin UI control of the sidecar container (restart
+      # backend). Remove if you don't want the proxy to reach the Docker
+      # daemon; the restart button then reports it is unavailable.
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - llamacpp
 
@@ -85,6 +89,7 @@ services:
       - "${OMNI_HF_HOME:-${HOME}/.cache/huggingface}:/root/.cache/huggingface"
       - "${LLAMACPP_CACHE_DIR:-${HOME}/.cache/llama.cpp}:/root/.cache/llama.cpp"
       - "${LLAMACPP_MODEL_DIR:-${LLAMACPP_CACHE_DIR:-${HOME}/.cache/llama.cpp}}:/models:ro"
+      - "../docker:/compose-output:ro"
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/health"]
       interval: 15s
@@ -95,6 +100,12 @@ services:
     command:
       - |
         set -eu
+        if [ -f "/compose-output/docker-compose.llamacpp.env" ]; then
+          while IFS= read -r omni_env_line; do
+            case "$$omni_env_line" in ''|'#'*) continue;; esac
+            export "$$omni_env_line"
+          done < "/compose-output/docker-compose.llamacpp.env"
+        fi
         if [ -n "$${OMNI_HF_ENDPOINT:-}" ]; then
           export HF_ENDPOINT="$${OMNI_HF_ENDPOINT}"
           export MODEL_ENDPOINT="$${OMNI_HF_ENDPOINT}"

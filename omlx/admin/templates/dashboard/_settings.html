@@ -53,7 +53,6 @@
                                     <select x-model="globalSettings.proxy.backend_type"
                                             class="w-full sm:w-64 px-3 py-2 text-sm border border-neutral-200 rounded-lg focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all bg-white">
                                         <option value="openai-compatible">OpenAI-compatible</option>
-                                        <option value="ollama">Ollama</option>
                                         <option value="vllm">vLLM</option>
                                         <option value="llama.cpp">llama.cpp</option>
                                     </select>
@@ -61,11 +60,16 @@
                                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 sm:px-6 py-4">
                                     <div>
                                         <label class="text-sm text-neutral-700">Backend URL</label>
-                                        <p class="text-xs text-neutral-400 mt-0.5">Applied immediately. Include the OpenAI-compatible /v1 path when the backend requires it.</p>
+                                        <p class="text-xs text-neutral-400 mt-0.5"
+                                           x-text="isSidecarBackendType
+                                               ? 'Managed sidecar address — set automatically for this backend.'
+                                               : 'Applied immediately. Any OpenAI-compatible /v1 endpoint, e.g. Ollama. From Docker, use http://host.docker.internal:11434/v1 to reach a backend running on the host.'"></p>
                                     </div>
                                     <input type="text" x-model="globalSettings.proxy.backend_url"
-                                           placeholder="http://vllm:8000/v1"
-                                           class="w-full sm:w-[28rem] px-3 py-2 text-sm text-right border border-neutral-200 rounded-lg focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all font-mono text-xs">
+                                           :readonly="isSidecarBackendType"
+                                           placeholder="http://host.docker.internal:11434/v1"
+                                           class="w-full sm:w-[28rem] px-3 py-2 text-sm text-right border border-neutral-200 rounded-lg focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all font-mono text-xs"
+                                           :class="isSidecarBackendType && 'bg-neutral-50 text-neutral-400 cursor-not-allowed'">
                                 </div>
                                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 sm:px-6 py-4">
                                     <div>
@@ -107,6 +111,36 @@
                                         <p class="text-xs text-neutral-400 mt-0.5">Stores proxy UI settings such as aliases, backend config, and default model.</p>
                                     </div>
                                     <span class="text-sm text-neutral-700 font-mono break-all text-right" x-text="globalSettings.proxy.state_path || 'disabled'"></span>
+                                </div>
+                                <div x-show="isSidecarBackendType" x-cloak class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 sm:px-6 py-4">
+                                    <div>
+                                        <label class="text-sm text-neutral-700">{{ t('settings.proxy.restart_backend_label') }}</label>
+                                        <p class="text-xs text-neutral-400 mt-0.5"
+                                           x-text="globalSettings.proxy.docker_socket_available
+                                               ? window.t('settings.proxy.restart_backend_hint')
+                                               : window.t('settings.proxy.restart_backend_socket_missing')"></p>
+                                        <p x-show="restartBackend.message" x-cloak class="text-xs mt-1"
+                                           :class="restartBackend.status === 'error' ? 'text-red-600'
+                                               : (restartBackend.status === 'unsupported' ? 'text-amber-600' : 'text-neutral-500')"
+                                           x-text="restartBackend.message"></p>
+                                    </div>
+                                    <button @click="restartBackendStart()"
+                                            :disabled="!canRestartBackend || restartBackend.status === 'restarting' || restartBackend.status === 'waiting'"
+                                            class="px-4 py-2 text-sm font-medium text-white bg-neutral-900 hover:bg-neutral-700 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                            x-text="restartBackend.status === 'restarting' ? window.t('settings.proxy.restart_backend_button_restarting')
+                                                : (restartBackend.status === 'waiting' ? window.t('settings.proxy.restart_backend_button_waiting')
+                                                : window.t('settings.proxy.restart_backend_button'))"></button>
+                                </div>
+                                <div x-show="!isSidecarBackendType" x-cloak class="px-4 sm:px-6 py-3 bg-neutral-50/70">
+                                    <p class="text-xs text-neutral-400">{{ t('settings.proxy.router_mode_hint') }}</p>
+                                </div>
+                                <div x-show="backendRestartNeeded && isSidecarBackendType" x-cloak
+                                     class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 sm:px-6 py-3 bg-amber-50 border-t border-amber-200">
+                                    <p class="text-xs text-amber-700">{{ t('settings.proxy.restart_backend_banner') }}</p>
+                                    <button @click="restartBackendStart()"
+                                            :disabled="!canRestartBackend || restartBackend.status === 'restarting' || restartBackend.status === 'waiting'"
+                                            class="px-3 py-1.5 text-xs font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                            x-text="restartBackend.status === 'waiting' ? window.t('settings.proxy.restart_backend_button_waiting') : window.t('settings.proxy.restart_backend_button')"></button>
                                 </div>
                                 <div x-show="globalSettings.proxy.backend_type === 'vllm' || globalSettings.proxy.backend_type === 'llama.cpp'" x-cloak class="px-4 sm:px-6 py-4 bg-neutral-50/70">
                                     <div class="mb-3">
@@ -1056,6 +1090,7 @@
                         </div>
                         <div class="flex items-center gap-3 shrink-0">
                             <button type="button"
+                                    x-show="!proxyMode"
                                     @click="restartServerStart()"
                                     :disabled="restartServer.status === 'restarting' || restartServer.status === 'waiting'"
                                     class="inline-flex items-center justify-center gap-2 px-6 py-3 bg-white text-neutral-700 text-sm font-semibold

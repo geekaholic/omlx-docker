@@ -622,7 +622,7 @@ async def test_proxy_backend_config_updates_runtime_and_persists(monkeypatch, tm
             "/admin/api/global-settings",
             json={
                 "proxy_backend_url": "http://new-backend/v1/",
-                "proxy_backend_type": "vllm",
+                "proxy_backend_type": "openai-compatible",
                 "proxy_backend_api_key": "backend-secret",
             },
         )
@@ -633,7 +633,7 @@ async def test_proxy_backend_config_updates_runtime_and_persists(monkeypatch, tm
         assert response.status_code == 200
         config = response.json()
         assert config["backend_url"] == "http://new-backend/v1"
-        assert config["backend_type"] == "vllm"
+        assert config["backend_type"] == "openai-compatible"
         assert config["backend_api_key_set"] is True
 
         response = await client.get("/v1/models")
@@ -919,3 +919,262 @@ async def test_proxy_admin_model_settings_persist(monkeypatch, tmp_path):
     assert models[0]["settings"]["model_alias"] == "local-qwen"
     assert models[0]["model_alias"] == "local-qwen"
     assert models[0]["is_default"] is True
+
+
+@pytest.mark.asyncio
+async def test_proxy_state_migrates_ollama_backend_type(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "model_settings": {},
+                "global_overrides": {
+                    "proxy_backend_type": "ollama",
+                    "proxy_backend_url": "http://my-ollama:11434/v1",
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(state_path))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/admin/api/proxy/config")
+
+    assert response.status_code == 200
+    config = response.json()
+    assert config["backend_type"] == "openai-compatible"
+    assert config["backend_url"] == "http://my-ollama:11434/v1"
+
+
+@pytest.mark.asyncio
+async def test_posting_ollama_backend_type_normalizes(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/admin/api/global-settings",
+            json={"proxy_backend_type": "ollama"},
+        )
+        assert response.status_code == 200
+
+        response = await client.get("/admin/api/proxy/config")
+
+    assert response.json()["backend_type"] == "openai-compatible"
+
+
+@pytest.mark.asyncio
+async def test_sidecar_backend_url_is_enforced(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/admin/api/global-settings",
+            json={
+                "proxy_backend_type": "vllm",
+                "proxy_backend_url": "http://bogus:9999/v1",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["requires_restart"] is True
+
+        response = await client.get("/admin/api/proxy/config")
+
+    config = response.json()
+    assert config["backend_type"] == "vllm"
+    assert config["backend_url"] == "http://vllm:8000/v1"
+
+
+@pytest.mark.asyncio
+async def test_backend_profiles_round_trip(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(state_path))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/admin/api/global-settings",
+            json={
+                "proxy_backend_type": "openai-compatible",
+                "proxy_backend_url": "http://my-ollama:11434/v1",
+                "proxy_backend_api_key": "secret",
+            },
+        )
+        assert response.status_code == 200
+
+        response = await client.post(
+            "/admin/api/global-settings",
+            json={"proxy_backend_type": "llama.cpp"},
+        )
+        assert response.status_code == 200
+        response = await client.get("/admin/api/proxy/config")
+        assert response.json()["backend_url"] == "http://llamacpp:8000/v1"
+
+        response = await client.post(
+            "/admin/api/global-settings",
+            json={"proxy_backend_type": "openai-compatible"},
+        )
+        assert response.status_code == 200
+        response = await client.get("/admin/api/proxy/config")
+
+    config = response.json()
+    assert config["backend_url"] == "http://my-ollama:11434/v1"
+    assert config["backend_api_key_set"] is True
+
+    saved = json.loads(state_path.read_text())
+    profiles = saved["backend_profiles"]
+    assert profiles["openai-compatible"]["proxy_backend_url"] == "http://my-ollama:11434/v1"
+    assert profiles["llama.cpp"]["proxy_backend_url"] == "http://llamacpp:8000/v1"
+
+
+@pytest.mark.asyncio
+async def test_global_settings_payload_exposes_backend_url_defaults(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/admin/api/global-settings")
+
+    proxy = response.json()["proxy"]
+    assert proxy["backend_url_defaults"] == {
+        "vllm": "http://vllm:8000/v1",
+        "llama.cpp": "http://llamacpp:8000/v1",
+        "openai-compatible": "http://host.docker.internal:11434/v1",
+    }
+    assert proxy["backend_url_locked"] == ["vllm", "llama.cpp"]
+    profiles = proxy["backend_profiles"]
+    assert profiles["openai-compatible"]["backend_url"] == "http://host.docker.internal:11434/v1"
+    assert profiles["vllm"]["backend_url"] == "http://vllm:8000/v1"
+
+
+@pytest.mark.asyncio
+async def test_sidecar_restart_conflicts_for_openai_backend(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post("/admin/api/sidecar/restart")
+
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_sidecar_restart_unavailable_without_docker_socket(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setenv("OMLX_DOCKER_SOCK", str(tmp_path / "missing.sock"))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/admin/api/global-settings",
+            json={"proxy_backend_type": "vllm"},
+        )
+        assert response.status_code == 200
+
+        response = await client.post("/admin/api/sidecar/restart")
+
+    assert response.status_code == 501
+    assert "docker.sock" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_sidecar_restart_happy_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+    restarted = []
+
+    async def fake_restart(service: str) -> str:
+        restarted.append(service)
+        return "abc123def456"
+
+    monkeypatch.setattr("omlx.proxy.admin.restart_compose_service", fake_restart)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/admin/api/global-settings",
+            json={"proxy_backend_type": "llama.cpp"},
+        )
+        assert response.status_code == 200
+
+        response = await client.post("/admin/api/sidecar/restart")
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["service"] == "llamacpp"
+    assert body["container_id"] == "abc123def456"
+    assert restarted == ["llamacpp"]
+
+
+@pytest.mark.asyncio
+async def test_global_settings_payload_reports_docker_socket(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    async def fetch_payload() -> dict:
+        app = _app_with_mock_backend(handler)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get("/admin/api/global-settings")
+        return response.json()["proxy"]
+
+    monkeypatch.setenv("OMLX_DOCKER_SOCK", str(tmp_path / "missing.sock"))
+    assert (await fetch_payload())["docker_socket_available"] is False
+
+    socket_path = tmp_path / "docker.sock"
+    socket_path.touch()
+    monkeypatch.setenv("OMLX_DOCKER_SOCK", str(socket_path))
+    assert (await fetch_payload())["docker_socket_available"] is True
