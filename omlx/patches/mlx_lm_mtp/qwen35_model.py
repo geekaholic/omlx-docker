@@ -3,9 +3,8 @@
 
 Adds an MTP head to ``mlx_lm.models.qwen3_5.TextModel`` (the language-model
 half) and a pass-through on ``mlx_lm.models.qwen3_5.Model`` (the VLM-outer
-wrapper). The mechanism mirrors the patch idiom in
-``omlx/patches/gated_delta_advance.py``: replace class methods on a one-shot,
-idempotent basis tracked by a module flag.
+wrapper). The mechanism replaces class methods on a one-shot, idempotent
+basis tracked by a module flag.
 
 Important: the class names below match what mlx-lm 0.31.x actually exports.
 Earlier drafts of this patch used ``Qwen3_5GatedDeltaNet`` / ``Qwen3_5DecoderLayer``
@@ -44,8 +43,7 @@ What this patch installs (all on classes from ``mlx_lm.models.qwen3_5``):
   find them.
 
 The patch is intentionally limited to ``mlx_lm.models.qwen3_5``; mlx-vlm's
-``mlx_vlm.models.qwen3_5.language`` is a separate copy and is not touched
-(oMLX's existing ``gated_delta_advance.py`` already covers that side).
+``mlx_vlm.models.qwen3_5.language`` is a separate copy and is not touched.
 """
 
 from __future__ import annotations
@@ -472,7 +470,9 @@ def _patch_text_model(q35: Any) -> None:
         # out because the inner ``language_model`` has no ``mtp``.
         from . import is_mtp_active
 
-        if n_mtp > 0 and is_mtp_active():
+        mtp_decode_enabled = bool(n_mtp > 0 and is_mtp_active())
+        self._omlx_mtp_decode_enabled = mtp_decode_enabled
+        if mtp_decode_enabled:
             self.mtp = q35.MTPModule(args)
 
     def __call__(

@@ -473,6 +473,31 @@ class TestScheduleWaitingChunkedFork:
         assert req in sched.prefilling
         assert req.request_id not in sched.running
 
+    def test_prefilling_request_counts_against_concurrency_cap(self):
+        """A chunked prefill already in flight consumes a scheduler slot."""
+        sched = _make_scheduler(chunked_prefill=True, step_size=4)
+        sched.config.max_num_seqs = 1
+
+        inflight = _make_request("inflight", n_tokens=10)
+        sched.requests[inflight.request_id] = inflight
+        sched.prefilling.append(inflight)
+        sched._prefill_states[inflight.request_id] = _make_prefill_state(
+            sched,
+            inflight,
+        )
+
+        queued = _make_request("queued", n_tokens=10)
+        sched.add_request(queued)
+
+        with patch.object(sched, "_begin_prefill") as mock_begin:
+            scheduled, rejected = sched._schedule_waiting()
+
+        mock_begin.assert_not_called()
+        assert scheduled == []
+        assert rejected == []
+        assert queued in sched.waiting
+        assert inflight in sched.prefilling
+
     def test_long_prompt_completes_in_first_chunk_goes_to_running(self):
         """If the first chunk happens to finish the prefill, request goes to running."""
         sched, req = self._setup(n_tokens=10, step_size=4)
@@ -574,18 +599,7 @@ class TestScheduleWaitingChunkedFork:
         assert result == 1024
 
     def test_adaptive_throttle_tier_512(self):
-        """25-50% of band → 512."""
-        sched = self._setup_throttle(max_bytes_gb=10, hard_cap_gb=12)
-        # 35% of band: 8 + 4*0.35 = 9.4 GB
-        a, b = self._mock_current(sched, 9.4)
-        with a, b:
-            result = sched._adaptive_chunk_size(
-                2048, request_id="r1", loop_label="external"
-            )
-        assert result == 512
-
-    def test_adaptive_throttle_tier_256(self):
-        """50-75% of band → 256."""
+        """50%+ of band → 512."""
         sched = self._setup_throttle(max_bytes_gb=10, hard_cap_gb=12)
         # 60% of band: 8 + 4*0.60 = 10.4 GB
         a, b = self._mock_current(sched, 10.4)
@@ -593,29 +607,18 @@ class TestScheduleWaitingChunkedFork:
             result = sched._adaptive_chunk_size(
                 2048, request_id="r1", loop_label="external"
             )
-        assert result == 256
-
-    def test_adaptive_throttle_tier_128(self):
-        """75%+ of band → 128 (or min_chunk if larger)."""
-        sched = self._setup_throttle(max_bytes_gb=10, hard_cap_gb=12)
-        # 80% of band: 8 + 4*0.80 = 11.2 GB
-        a, b = self._mock_current(sched, 11.2)
-        with a, b:
-            result = sched._adaptive_chunk_size(
-                2048, request_id="r1", loop_label="external"
-            )
-        assert result == 128
+        assert result == 512
 
     def test_adaptive_throttle_requested_smaller_than_tier(self):
         """Requested chunk already smaller than the tier target → pass through."""
         sched = self._setup_throttle(max_bytes_gb=10, hard_cap_gb=12)
-        # 80% of band → tier 128. But requested=64 < 128.
-        a, b = self._mock_current(sched, 11.2)
+        # 60% of band → tier 512. But requested=256 < 512.
+        a, b = self._mock_current(sched, 10.4)
         with a, b:
             result = sched._adaptive_chunk_size(
-                64, request_id="r1", loop_label="external"
+                256, request_id="r1", loop_label="external"
             )
-        assert result == 64
+        assert result == 256
 
     def test_adaptive_throttle_no_cap_passthrough(self):
         """When hard limit or soft base is unset (=0), no throttle."""
@@ -812,9 +815,15 @@ class TestPrefillRejectionReleasesPagedCache:
         sched.add_request(req)
         sched.block_aware_cache.reset_mock()
 
+        from omlx.scheduler import _PreflightRejection
+
         with patch.object(
             sched, "_preflight_memory_check",
-            return_value="Memory limit exceeded by preflight estimate",
+            return_value=_PreflightRejection(
+                message="Memory limit exceeded by preflight estimate",
+                estimated_bytes=1,
+                limit_bytes=1,
+            ),
         ):
             scheduled, rejected = sched._schedule_waiting()
 

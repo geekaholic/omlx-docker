@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
-from openai_harmony import load_harmony_encoding
+import json
+import sys
+import types
+from types import SimpleNamespace
 
 from omlx.adapter.gemma4 import Gemma4OutputParserSession
+from omlx.adapter.harmony import load_harmony_gpt_oss_encoding
 from omlx.adapter.output_parser import detect_output_parser
 
 
@@ -50,6 +54,184 @@ class HarmonyTokenizer:
     @property
     def detokenizer(self):
         return FakeDetokenizer(lambda token_id: self._encoding.decode([token_id]))
+
+
+class CohereTokenizer:
+    def __init__(self, token_map: dict[int, str]):
+        self._token_map = token_map
+
+    @property
+    def detokenizer(self):
+        return FakeDetokenizer(lambda token_id: self._token_map[token_id])
+
+    def decode(self, token_ids, skip_special_tokens: bool = True):
+        return "".join(self._token_map[token_id] for token_id in token_ids)
+
+
+class _FakeMelodyOptions:
+    def cmd4(self):
+        return self
+
+    def stream_tool_actions(self):
+        return self
+
+
+class _FakeMelodyFilter:
+    def __init__(self, options):
+        self.options = options
+
+    def write_decoded(self, decoded_text: str):
+        if decoded_text.startswith("R:"):
+            return SimpleNamespace(
+                content=None,
+                reasoning=decoded_text[2:],
+                tool_calls=[],
+            )
+        if decoded_text.startswith("C:"):
+            return SimpleNamespace(
+                content=decoded_text[2:],
+                reasoning=None,
+                tool_calls=[],
+            )
+        if decoded_text.startswith("T1"):
+            tool_call = SimpleNamespace(
+                index=0,
+                id="call_",
+                name="look",
+                arguments='{"q"',
+            )
+            return SimpleNamespace(content=None, reasoning=None, tool_calls=[tool_call])
+        if decoded_text.startswith("T2"):
+            tool_call = SimpleNamespace(
+                index=0,
+                id="1",
+                name="up",
+                arguments=':"x"}',
+            )
+            return SimpleNamespace(content=None, reasoning=None, tool_calls=[tool_call])
+        return SimpleNamespace(content=None, reasoning=None, tool_calls=[])
+
+    def flush_partials(self):
+        return SimpleNamespace(content=None, reasoning=None, tool_calls=[])
+
+
+def _install_fake_melody(monkeypatch):
+    module = types.ModuleType("cohere_melody")
+    module.PyFilter = _FakeMelodyFilter
+    module.PyFilterOptions = _FakeMelodyOptions
+    monkeypatch.setitem(sys.modules, "cohere_melody", module)
+
+
+def _write_json(path, data):
+    path.write_text(json.dumps(data))
+
+
+def _spm_decoder():
+    return {
+        "type": "Sequence",
+        "decoders": [
+            {
+                "type": "Replace",
+                "pattern": {"String": "\u2581"},
+                "content": " ",
+            },
+            {"type": "ByteFallback"},
+            {"type": "Fuse"},
+            {"type": "Strip", "content": " ", "start": 1, "stop": 0},
+        ],
+    }
+
+
+class ByteFallbackTokenizer:
+    clean_up_tokenization_spaces = False
+    vocab = {
+        "<pad>": 0,
+        "<0xEC>": 1,
+        "<0x9E>": 2,
+        "<0xA0>": 3,
+    }
+
+    def decode(self, token_ids, skip_special_tokens: bool = True):
+        table = {
+            0: b"",
+            1: bytes([0xEC]),
+            2: bytes([0x9E]),
+            3: bytes([0xA0]),
+        }
+        raw = b"".join(table[token_id] for token_id in token_ids)
+        if not raw:
+            return ""
+        if raw == bytes([0xEC, 0x9E, 0xA0]):
+            return "\uc7a0"
+        return "\ufffd" * sum(1 for token_id in token_ids if token_id != 0)
+
+
+class TestCohere2MoeOutputParserSession:
+    def test_detects_cohere2_moe_from_model_config(self, monkeypatch):
+        _install_fake_melody(monkeypatch)
+        tokenizer = CohereTokenizer({1: "C:hello"})
+
+        factory = detect_output_parser(
+            "North-Mini-Code",
+            tokenizer,
+            {"model_type": "cohere2_moe"},
+        )
+
+        assert factory is not None
+        assert factory.kind == "cohere2_moe"
+
+    def test_streams_reasoning_as_think_block_and_visible_content(self, monkeypatch):
+        _install_fake_melody(monkeypatch)
+        tokenizer = CohereTokenizer(
+            {
+                1: "R:reasoning",
+                2: "C:answer",
+            }
+        )
+        factory = detect_output_parser(
+            "North-Mini-Code",
+            tokenizer,
+            {"model_type": "cohere2_moe"},
+        )
+        session = factory.create_session(tokenizer)
+
+        parts = []
+        visible = []
+        for token_id in [1, 2]:
+            result = session.process_token(token_id)
+            parts.append(result.stream_text)
+            visible.append(result.visible_text)
+        final = session.finalize()
+        parts.append(final.stream_text)
+        visible.append(final.visible_text)
+
+        assert "".join(parts) == "<think>\nreasoning</think>\nanswer"
+        assert "".join(visible) == "<think>\nreasoning</think>\nanswer"
+        assert final.tool_calls == []
+        assert final.finish_reason is None
+
+    def test_accumulates_streamed_tool_call_deltas(self, monkeypatch):
+        _install_fake_melody(monkeypatch)
+        tokenizer = CohereTokenizer({1: "T1", 2: "T2"})
+        factory = detect_output_parser(
+            "North-Mini-Code",
+            tokenizer,
+            {"model_type": "cohere2_moe"},
+        )
+        session = factory.create_session(tokenizer)
+
+        assert session.process_token(1).stream_text == ""
+        assert session.process_token(2).stream_text == ""
+        final = session.finalize()
+
+        assert final.tool_calls == [
+            {
+                "id": "call_1",
+                "name": "lookup",
+                "arguments": '{"q":"x"}',
+            }
+        ]
+        assert final.finish_reason == "tool_calls"
 
 
 class TestGemma4OutputParserSession:
@@ -224,6 +406,22 @@ class TestGemma4OutputParserSession:
         assert "<tool_call|>" in stream_text
         assert "call:bash{cmd:ls}" in stream_text
 
+    def test_spm_fallback_buffers_split_utf8(self, tmp_path):
+        _write_json(tmp_path / "tokenizer.json", {"decoder": _spm_decoder()})
+        session = Gemma4OutputParserSession(
+            ByteFallbackTokenizer(),
+            model_path=tmp_path,
+        )
+
+        parts = []
+        for token_id in [1, 2, 3]:
+            parts.append(session.process_token(token_id).stream_text)
+        parts.append(session.finalize().stream_text)
+
+        text = "".join(parts)
+        assert text == "\uc7a0"
+        assert "\ufffd" not in text
+
 
 class TestOutputParserFactory:
     def test_detects_gemma4(self):
@@ -237,8 +435,19 @@ class TestOutputParserFactory:
         assert factory is not None
         assert factory.kind == "gemma4"
 
+    def test_detects_gemma4_unified_by_config(self):
+        tokenizer = GemmaTokenizer({1: "x"})
+        factory = detect_output_parser(
+            "some-model",
+            tokenizer,
+            {"model_type": "gemma4_unified"},
+        )
+
+        assert factory is not None
+        assert factory.kind == "gemma4"
+
     def test_harmony_wrapper_regression(self):
-        encoding = load_harmony_encoding("HarmonyGptOss")
+        encoding = load_harmony_gpt_oss_encoding()
         tokenizer = HarmonyTokenizer(encoding)
         factory = detect_output_parser(
             "gpt-oss-20b",
@@ -277,7 +486,7 @@ class TestOutputParserFactory:
         """Non-streaming output_text retains analysis-channel reasoning."""
         from omlx.api.thinking import extract_thinking
 
-        encoding = load_harmony_encoding("HarmonyGptOss")
+        encoding = load_harmony_gpt_oss_encoding()
         tokenizer = HarmonyTokenizer(encoding)
         factory = detect_output_parser(
             "gpt-oss-20b",

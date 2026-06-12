@@ -5,8 +5,64 @@
     const DSA_MODEL_TYPES = new Set([
         'deepseek_v32', 'glm_moe_dsa',
     ]);
+    const DIFFUSION_CONFIG_MODEL_TYPES = new Set([
+        'diffusion_gemma',
+    ]);
+    const DIFFUSION_UNSUPPORTED_PROFILE_FIELDS = new Set([
+        'top_p',
+        'top_k',
+        'min_p',
+        'repetition_penalty',
+        'presence_penalty',
+        'force_sampling',
+        'enable_thinking',
+        'preserve_thinking',
+        'thinking_budget_enabled',
+        'thinking_budget_tokens',
+        'reasoning_parser',
+        'guided_grammar_enabled',
+        'guided_grammar',
+        'max_tool_result_tokens',
+        'index_cache_freq',
+        'turboquant_kv_enabled',
+        'turboquant_kv_bits',
+        'turboquant_skip_last',
+        'specprefill_enabled',
+        'specprefill_draft_model',
+        'specprefill_keep_pct',
+        'specprefill_threshold',
+        'dflash_enabled',
+        'dflash_draft_model',
+        'dflash_draft_quant_enabled',
+        'dflash_draft_quant_weight_bits',
+        'dflash_draft_quant_activation_bits',
+        'dflash_draft_quant_group_size',
+        'dflash_max_ctx',
+        'dflash_in_memory_cache',
+        'dflash_in_memory_cache_max_entries',
+        'dflash_in_memory_cache_max_bytes',
+        'dflash_ssd_cache',
+        'dflash_ssd_cache_max_bytes',
+        'dflash_draft_window_size',
+        'dflash_draft_sink_size',
+        'dflash_verify_mode',
+        'mtp_enabled',
+        'vlm_mtp_enabled',
+        'vlm_mtp_draft_model',
+        'vlm_mtp_draft_block_size',
+    ]);
+    const DIFFUSION_UNSUPPORTED_CT_KWARGS = new Set([
+        'enable_thinking',
+        'reasoning_effort',
+        'preserve_thinking',
+    ]);
+    const VLM_MTP_DRAFTER_CONFIG_MODEL_TYPES = new Set([
+        'gemma4_assistant',
+        'gemma4_unified_assistant',
+        'qwen3_5_mtp',
+    ]);
     const DASHBOARD_MAIN_TABS = new Set(['status', 'settings', 'models', 'logs', 'bench']);
-    const DASHBOARD_SETTINGS_TABS = new Set(['global', 'models']);
+    const DASHBOARD_SETTINGS_TABS = new Set(['global', 'integrations', 'models']);
     const DASHBOARD_MODELS_TABS = new Set(['manager', 'downloader', 'quantizer', 'uploader']);
     const DASHBOARD_BENCH_TABS = new Set(['throughput', 'accuracy']);
 
@@ -30,18 +86,31 @@
             // Global settings
             globalSettings: {
                 base_path: '',
-                server: { host: '127.0.0.1', port: 8000, log_level: 'info', sse_keepalive_mode: 'chunk' },
+                server: { host: '127.0.0.1', port: 8000, log_level: 'info', sse_keepalive_mode: 'chunk', burst_decode_mode: 'balanced' },
                 model: { model_dirs: [''] },
                 memory: { prefill_memory_guard: true, memory_guard_tier: 'balanced', memory_guard_custom_ceiling_gb: 0 },
                 scheduler: { max_concurrent_requests: 8, embedding_batch_size: 32, chunked_prefill: false },
                 cache: { enabled: true, ssd_cache_dir: '', ssd_cache_max_size: 'auto', hot_cache_max_size: '0', initial_cache_blocks: 256, hot_cache_only: false },
-                sampling: { max_context_window: 32768, max_tokens: 32768, temperature: 1.0, top_p: 0.95, top_k: 0, repetition_penalty: 1.0 },
+                sampling: { max_context_window: 32768, max_context_window_policy: null, max_tokens: 32768, temperature: 1.0, top_p: 0.95, top_k: 0, repetition_penalty: 1.0 },
                 mcp: { config_path: '' },
-                huggingface: { endpoint: '' },
+                huggingface: { endpoint: '', hf_cache_enabled: true, hf_cache_path: '' },
                 network: { http_proxy: '', https_proxy: '', no_proxy: '', ca_bundle: '' },
                 auth: { api_key_set: false, api_key: '', skip_api_key_verification: false, sub_keys: [] },
                 claude_code: { context_scaling_enabled: false, target_context_size: 200000, mode: 'cloud', opus_model: null, sonnet_model: null, haiku_model: null },
-                integrations: { copilot_model: null, codex_model: null, opencode_model: null, openclaw_model: null, hermes_model: null, pi_model: null, openclaw_tools_profile: 'full' },
+                integrations: {
+                    copilot_model: null,
+                    codex_model: null,
+                    opencode_model: null,
+                    openclaw_model: null,
+                    hermes_model: null,
+                    pi_model: null,
+                    openclaw_tools_profile: 'full',
+                    markitdown_enabled: true,
+                    markitdown_expose_model: true,
+                    markitdown_max_file_size_mb: 25,
+                    markitdown_max_files_per_request: 5,
+                    markitdown_pdf_processing_engine: 'markitdown',
+                },
                 ui: { language: 'en' },
                 idle_timeout: { idle_timeout_seconds: null },
                 system: { total_memory_bytes: 0, total_memory: '', auto_model_memory: '', ssd_total_bytes: 0, ssd_total: '' },
@@ -164,6 +233,7 @@
                 enableToolResultLimit: false,
                 max_tool_result_tokens: null,
                 ctKwargEntries: [],
+                is_diffusion_model: false,
                 trust_remote_code: false,
             },
             savingModelSettings: false,
@@ -445,6 +515,8 @@
             benchModelId: '',
             benchPromptLengths: { 1024: true, 4096: true, 8192: false, 16384: false, 32768: false, 65536: false, 131072: false, 200000: false },
             benchBatchSizes: { 2: true, 4: true, 8: false },
+            benchForceLmEngine: false,
+            benchAdvancedOptionsOpen: false,
             benchRunning: false,
             benchBenchId: null,
             benchProgress: null,
@@ -817,6 +889,9 @@
                         this.updateCacheFromSlider();
 
                         // Calculate hot cache percent from stored value
+                        this.globalSettings.cache.hot_cache_max_size = this.normalizeHotCacheMaxSize(
+                            this.globalSettings.cache.hot_cache_max_size
+                        );
                         this.hotCachePercent = this.parseHotCacheToPercent(
                             this.globalSettings.cache.hot_cache_max_size,
                             this.globalSettings.system.total_memory_bytes
@@ -880,6 +955,7 @@
                             port: this.globalSettings.server.port,
                             log_level: this.globalSettings.server.log_level,
                             sse_keepalive_mode: this.globalSettings.server.sse_keepalive_mode,
+                            burst_decode_mode: this.globalSettings.server.burst_decode_mode,
                             model_dirs: this.globalSettings.model.model_dirs.filter(d => d.trim()),
                             model_fallback: this.globalSettings.model.model_fallback,
                             memory_prefill_memory_guard: this.globalSettings.memory.prefill_memory_guard,
@@ -891,16 +967,20 @@
                             cache_enabled: this.globalSettings.cache.enabled,
                             ssd_cache_dir: this.globalSettings.cache.ssd_cache_dir,
                             ssd_cache_max_size: this.globalSettings.cache.ssd_cache_max_size,
-                            hot_cache_max_size: this.globalSettings.cache.hot_cache_max_size,
+                            hot_cache_max_size: this.normalizeHotCacheMaxSize(
+                                this.globalSettings.cache.hot_cache_max_size
+                            ),
                             initial_cache_blocks: this.globalSettings.cache.initial_cache_blocks,
                             hot_cache_only: this.globalSettings.cache.hot_cache_only,
                             sampling_max_context_window: this.globalSettings.sampling.max_context_window,
+                            sampling_max_context_window_policy: this.globalSettings.sampling.max_context_window_policy || null,
                             sampling_max_tokens: this.globalSettings.sampling.max_tokens,
                             sampling_temperature: this.globalSettings.sampling.temperature,
                             sampling_top_p: this.globalSettings.sampling.top_p,
                             sampling_top_k: this.globalSettings.sampling.top_k,
                             sampling_repetition_penalty: this.globalSettings.sampling.repetition_penalty,
                             mcp_config: this.globalSettings.mcp.config_path,
+                            hf_cache_enabled: this.globalSettings.huggingface.hf_cache_enabled,
                             network_http_proxy: this.globalSettings.network.http_proxy,
                             network_https_proxy: this.globalSettings.network.https_proxy,
                             network_no_proxy: this.globalSettings.network.no_proxy,
@@ -988,7 +1068,7 @@
                         window.location.href = '/admin';
                     } else {
                         const data = await response.json();
-                        this.saveError = Array.isArray(data.detail) ? data.detail.join(', ') : (data.detail || window.t('js.error.save_settings_failed'));
+                        this.saveError = Array.isArray(data.detail) ? data.detail.map(e => (e && typeof e === 'object') ? (e.msg || JSON.stringify(e)) : String(e)).join(', ') : (data.detail || window.t('js.error.save_settings_failed'));
                         // Reload settings to revert to server values
                         await this.loadGlobalSettings();
                     }
@@ -1186,9 +1266,11 @@
             formValuesForProfile() {
                 const ms = this.modelSettings;
                 const out = {};
+                const isDiffusion = !!ms.is_diffusion_model;
 
                 for (const k of this.profileFields.universal.concat(this.profileFields.model_specific)) {
                     if (k === 'chat_template_kwargs' || k === 'forced_ct_kwargs') continue;  // handle below
+                    if (isDiffusion && this.isDiffusionUnsupportedProfileField(k)) continue;
                     if (k === 'thinking_budget_enabled') {
                         if (ms.enableThinkingBudget) out.thinking_budget_tokens = ms.thinking_budget_tokens ?? null;
                         continue;
@@ -1222,12 +1304,17 @@
                 const forced = [];
                 for (const e of (ms.ctKwargEntries || [])) {
                     if (e.type === 'enable_thinking') {
+                        if (isDiffusion) continue;
                         ctk.enable_thinking = e.value === 'true';
                         if (e.force) forced.push('enable_thinking');
                     } else if (e.type === 'reasoning_effort') {
+                        if (isDiffusion) continue;
                         ctk.reasoning_effort = e.value;
                         if (e.force) forced.push('reasoning_effort');
                     } else if (e.type === 'custom' && e.key && e.key.trim()) {
+                        if (isDiffusion && this.isDiffusionUnsupportedCtKwarg(e.key.trim())) {
+                            continue;
+                        }
                         let v = e.value;
                         if (v === 'true') v = true;
                         else if (v === 'false') v = false;
@@ -1391,6 +1478,186 @@
                 this.tip.visible = false;
             },
 
+            isDiffusionModel(model) {
+                const modelType = String(model?.config_model_type || '')
+                    .toLowerCase()
+                    .replace(/-/g, '_');
+                return DIFFUSION_CONFIG_MODEL_TYPES.has(modelType);
+            },
+
+            isDiffusionUnsupportedProfileField(field) {
+                return DIFFUSION_UNSUPPORTED_PROFILE_FIELDS.has(field);
+            },
+
+            isDiffusionUnsupportedCtKwarg(key) {
+                return DIFFUSION_UNSUPPORTED_CT_KWARGS.has(key);
+            },
+
+            draftModelSearchText(model) {
+                return [
+                    model?.id,
+                    model?.name,
+                    model?.model_path,
+                    model?.source_repo_id,
+                    model?.config_model_type,
+                ].filter(Boolean).join(' ').toLowerCase();
+            },
+
+            isDraftModelBaseCandidate(model) {
+                if (!model || model.virtual) return false;
+                if (model.id === this.selectedModel?.id) return false;
+                return model.model_type === 'llm' || model.model_type === 'vlm' || !model.model_type;
+            },
+
+            isDflashDraftModel(model) {
+                return /(^|[-_/\s])dflash($|[-_/\s])/i.test(this.draftModelSearchText(model));
+            },
+
+            isVlmMtpDraftModel(model) {
+                const configType = String(model?.config_model_type || '').toLowerCase();
+                if (configType) {
+                    return VLM_MTP_DRAFTER_CONFIG_MODEL_TYPES.has(configType);
+                }
+                return /assistant|(^|[-_/\s])mtp($|[-_/\s])/i.test(this.draftModelSearchText(model));
+            },
+
+            isSpecPrefillDraftModel(model) {
+                const text = this.draftModelSearchText(model);
+                return !this.isDflashDraftModel(model)
+                    && !this.isVlmMtpDraftModel(model)
+                    && !/(^|[-_/\s])mtp($|[-_/\s])/i.test(text);
+            },
+
+            draftModelCandidates(filterFn, { fallbackToBase = true } = {}) {
+                const base = (this.models || []).filter((model) => (
+                    this.isDraftModelBaseCandidate(model)
+                ));
+                const filtered = base.filter(filterFn);
+                return (filtered.length > 0 || !fallbackToBase) ? filtered : base;
+            },
+
+            specPrefillDraftModelCandidates() {
+                return this.draftModelCandidates((model) => this.isSpecPrefillDraftModel(model));
+            },
+
+            dflashDraftModelCandidates() {
+                return this.draftModelCandidates((model) => this.isDflashDraftModel(model));
+            },
+
+            vlmMtpDraftModelCandidates() {
+                return this.draftModelCandidates(
+                    (model) => this.isVlmMtpDraftModel(model),
+                    { fallbackToBase: false },
+                );
+            },
+
+            buildCtKwargEntries(chatTemplateKwargs, forcedCtKwargs, isDiffusion = false) {
+                const ctk = chatTemplateKwargs || {};
+                const forced = new Set(forcedCtKwargs || []);
+                const entries = [];
+                for (const [key, value] of Object.entries(ctk)) {
+                    if (isDiffusion && this.isDiffusionUnsupportedCtKwarg(key)) {
+                        continue;
+                    }
+                    if (key === 'enable_thinking') {
+                        entries.push({
+                            type: 'enable_thinking',
+                            value: String(value),
+                            force: forced.has('enable_thinking'),
+                        });
+                    } else if (key === 'reasoning_effort') {
+                        entries.push({
+                            type: 'reasoning_effort',
+                            value: String(value),
+                            force: forced.has('reasoning_effort'),
+                        });
+                    } else {
+                        entries.push({
+                            type: 'custom',
+                            key,
+                            value: String(value),
+                            force: forced.has(key),
+                        });
+                    }
+                }
+                return entries;
+            },
+
+            buildModelSettingsState(model, settings) {
+                const s = settings || {};
+                const isDiffusion = this.isDiffusionModel(model);
+                const ctKwargEntries = this.buildCtKwargEntries(
+                    s.chat_template_kwargs,
+                    s.forced_ct_kwargs,
+                    isDiffusion,
+                );
+                const isOcr = OCR_CONFIG_MODEL_TYPES.has(model?.config_model_type || '');
+                return {
+                    model_alias: s.model_alias || '',
+                    model_type_override: s.model_type_override || '',
+                    max_context_window: s.max_context_window || null,
+                    max_tokens: s.max_tokens || null,
+                    temperature: isOcr ? 0.0 : (s.temperature ?? null),
+                    top_p: s.top_p ?? null,
+                    top_k: s.top_k ?? null,
+                    repetition_penalty: s.repetition_penalty ?? null,
+                    min_p: s.min_p ?? null,
+                    presence_penalty: s.presence_penalty ?? null,
+                    force_sampling: s.force_sampling || false,
+                    enable_thinking: s.enable_thinking ?? null,
+                    thinking_default: model?.thinking_default ?? null,
+                    enableThinkingBudget: !!(s.thinking_budget_tokens),
+                    thinking_budget_tokens: s.thinking_budget_tokens || null,
+                    guided_grammar_enabled: s.guided_grammar_enabled || false,
+                    guided_grammar: s.guided_grammar || '',
+                    enableToolResultLimit: !!(s.max_tool_result_tokens),
+                    max_tool_result_tokens: s.max_tool_result_tokens || null,
+                    reasoning_parser: s.reasoning_parser || '',
+                    ttl_seconds: s.ttl_seconds ?? null,
+                    enableIndexCache: !!(s.index_cache_freq),
+                    index_cache_freq: s.index_cache_freq || null,
+                    turboquant_kv_enabled: s.turboquant_kv_enabled || false,
+                    turboquant_kv_bits: s.turboquant_kv_bits || 4,
+                    specprefill_enabled: s.specprefill_enabled || false,
+                    specprefill_draft_model: s.specprefill_draft_model || '',
+                    specprefill_keep_pct: s.specprefill_keep_pct ? String(s.specprefill_keep_pct) : '0.2',
+                    specprefill_threshold: s.specprefill_threshold || null,
+                    dflash_enabled: s.dflash_enabled || false,
+                    dflash_draft_model: s.dflash_draft_model || '',
+                    dflash_draft_quant_enabled: s.dflash_draft_quant_enabled || false,
+                    dflash_draft_quant_weight_bits: s.dflash_draft_quant_weight_bits || 4,
+                    dflash_draft_quant_activation_bits: s.dflash_draft_quant_activation_bits || 16,
+                    dflash_draft_quant_group_size: s.dflash_draft_quant_group_size || 64,
+                    dflash_max_ctx: s.dflash_max_ctx ?? null,
+                    dflash_in_memory_cache: s.dflash_in_memory_cache !== false,
+                    dflash_in_memory_cache_max_entries: s.dflash_in_memory_cache_max_entries || 4,
+                    dflash_in_memory_cache_max_gib: s.dflash_in_memory_cache_max_bytes
+                        ? Math.round(s.dflash_in_memory_cache_max_bytes / (1024 ** 3))
+                        : 8,
+                    dflash_ssd_cache: s.dflash_ssd_cache || false,
+                    dflash_ssd_cache_max_gib: s.dflash_ssd_cache_max_bytes
+                        ? Math.round(s.dflash_ssd_cache_max_bytes / (1024 ** 3))
+                        : 20,
+                    dflash_draft_window_size: s.dflash_draft_window_size ?? null,
+                    dflash_draft_sink_size: s.dflash_draft_sink_size ?? null,
+                    dflash_verify_mode: s.dflash_verify_mode || 'adaptive',
+                    dflash_compatible: model?.dflash_compatible !== false,
+                    dflash_compatibility_reason: model?.dflash_compatibility_reason || '',
+                    dflash_ssd_cache_available: !!model?.dflash_ssd_cache_available,
+                    mtp_enabled: s.mtp_enabled || false,
+                    mtp_compatible: model?.mtp_compatible === true,
+                    mtp_compatibility_reason: model?.mtp_compatibility_reason || '',
+                    is_paroquant: model?.is_paroquant === true,
+                    paroquant_reason: model?.paroquant_reason || '',
+                    vlm_mtp_enabled: s.vlm_mtp_enabled || false,
+                    vlm_mtp_draft_model: s.vlm_mtp_draft_model || '',
+                    vlm_mtp_draft_block_size: s.vlm_mtp_draft_block_size ?? null,
+                    ctKwargEntries,
+                    is_diffusion_model: isDiffusion,
+                    trust_remote_code: s.trust_remote_code || false,
+                };
+            },
+
             _resetPresetApplicableFields() {
                 // Reset all fields a preset can touch so switching presets does not leave
                 // stale values. Intentionally does NOT touch model_alias / model_type_override
@@ -1422,7 +1689,14 @@
                 this._resetPresetApplicableFields();
                 const s = preset.settings || {};
                 const ms = this.modelSettings;
+                const isDiffusion = !!ms.is_diffusion_model;
                 for (const k of Object.keys(s)) {
+                    if (isDiffusion
+                        && k !== 'chat_template_kwargs'
+                        && k !== 'forced_ct_kwargs'
+                        && this.isDiffusionUnsupportedProfileField(k)) {
+                        continue;
+                    }
                     if (k === 'thinking_budget_enabled') {
                         ms.enableThinkingBudget = !!s[k];
                     } else if (k === 'max_tool_result_tokens') {
@@ -1433,19 +1707,11 @@
                     } else if (k === 'guided_grammar') {
                         ms.guided_grammar = s[k] || '';
                     } else if (k === 'chat_template_kwargs' || k === 'forced_ct_kwargs') {
-                        const ctk = s.chat_template_kwargs || {};
-                        const forced = new Set(s.forced_ct_kwargs || []);
-                        const entries = [];
-                        for (const [key, value] of Object.entries(ctk)) {
-                            if (key === 'enable_thinking') {
-                                entries.push({type:'enable_thinking', value:String(value), force:forced.has('enable_thinking')});
-                            } else if (key === 'reasoning_effort') {
-                                entries.push({type:'reasoning_effort', value:String(value), force:forced.has('reasoning_effort')});
-                            } else {
-                                entries.push({type:'custom', key, value:String(value), force:forced.has(key)});
-                            }
-                        }
-                        ms.ctKwargEntries = entries;
+                        ms.ctKwargEntries = this.buildCtKwargEntries(
+                            s.chat_template_kwargs,
+                            s.forced_ct_kwargs,
+                            isDiffusion,
+                        );
                     } else {
                         ms[k] = s[k];
                     }
@@ -1499,43 +1765,6 @@
                 }
             },
             async applyProfileToForm(profile) {
-                // Merge all profile fields into the form (no server call — user clicks Save to persist).
-                const s = profile.settings || {};
-                const ms = this.modelSettings;
-                for (const k of this.profileFields.universal.concat(this.profileFields.model_specific)) {
-                    if (!(k in s)) continue;
-                    if (k === 'thinking_budget_enabled') {
-                        ms.enableThinkingBudget = !!s[k];
-                    } else if (k === 'index_cache_freq') {
-                        ms.enableIndexCache = !!s[k];
-                        ms.index_cache_freq = s[k] || null;
-                    } else if (k === 'max_tool_result_tokens') {
-                        ms.enableToolResultLimit = !!s[k];
-                        ms.max_tool_result_tokens = s[k] || null;
-                    } else if (k === 'guided_grammar_enabled') {
-                        ms.guided_grammar_enabled = !!s[k];
-                    } else if (k === 'guided_grammar') {
-                        ms.guided_grammar = s[k] || '';
-                    } else if (k === 'chat_template_kwargs' || k === 'forced_ct_kwargs') {
-                        // Rebuild ctKwargEntries
-                        const ctk = s.chat_template_kwargs || {};
-                        const forced = new Set(s.forced_ct_kwargs || []);
-                        const entries = [];
-                        for (const [key, value] of Object.entries(ctk)) {
-                            if (key === 'enable_thinking') {
-                                entries.push({type:'enable_thinking', value:String(value), force:forced.has('enable_thinking')});
-                            } else if (key === 'reasoning_effort') {
-                                entries.push({type:'reasoning_effort', value:String(value), force:forced.has('reasoning_effort')});
-                            } else {
-                                entries.push({type:'custom', key, value:String(value), force:forced.has(key)});
-                            }
-                        }
-                        ms.ctKwargEntries = entries;
-                    } else {
-                        ms[k] = s[k];
-                    }
-                }
-                // Persist active_profile_name to backend before updating UI state
                 const seq = ++this._applySeq;
                 try {
                     const r = await fetch(
@@ -1544,11 +1773,24 @@
                     );
                     if (seq !== this._applySeq) return;  // superseded by a newer click
                     if (r.ok) {
-                        this.activeProfileName = profile.name;
+                        const data = await r.json();
+                        const activeName = data.settings?.active_profile_name || profile.name;
+                        const settings = {
+                            ...(data.settings || {}),
+                            active_profile_name: activeName,
+                        };
+                        this.modelSettings = this.buildModelSettingsState(
+                            this.selectedModel,
+                            settings,
+                        );
+                        if (this.selectedModel) {
+                            this.selectedModel.settings = { ...settings };
+                        }
+                        this.activeProfileName = activeName;
                         this.profilesDrift = false;
                         // Update the models list so the profile badge reflects the change
                         const m = this.models.find(m => m.id === this.selectedModel.id);
-                        if (m) m.settings = { ...m.settings, active_profile_name: profile.name };
+                        if (m) m.settings = { ...settings };
                     } else if (r.status === 401) {
                         window.location.href = '/admin';
                     }
@@ -1561,8 +1803,14 @@
                 const existingProfile = this.profiles.find(p => p.name === template.name);
 
                 if (existingProfile) {
-                    // Profile exists, just apply it (preserve user customizations)
-                    await this.applyProfileToForm(existingProfile);
+                    // Global templates are the source of truth in this scope.
+                    const updatedProfile = await this.updateProfile(existingProfile.name, {
+                        settings: template.settings,
+                        source_template: template.name,
+                    });
+                    if (updatedProfile) {
+                        await this.applyProfileToForm(updatedProfile);
+                    }
                 } else {
                     // Create a new profile from the template
                     const body = {
@@ -1724,105 +1972,43 @@
                 this.editingTemplate = null;
                 this.profileDeleteConfirm = null;
                 this.templateDeleteConfirm = null;
-                this.activeProfileName = (model.settings && model.settings.active_profile_name) || null;
-                try {
-                    const saved = localStorage.getItem('omlx_profile_scope');
-                    if (saved === 'preset' || saved === 'global' || saved === 'model') {
-                        this.profileScope = saved;
-                    }
-                } catch (e) {}
-                await Promise.all([
-                    this.loadProfilesForModel(model.id),
-                    this.loadTemplates(),
-                ]);
-                this.computeDrift();
-                if (this.reasoningParsers.length === 0) {
+                const isDiffusion = this.isDiffusionModel(model);
+                this.activeProfileName = isDiffusion
+                    ? null
+                    : ((model.settings && model.settings.active_profile_name) || null);
+                if (isDiffusion) {
+                    this.profiles = [];
+                    this.templates = [];
+                    this.profilesDrift = false;
+                } else {
                     try {
-                        const resp = await fetch('/admin/api/grammar/parsers');
-                        if (resp.ok) this.reasoningParsers = await resp.json();
-                        else if (resp.status === 401) window.location.href = '/admin';
-                    } catch (_) { /* network error */ }
+                        const saved = localStorage.getItem('omlx_profile_scope');
+                        if (saved === 'preset' || saved === 'global' || saved === 'model') {
+                            this.profileScope = saved;
+                        }
+                    } catch (e) {}
+                    await Promise.all([
+                        this.loadProfilesForModel(model.id),
+                        this.loadTemplates(),
+                    ]);
+                    if (this.reasoningParsers.length === 0) {
+                        try {
+                            const resp = await fetch('/admin/api/grammar/parsers');
+                            if (resp.ok) this.reasoningParsers = await resp.json();
+                            else if (resp.status === 401) window.location.href = '/admin';
+                        } catch (_) { /* network error */ }
+                    }
                 }
                 this.selectedModel = model;
-                // Load existing settings if available
-                const settings = model.settings || {};
-                // Parse chat_template_kwargs into ctKwargEntries
-                const ctk = settings.chat_template_kwargs || {};
-                const forcedKeys = new Set(settings.forced_ct_kwargs || []);
-                const ctKwargEntries = [];
-                for (const [key, value] of Object.entries(ctk)) {
-                    if (key === 'enable_thinking') {
-                        ctKwargEntries.push({type: 'enable_thinking', value: String(value), force: forcedKeys.has('enable_thinking')});
-                    } else if (key === 'reasoning_effort') {
-                        ctKwargEntries.push({type: 'reasoning_effort', value: String(value), force: forcedKeys.has('reasoning_effort')});
-                    } else {
-                        ctKwargEntries.push({type: 'custom', key, value: String(value), force: forcedKeys.has(key)});
-                    }
+                this.modelSettings = this.buildModelSettingsState(
+                    model,
+                    model.settings || {},
+                );
+                if (isDiffusion) {
+                    this.profilesDrift = false;
+                } else {
+                    this.computeDrift();
                 }
-                const isOcr = OCR_CONFIG_MODEL_TYPES.has(model.config_model_type || '');
-                this.modelSettings = {
-                    model_alias: settings.model_alias || '',
-                    model_type_override: settings.model_type_override || '',
-                    max_context_window: settings.max_context_window || null,
-                    max_tokens: settings.max_tokens || null,
-                    temperature: isOcr ? 0.0 : (settings.temperature ?? null),
-                    top_p: settings.top_p ?? null,
-                    top_k: settings.top_k ?? null,
-                    repetition_penalty: settings.repetition_penalty ?? null,
-                    min_p: settings.min_p ?? null,
-                    presence_penalty: settings.presence_penalty ?? null,
-                    force_sampling: settings.force_sampling || false,
-                    enable_thinking: settings.enable_thinking ?? null,
-                    thinking_default: model.thinking_default ?? null,
-                    enableThinkingBudget: !!(settings.thinking_budget_tokens),
-                    thinking_budget_tokens: settings.thinking_budget_tokens || null,
-                    guided_grammar_enabled: settings.guided_grammar_enabled || false,
-                    guided_grammar: settings.guided_grammar || '',
-                    enableToolResultLimit: !!(settings.max_tool_result_tokens),
-                    max_tool_result_tokens: settings.max_tool_result_tokens || null,
-                    reasoning_parser: settings.reasoning_parser || '',
-                    ttl_seconds: settings.ttl_seconds ?? null,
-                    enableIndexCache: !!(settings.index_cache_freq),
-                    index_cache_freq: settings.index_cache_freq || null,
-                    turboquant_kv_enabled: settings.turboquant_kv_enabled || false,
-                    turboquant_kv_bits: settings.turboquant_kv_bits || 4,
-                    specprefill_enabled: settings.specprefill_enabled || false,
-                    specprefill_draft_model: settings.specprefill_draft_model || '',
-                    specprefill_keep_pct: settings.specprefill_keep_pct ? String(settings.specprefill_keep_pct) : '0.2',
-                    specprefill_threshold: settings.specprefill_threshold || null,
-                    dflash_enabled: settings.dflash_enabled || false,
-                    dflash_draft_model: settings.dflash_draft_model || '',
-                    dflash_draft_quant_enabled: settings.dflash_draft_quant_enabled || false,
-                    dflash_draft_quant_weight_bits: settings.dflash_draft_quant_weight_bits || 4,
-                    dflash_draft_quant_activation_bits: settings.dflash_draft_quant_activation_bits || 16,
-                    dflash_draft_quant_group_size: settings.dflash_draft_quant_group_size || 64,
-                    dflash_max_ctx: settings.dflash_max_ctx ?? null,
-                    dflash_in_memory_cache: settings.dflash_in_memory_cache !== false,
-                    dflash_in_memory_cache_max_entries: settings.dflash_in_memory_cache_max_entries || 4,
-                    dflash_in_memory_cache_max_gib: settings.dflash_in_memory_cache_max_bytes
-                        ? Math.round(settings.dflash_in_memory_cache_max_bytes / (1024 ** 3))
-                        : 8,
-                    dflash_ssd_cache: settings.dflash_ssd_cache || false,
-                    dflash_ssd_cache_max_gib: settings.dflash_ssd_cache_max_bytes
-                        ? Math.round(settings.dflash_ssd_cache_max_bytes / (1024 ** 3))
-                        : 20,
-                    dflash_draft_window_size: settings.dflash_draft_window_size ?? null,
-                    dflash_draft_sink_size: settings.dflash_draft_sink_size ?? null,
-                    dflash_verify_mode: settings.dflash_verify_mode || 'adaptive',
-                    dflash_compatible: model.dflash_compatible !== false,
-                    dflash_compatibility_reason: model.dflash_compatibility_reason || '',
-                    dflash_ssd_cache_available: !!model.dflash_ssd_cache_available,
-                    mtp_enabled: settings.mtp_enabled || false,
-                    mtp_compatible: model.mtp_compatible === true,
-                    mtp_compatibility_reason: model.mtp_compatibility_reason || '',
-                    is_paroquant: model.is_paroquant === true,
-                    paroquant_reason: model.paroquant_reason || '',
-                    vlm_mtp_enabled: settings.vlm_mtp_enabled || false,
-                    vlm_mtp_draft_model: settings.vlm_mtp_draft_model || '',
-                    vlm_mtp_draft_block_size: settings.vlm_mtp_draft_block_size ?? null,
-                    ctKwargEntries,
-                    trust_remote_code: settings.trust_remote_code || false,
-                };
                 this.showModelSettingsModal = true;
             },
 
@@ -1835,14 +2021,17 @@
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify((() => {
+                            const isDiffusion = !!this.modelSettings.is_diffusion_model;
                             // Build chat_template_kwargs and forced_ct_kwargs from ctKwargEntries
                             const chatTemplateKwargs = {};
                             const forcedCtKwargs = [];
                             for (const entry of this.modelSettings.ctKwargEntries) {
                                 if (entry.type === 'enable_thinking') {
+                                    if (isDiffusion) continue;
                                     chatTemplateKwargs.enable_thinking = entry.value === 'true';
                                     if (entry.force) forcedCtKwargs.push('enable_thinking');
                                 } else if (entry.type === 'reasoning_effort') {
+                                    if (isDiffusion) continue;
                                     chatTemplateKwargs.reasoning_effort = entry.value;
                                     if (entry.force) forcedCtKwargs.push('reasoning_effort');
                                 } else if (entry.type === 'custom' && entry.key && entry.key.trim()) {
@@ -1851,11 +2040,14 @@
                                     else if (val === 'false') val = false;
                                     else if (!isNaN(Number(val)) && val.trim() !== '') val = Number(val);
                                     const key = entry.key.trim();
+                                    if (isDiffusion && this.isDiffusionUnsupportedCtKwarg(key)) {
+                                        continue;
+                                    }
                                     chatTemplateKwargs[key] = val;
                                     if (entry.force) forcedCtKwargs.push(key);
                                 }
                             }
-                            return {
+                            const payload = {
                                 model_alias: this.modelSettings.model_alias?.trim() || null,
                                 model_type_override: this.modelSettings.model_type_override || null,
                                 max_context_window: this.modelSettings.max_context_window || null,
@@ -1956,6 +2148,50 @@
                                     : null,
                                 trust_remote_code: this.modelSettings.trust_remote_code,
                             };
+                            if (isDiffusion) {
+                                Object.assign(payload, {
+                                    top_p: null,
+                                    top_k: null,
+                                    repetition_penalty: null,
+                                    min_p: null,
+                                    presence_penalty: null,
+                                    force_sampling: false,
+                                    reasoning_parser: null,
+                                    index_cache_freq: 0,
+                                    enable_thinking: null,
+                                    thinking_budget_enabled: false,
+                                    thinking_budget_tokens: 0,
+                                    guided_grammar_enabled: false,
+                                    guided_grammar: null,
+                                    max_tool_result_tokens: 0,
+                                    turboquant_kv_enabled: false,
+                                    turboquant_kv_bits: 4,
+                                    specprefill_enabled: false,
+                                    specprefill_draft_model: null,
+                                    specprefill_keep_pct: null,
+                                    specprefill_threshold: null,
+                                    dflash_enabled: false,
+                                    dflash_draft_model: null,
+                                    dflash_draft_quant_enabled: false,
+                                    dflash_draft_quant_weight_bits: null,
+                                    dflash_draft_quant_activation_bits: null,
+                                    dflash_draft_quant_group_size: null,
+                                    dflash_max_ctx: null,
+                                    dflash_in_memory_cache: true,
+                                    dflash_in_memory_cache_max_entries: 4,
+                                    dflash_in_memory_cache_max_bytes: 8 * (1024 ** 3),
+                                    dflash_ssd_cache: false,
+                                    dflash_ssd_cache_max_bytes: 20 * (1024 ** 3),
+                                    dflash_draft_window_size: null,
+                                    dflash_draft_sink_size: null,
+                                    dflash_verify_mode: null,
+                                    mtp_enabled: false,
+                                    vlm_mtp_enabled: false,
+                                    vlm_mtp_draft_model: null,
+                                    vlm_mtp_draft_block_size: null,
+                                });
+                            }
+                            return payload;
                         })()),
                     });
 
@@ -2472,10 +2708,8 @@
             },
 
             _launchCmd(tool) {
-                // cli_prefix is always "omlx" or an app-bundle path with no
-                // spaces, so skip shellQuote to avoid rendering `'omlx' launch ...`
-                // in the dashboard command display.
-                const cli = this.stats.cli_prefix || 'omlx';
+                const raw = this.stats.cli_prefix || 'omlx';
+                const cli = raw === 'omlx' ? raw : this.shellQuote(raw);
                 return `${cli} launch ${tool}`;
             },
 
@@ -2508,6 +2742,13 @@
                 return this._launchCmd('pi');
             },
 
+            get markitdownOcrModels() {
+                return (this.models || []).filter((model) => {
+                    const configType = String(model.config_model_type || '').toLowerCase();
+                    return configType.includes('ocr');
+                });
+            },
+
             async saveIntegrationSettings() {
                 try {
                     const response = await fetch('/admin/api/global-settings', {
@@ -2521,6 +2762,11 @@
                             integrations_hermes_model: this.globalSettings.integrations.hermes_model,
                             integrations_pi_model: this.globalSettings.integrations.pi_model,
                             integrations_openclaw_tools_profile: this.globalSettings.integrations.openclaw_tools_profile,
+                            markitdown_enabled: this.globalSettings.integrations.markitdown_enabled,
+                            markitdown_expose_model: this.globalSettings.integrations.markitdown_expose_model,
+                            markitdown_max_file_size_mb: this.globalSettings.integrations.markitdown_max_file_size_mb,
+                            markitdown_max_files_per_request: this.globalSettings.integrations.markitdown_max_files_per_request,
+                            markitdown_pdf_processing_engine: this.globalSettings.integrations.markitdown_pdf_processing_engine,
                         }),
                     });
                     if (!response.ok) {
@@ -2889,6 +3135,7 @@
                             prompt_lengths: promptLengths,
                             generation_length: 128,
                             batch_sizes: batchSizes,
+                            force_lm_engine: this.benchForceLmEngine,
                         }),
                     });
 
@@ -3043,6 +3290,7 @@
                 lines.push('oMLX - LLM inference, optimized for your Mac');
                 lines.push('https://github.com/jundot/omlx');
                 lines.push(`Benchmark Model: ${this.benchModelId}`);
+                lines.push(`Engine: ${this.benchForceLmEngine ? 'Force mlx-lm' : 'Auto'}`);
                 lines.push('='.repeat(80));
 
                 // Single Request Results
@@ -3180,6 +3428,7 @@
                         this.benchOtherActive = {
                             bench_id: data.bench_id,
                             model_id: data.model_id,
+                            force_lm_engine: !!data.force_lm_engine,
                         };
                         return;
                     }
@@ -3187,6 +3436,7 @@
                     // Fresh slate: attach.
                     this.benchBenchId = data.bench_id;
                     this.benchModelId = data.model_id;
+                    this.benchForceLmEngine = !!data.force_lm_engine;
                     this.benchRunning = true;
                     this.benchOtherActive = null;
                     this.connectBenchSSE(data.bench_id);
@@ -3205,6 +3455,7 @@
                 this.benchOtherActive = null;
                 this.benchBenchId = other.bench_id;
                 this.benchModelId = other.model_id;
+                this.benchForceLmEngine = !!other.force_lm_engine;
                 this.benchRunning = true;
                 this.benchSingleResults = [];
                 this.benchBatchResults = [];
@@ -3850,7 +4101,7 @@
                         ? 2
                         : totalGB < 16
                             ? 4
-                            : { safe: 12, balanced: 8, aggressive: 6 }[tier] ?? 8;
+                            : { safe: 8, balanced: 6, aggressive: 4 }[tier] ?? 6;
                 const staticCeiling = Math.max(0, totalGB - staticReserveGB);
                 const metalCapGB = (sys.iogpu_wired_limit_bytes || 0) / GB;
 
@@ -3965,6 +4216,12 @@
             },
 
             // Parse hot cache size string to percent of total memory
+            normalizeHotCacheMaxSize(value) {
+                const normalized = String(value ?? '').trim();
+                if (!normalized || normalized.toLowerCase() === 'auto') return '0';
+                return normalized;
+            },
+
             parseHotCacheToPercent(hotCacheStr, totalBytes) {
                 if (!hotCacheStr || hotCacheStr === '0' || !totalBytes || totalBytes === 0) {
                     return 0;
@@ -4109,7 +4366,7 @@
                         window.location.href = '/admin';
                     } else {
                         const data = await response.json();
-                        alert(Array.isArray(data.detail) ? data.detail.join(', ') : (data.detail || 'Failed to save'));
+                        alert(Array.isArray(data.detail) ? data.detail.map(e => (e && typeof e === 'object') ? (e.msg || JSON.stringify(e)) : String(e)).join(', ') : (data.detail || 'Failed to save'));
                     }
                 } catch (err) {
                     console.error('Failed to save HF mirror endpoint:', err);

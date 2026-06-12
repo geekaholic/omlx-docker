@@ -426,6 +426,27 @@ class TestPerRequestMRoPEDecode:
         assert pos_ids[0, 0, 0].item() == 50.0
         assert pos_ids[0, 1, 0].item() == 80.0
 
+    def test_mrope_decode_scalar_cache_offset_uses_position_ids(self):
+        """Singleton KVCache offset should not rely on stale language-model state."""
+        import mlx.core as mx
+        from omlx.models.vlm import VLMModelAdapter
+
+        vlm = self._make_mrope_vlm_model()
+        adapter = VLMModelAdapter(vlm)
+        adapter.set_batch_rope_deltas(mx.array([0.0]))
+
+        input_ids = mx.zeros((1, 1), dtype=mx.int32)
+        cache_layer = MagicMock()
+        cache_layer.offset = 16384
+        cache = [cache_layer]
+
+        adapter(input_ids, cache=cache)
+
+        call_kwargs = vlm.language_model.call_args[1]
+        pos_ids = call_kwargs["position_ids"]
+        assert pos_ids.shape == (3, 1, 1)
+        assert pos_ids[0, 0, 0].item() == 16384.0
+
     def test_get_last_rope_deltas(self):
         """get_last_rope_deltas extracts value from language model."""
         import mlx.core as mx
@@ -470,6 +491,26 @@ class TestLogitsExtraction:
         result = adapter(MockMXArray(shape=(2, 10)), cache=[MagicMock()])
         assert result is lm_output.logits
 
+    def test_return_hidden_preserves_language_model_output(self):
+        """MTP backbone calls must keep hidden_states/gdn_states intact."""
+        from omlx.models.vlm import VLMModelAdapter
+
+        vlm = self._make_mock_vlm_model()
+        adapter = VLMModelAdapter(vlm)
+
+        lm_output = MagicMock()
+        lm_output.logits = MockMXArray(shape=(2, 10, 32000))
+        lm_output.hidden_states = [MockMXArray(shape=(2, 10, 128))]
+        lm_output.gdn_states = [{"state": "mock"}]
+        vlm.language_model.return_value = lm_output
+
+        result = adapter(
+            MockMXArray(shape=(2, 10)),
+            cache=[MagicMock()],
+            return_hidden=True,
+        )
+        assert result is lm_output
+
 
 class TestVLMModelAdapterModelProperty:
     """Tests for VLMModelAdapter.model property (for nested access)."""
@@ -485,6 +526,4 @@ class TestVLMModelAdapterModelProperty:
 
         # BatchGenerator accesses model.layers
         assert adapter.layers is vlm.language_model.model.layers
-
-
 

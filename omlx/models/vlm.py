@@ -25,8 +25,6 @@ from typing import Any, Dict, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from ..patches.qwen3_5_attention import force_text_only_rope
-
 logger = logging.getLogger(__name__)
 
 
@@ -241,6 +239,7 @@ class VLMModelAdapter(nn.Module):
         Returns:
             Model output (logits as mx.array)
         """
+        return_hidden = bool(kwargs.get("return_hidden", False))
         inputs_embeds = kwargs.pop("inputs_embeds", None)
         vlm_extra = kwargs.pop("vlm_extra_kwargs", None) or {}
         vlm_extra.pop("_captured_rope_deltas", None)
@@ -264,20 +263,23 @@ class VLMModelAdapter(nn.Module):
                         break
                 B, L = input_ids.shape
                 deltas = self._batch_rope_deltas
-                if (offsets is not None and isinstance(offsets, mx.array)
-                        and deltas.size == B):
-                    positions = offsets + deltas
+                base_offsets = None
+                if isinstance(offsets, mx.array):
+                    if offsets.ndim == 0:
+                        base_offsets = mx.broadcast_to(offsets, (B,))
+                    elif offsets.size >= B:
+                        base_offsets = offsets[:B]
+                elif isinstance(offsets, (int, float)):
+                    base_offsets = mx.broadcast_to(mx.array(offsets), (B,))
+
+                if base_offsets is not None and deltas.size == B:
+                    positions = base_offsets + deltas
                     position_ids = mx.broadcast_to(
                         positions[None, :, None], (3, B, L)
                     )
-                    # Decode never adds new image tokens; the broadcast
-                    # collapses the 3 mRoPE sections to identical values,
-                    # so the patched Qwen3_5Attention can skip its per-layer
-                    # .item() probes and take the plain-RoPE branch directly.
-                    with force_text_only_rope():
-                        result = self._language_model(
-                            input_ids, cache=cache, position_ids=position_ids, **kwargs
-                        )
+                    result = self._language_model(
+                        input_ids, cache=cache, position_ids=position_ids, **kwargs
+                    )
                 else:
                     result = self._language_model(
                         input_ids, cache=cache, **kwargs
@@ -293,10 +295,9 @@ class VLMModelAdapter(nn.Module):
                     position_ids = mx.broadcast_to(
                         offsets[None, :, None], (3, B, L)
                     )
-                    with force_text_only_rope():
-                        result = self._language_model(
-                            input_ids, cache=cache, position_ids=position_ids, **kwargs
-                        )
+                    result = self._language_model(
+                        input_ids, cache=cache, position_ids=position_ids, **kwargs
+                    )
                 else:
                     result = self._language_model(
                         input_ids, cache=cache, **kwargs
@@ -306,6 +307,8 @@ class VLMModelAdapter(nn.Module):
                     self._vlm_model._set_position_state(input_ids)
                 result = self._language_model(input_ids, cache=cache, **kwargs)
 
+        if return_hidden and hasattr(result, "logits"):
+            return result
         if hasattr(result, "logits"):
             return result.logits
         return result

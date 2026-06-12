@@ -7,6 +7,7 @@ text completions, tool calling, and structured output.
 """
 
 import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -57,6 +58,20 @@ class TestContentPart:
 
         assert part.type == "text"
         assert part.text is None
+
+    def test_file_content_part(self):
+        """Test creating file content part for document preprocessing."""
+        part = ContentPart(
+            type="file",
+            file={
+                "filename": "sample.pdf",
+                "file_data": "data:application/pdf;base64,ZA==",
+            },
+        )
+
+        assert part.type == "file"
+        assert part.file.filename == "sample.pdf"
+        assert part.file.file_data.endswith("ZA==")
 
 
 class TestMessage:
@@ -173,7 +188,9 @@ class TestFunctionCallAndToolCall:
         tc = ToolCall(
             id="call_abc123",
             type="function",
-            function=FunctionCall(name="get_weather", arguments='{"location": "Tokyo"}'),
+            function=FunctionCall(
+                name="get_weather", arguments='{"location": "Tokyo"}'
+            ),
         )
 
         assert tc.id == "call_abc123"
@@ -433,6 +450,31 @@ class TestChatCompletionRequest:
         assert req.stop == ["STOP"]
         assert len(req.tools) == 1
         assert req.tool_choice == "auto"
+
+    def test_max_completion_tokens_alias(self):
+        """Test OpenAI max_completion_tokens maps to max_tokens."""
+        req = ChatCompletionRequest.model_validate(
+            {
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "max_completion_tokens": 65536,
+            }
+        )
+
+        assert req.max_tokens == 65536
+
+    def test_max_tokens_preferred_over_alias(self):
+        """Test canonical max_tokens wins when both aliases are present."""
+        req = ChatCompletionRequest.model_validate(
+            {
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "max_tokens": 4096,
+                "max_completion_tokens": 65536,
+            }
+        )
+
+        assert req.max_tokens == 4096
 
     def test_request_validation_requires_model(self):
         """Test that model is required."""
@@ -755,6 +797,7 @@ class TestModelInfo:
 # =============================================================================
 # Stop Field Coercion
 # =============================================================================
+
 
 class TestStopCoercion:
     """Tests for stop field string-to-list coercion (OpenAI compat)."""

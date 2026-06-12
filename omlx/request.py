@@ -190,9 +190,11 @@ class Request:
 
     # Cache corruption recovery
     cache_corruption_retries: int = 0   # Per-request corruption retry counter
+    generation_overflow_retries: int = 0  # Per-request __next_prime retry counter
 
     # Prefill memory-pressure recovery
     prefill_oom_retries: int = 0        # Per-request prefill-OOM requeue counter
+    prefill_eviction_retries: int = 0   # Per-request prefill-headroom eviction phase counter
 
     @property
     def num_output_tokens(self) -> int:
