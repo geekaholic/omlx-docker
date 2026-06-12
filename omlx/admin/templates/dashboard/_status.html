@@ -286,7 +286,7 @@
                                                      x-text="(m.is_loading ? 'est. ' : '') + modelSizeLabel(m)"></div>
                                             </div>
                                         </div>
-                                        <div x-show="!m.is_loading" class="relative shrink-0 self-center">
+                                        <div x-show="!m.is_loading && !proxyMode" class="relative shrink-0 self-center">
                                             <button @click="unloadModel(m.id)"
                                                     class="p-1.5 rounded-md text-neutral-400 hover:text-red-500 hover:bg-red-50 transition-all"
                                                     :aria-label="window.t('status.active_models.unload')">
@@ -344,7 +344,7 @@
                                             <!-- Memory size -->
                                             <span class="text-xs text-neutral-400 font-mono w-60 text-right" x-text="modelSizeLabel(m)"></span>
                                             <!-- Unload button -->
-                                            <div x-show="!m.is_loading" class="relative opacity-0 group-hover:opacity-100 transition-all"
+                                            <div x-show="!m.is_loading && !proxyMode" class="relative opacity-0 group-hover:opacity-100 transition-all"
                                                  x-data="{ showTip: false }"
                                                  @mouseenter="showTip = true" @mouseleave="showTip = false">
                                                 <button @click="unloadModel(m.id)"

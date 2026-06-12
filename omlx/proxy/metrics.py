@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import time
 from collections import defaultdict
 from typing import Any
 
@@ -31,6 +32,28 @@ async def collect_backend_metrics(backend: OpenAIBackend) -> dict[str, Any]:
         "ollama": ollama,
         "summary": _summary(prometheus, ollama),
     }
+
+
+async def collect_backend_metrics_cached(
+    backend: OpenAIBackend, ttl: float = 5.0
+) -> dict[str, Any]:
+    """Collect backend metrics with a short per-backend cache.
+
+    The dashboard polls /admin/api/stats and /admin/api/proxy/metrics on
+    short intervals; the cache keeps that from hammering the backend. The
+    cache lives on the backend instance and invalidates when the backend
+    URL changes (the admin UI can repoint it live).
+    """
+    url = backend.config.normalized_backend_url
+    cached = getattr(backend, "_metrics_cache", None)
+    now = time.monotonic()
+    if cached is not None:
+        cached_at, cached_url, result = cached
+        if cached_url == url and now - cached_at < ttl:
+            return result
+    result = await collect_backend_metrics(backend)
+    backend._metrics_cache = (now, url, result)
+    return result
 
 
 async def _collect_prometheus(backend: OpenAIBackend) -> dict[str, Any]:
@@ -138,7 +161,9 @@ def select_prometheus_metrics(samples: list[dict[str, Any]]) -> dict[str, float]
                 for value in values
             ]
             if suffix_matches:
-                return max(suffix_matches) if aggregate == "max" else sum(suffix_matches)
+                return (
+                    max(suffix_matches) if aggregate == "max" else sum(suffix_matches)
+                )
         return None
 
     selected: dict[str, float] = {}
@@ -237,6 +262,10 @@ def _summary(prometheus: dict[str, Any], ollama: dict[str, Any]) -> dict[str, An
         "running_requests": selected.get("running_requests"),
         "waiting_requests": selected.get("waiting_requests"),
         "gpu_cache_usage_perc": selected.get("gpu_cache_usage_perc"),
-        "ollama_models_count": ollama.get("models_count") if ollama.get("available") else None,
-        "ollama_loaded_count": ollama.get("loaded_count") if ollama.get("available") else None,
+        "ollama_models_count": (
+            ollama.get("models_count") if ollama.get("available") else None
+        ),
+        "ollama_loaded_count": (
+            ollama.get("loaded_count") if ollama.get("available") else None
+        ),
     }

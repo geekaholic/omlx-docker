@@ -473,3 +473,122 @@ async def test_streaming_injection_retries_without_stream_options(
 
     assert len(calls) == 2
     assert "stream_options" not in calls[1]
+
+
+def _ollama_handler_factory(expires_in_seconds=240):
+    import datetime
+
+    expires = (
+        datetime.datetime.now(datetime.timezone.utc)
+        + datetime.timedelta(seconds=expires_in_seconds)
+    ).isoformat()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1/models":
+            return httpx.Response(
+                200, json={"object": "list", "data": [{"id": "llama3:8b"}]}
+            )
+        if path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "llama3:8b"}]})
+        if path == "/api/ps":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {
+                            "name": "llama3:8b",
+                            "model": "llama3:8b",
+                            "size": 8 * 1024**3,
+                            "expires_at": expires,
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404, json={"error": "not found"})
+
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_stats_active_models_ollama_shows_size_and_ttl(monkeypatch, tmp_path):
+    app = _make_app(_ollama_handler_factory(), monkeypatch, tmp_path)
+    async with _client(app) as client:
+        stats = await _get_stats(client)
+
+    active = stats["active_models"]
+    rows = active["models"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["id"] == "llama3:8b"
+    assert row["estimated_size"] == 8 * 1024**3
+    assert "GB" in row["estimated_size_formatted"]
+    assert row["ttl_remaining_seconds"] is not None
+    assert 0 < row["ttl_remaining_seconds"] <= 300
+    assert active["model_memory_used"] == 8 * 1024**3
+
+
+_VLLM_METRICS_TEXT = """\
+# HELP vllm:num_requests_running Number of requests currently running.
+vllm:num_requests_running{model_name="qwen"} 2.0
+vllm:num_requests_waiting{model_name="qwen"} 3.0
+vllm:prompt_tokens_total{model_name="qwen"} 1000.0
+vllm:generation_tokens_total{model_name="qwen"} 500.0
+"""
+
+
+@pytest.mark.asyncio
+async def test_stats_active_models_vllm_attaches_request_counts(monkeypatch, tmp_path):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1/models":
+            return httpx.Response(
+                200, json={"object": "list", "data": [{"id": "qwen"}]}
+            )
+        if path == "/metrics":
+            return httpx.Response(
+                200, text=_VLLM_METRICS_TEXT, headers={"content-type": "text/plain"}
+            )
+        return httpx.Response(404, json={"error": "not found"})
+
+    app = _make_app(handler, monkeypatch, tmp_path)
+    async with _client(app) as client:
+        stats = await _get_stats(client)
+
+    active = stats["active_models"]
+    assert active["total_active_requests"] == 2
+    assert active["total_waiting_requests"] == 3
+    row = active["models"][0]
+    assert row["id"] == "qwen"
+    assert row["active_requests"] == 2
+    assert row["waiting_requests"] == 3
+
+
+@pytest.mark.asyncio
+async def test_collect_backend_metrics_cached_respects_ttl(monkeypatch, tmp_path):
+    from omlx.proxy.metrics import collect_backend_metrics_cached
+
+    hits = {"metrics": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/metrics":
+            hits["metrics"] += 1
+            return httpx.Response(
+                200, text=_VLLM_METRICS_TEXT, headers={"content-type": "text/plain"}
+            )
+        return httpx.Response(404, json={"error": "not found"})
+
+    config = ProxyConfig(backend_url="http://backend/v1")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    backend = OpenAIBackend(config=config, client=client)
+
+    first = await collect_backend_metrics_cached(backend, ttl=60.0)
+    second = await collect_backend_metrics_cached(backend, ttl=60.0)
+    assert hits["metrics"] == 1
+    assert first["summary"]["running_requests"] == 2.0
+    assert second is first
+
+    third = await collect_backend_metrics_cached(backend, ttl=0.0)
+    assert hits["metrics"] == 2
+    assert third["summary"]["running_requests"] == 2.0
+    await client.aclose()

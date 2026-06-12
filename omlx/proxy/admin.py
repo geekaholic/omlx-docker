@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +27,7 @@ from .docker_control import (
     docker_socket_path,
     restart_compose_service,
 )
-from .metrics import collect_backend_metrics
+from .metrics import collect_backend_metrics_cached
 from .sidecar_compose import (
     backend_spec,
     env_from_compose,
@@ -197,7 +199,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
     @router.get("/api/proxy/metrics")
     async def proxy_metrics():
         started = time.monotonic()
-        metrics = await collect_backend_metrics(backend)
+        metrics = await collect_backend_metrics_cached(backend)
         metrics["latency_ms"] = round((time.monotonic() - started) * 1000, 1)
         return metrics
 
@@ -390,7 +392,14 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             if metrics_obj is not None
             else None
         )
-        return _stats_payload(backend.config, state, models, snapshot=snapshot)
+        backend_metrics = await collect_backend_metrics_cached(backend)
+        return _stats_payload(
+            backend.config,
+            state,
+            models,
+            metrics=backend_metrics,
+            snapshot=snapshot,
+        )
 
     @router.post("/api/stats/clear")
     async def clear_stats():
@@ -1237,6 +1246,116 @@ def _global_settings_payload(
     }
 
 
+def _format_size_bytes(num: float) -> str:
+    if num >= 1024**3:
+        return f"{num / 1024**3:.2f} GB"
+    if num >= 1024**2:
+        return f"{num / 1024**2:.1f} MB"
+    if num > 0:
+        return f"{num / 1024:.0f} KB"
+    return "0 B"
+
+
+def _ttl_remaining_seconds(expires_at: Any) -> float | None:
+    """Seconds until an Ollama ``expires_at`` timestamp, clamped to >= 0."""
+    if not expires_at or not isinstance(expires_at, str):
+        return None
+    text = expires_at.strip()
+    # Ollama reports nanosecond precision; fromisoformat wants <= 6 digits.
+    text = re.sub(r"(\.\d{6})\d+", r"\1", text)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    if parsed.year <= 1:  # Ollama's zero-value for "not expiring"
+        return None
+    return max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+
+
+def _model_row(model_id: str, **overrides: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "id": model_id,
+        "estimated_size": 0,
+        "estimated_size_formatted": "remote",
+        "actual_size": None,
+        "actual_size_formatted": None,
+        "pinned": False,
+        "is_loading": False,
+        "active_requests": 0,
+        "waiting_requests": 0,
+        "waiting": [],
+        "activities": [],
+        "prefilling": [],
+        "generating": [],
+        "idle_seconds": None,
+        "ttl_remaining_seconds": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def _active_models_payload(
+    models: list[dict[str, Any]],
+    metrics: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the Active Models panel data from backend-reported state."""
+    summary = metrics.get("summary") or {}
+    running = int(summary.get("running_requests") or 0)
+    waiting = int(summary.get("waiting_requests") or 0)
+    ollama = metrics.get("ollama") or {}
+
+    rows: list[dict[str, Any]]
+    memory_used = 0
+    if ollama.get("available") and ollama.get("loaded_models"):
+        rows = []
+        for item in ollama["loaded_models"]:
+            model_id = str(item.get("name") or item.get("model") or "")
+            if not model_id:
+                continue
+            size = int(item.get("size") or 0)
+            memory_used += size
+            rows.append(
+                _model_row(
+                    model_id,
+                    estimated_size=size,
+                    estimated_size_formatted=_format_size_bytes(size),
+                    ttl_remaining_seconds=_ttl_remaining_seconds(
+                        item.get("expires_at")
+                    ),
+                )
+            )
+    else:
+        rows = [
+            _model_row(str(m["id"]), pinned=bool(m.get("pinned", False)))
+            for m in models
+            if m.get("id")
+        ]
+        # vLLM/llama.cpp serve one model; attribute queue depth to it.
+        if len(rows) == 1:
+            rows[0]["active_requests"] = running
+            rows[0]["waiting_requests"] = waiting
+
+    return {
+        "models": rows,
+        "model_memory_used": memory_used,
+        "model_memory_max": 0,
+        "memory_pressure": {
+            "enabled": False,
+            "current_bytes": 0,
+            "soft_bytes": 0,
+            "hard_bytes": 0,
+            "current_formatted": "remote",
+            "soft_formatted": "remote",
+            "hard_formatted": "remote",
+            "pressure_level": "ok",
+        },
+        "total_active_requests": running,
+        "total_waiting_requests": waiting,
+    }
+
+
 def _stats_payload(
     config: ProxyConfig,
     state: ProxyAdminState,
@@ -1249,26 +1368,7 @@ def _stats_payload(
     summary = metrics.get("summary") or {}
     running = int(summary.get("running_requests") or 0)
     waiting = int(summary.get("waiting_requests") or 0)
-    active_models = [
-        {
-            "id": m["id"],
-            "estimated_size": 0,
-            "estimated_size_formatted": "remote",
-            "actual_size": None,
-            "actual_size_formatted": None,
-            "pinned": m.get("pinned", False),
-            "is_loading": False,
-            "active_requests": 0,
-            "waiting_requests": 0,
-            "waiting": [],
-            "activities": [],
-            "prefilling": [],
-            "generating": [],
-            "idle_seconds": None,
-            "ttl_remaining_seconds": None,
-        }
-        for m in models
-    ]
+    active_models_data = _active_models_payload(models, metrics)
     snapshot = snapshot or {}
     return {
         "uptime_seconds": uptime,
@@ -1289,23 +1389,7 @@ def _stats_payload(
         "claude_code_context_scaling_enabled": config.context_scaling_enabled,
         "claude_code_target_context_size": config.target_context_size,
         "engines": {"mode": "proxy", "backend_url": config.normalized_backend_url},
-        "active_models": {
-            "models": active_models,
-            "model_memory_used": 0,
-            "model_memory_max": 0,
-            "memory_pressure": {
-                "enabled": False,
-                "current_bytes": 0,
-                "soft_bytes": 0,
-                "hard_bytes": 0,
-                "current_formatted": "remote",
-                "soft_formatted": "remote",
-                "hard_formatted": "remote",
-                "pressure_level": "ok",
-            },
-            "total_active_requests": running,
-            "total_waiting_requests": waiting,
-        },
+        "active_models": active_models_data,
         "runtime_cache": {
             "base_path": "",
             "ssd_cache_dir": "",
