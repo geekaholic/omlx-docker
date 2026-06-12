@@ -56,6 +56,52 @@ async def collect_backend_metrics_cached(
     return result
 
 
+async def backend_context_limit(
+    backend: OpenAIBackend, ttl: float = 30.0
+) -> int | None:
+    """Best-effort backend context window in tokens, cached per backend.
+
+    vLLM reports ``max_model_len`` on ``/v1/models``; llama.cpp exposes the
+    per-slot context as ``default_generation_settings.n_ctx`` on ``/props``
+    (the real per-request ceiling when running with ``--parallel``).
+    Returns None when nothing is reported (Ollama, plain OpenAI endpoints).
+    """
+    url = backend.config.normalized_backend_url
+    cached = getattr(backend, "_context_limit_cache", None)
+    now = time.monotonic()
+    if cached is not None:
+        cached_at, cached_url, value = cached
+        if cached_url == url and now - cached_at < ttl:
+            return value
+    value = await _probe_context_limit(backend)
+    backend._context_limit_cache = (now, url, value)
+    return value
+
+
+async def _probe_context_limit(backend: OpenAIBackend) -> int | None:
+    try:
+        data = await backend.get_models(None)
+        entries = data.get("data") or []
+        lengths = [
+            int(entry["max_model_len"])
+            for entry in entries
+            if isinstance(entry, dict) and entry.get("max_model_len")
+        ]
+        if lengths:
+            return max(lengths)
+    except Exception:
+        pass
+    try:
+        props = await backend.get_root_json("props")
+        slot = props.get("default_generation_settings") or {}
+        n_ctx = slot.get("n_ctx")
+        if isinstance(n_ctx, (int, float)) and n_ctx > 0:
+            return int(n_ctx)
+    except Exception:
+        pass
+    return None
+
+
 def host_memory_info(meminfo_path: str = "/proc/meminfo") -> dict[str, int]:
     """Total/available system memory in bytes (zeros when unreadable).
 

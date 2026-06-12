@@ -1874,6 +1874,12 @@
                             min="1" placeholder="Default"
                             class="w-full px-3 py-2 text-xs border border-line rounded-xl focus:outline-none focus:border-line-strong bg-surface-muted"
                             style="color: var(--text-primary);">
+                        <p x-show="currentModelContextWindow" x-cloak class="text-[10px]"
+                            style="color: var(--text-secondary);"
+                            x-text="'Context: ' + (currentModelContextWindow || 0).toLocaleString() + ' tokens'"></p>
+                        <p x-show="maxTokensExceedsModelContext" x-cloak class="text-[10px] font-medium text-amber-600">
+                            At/above the context window — the backend may reject requests.
+                        </p>
                     </div>
                 </div>
 
@@ -2494,6 +2500,19 @@
                 return Array.from(byId.values()).sort((a, b) =>
                     a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
                 );
+            },
+
+            get currentModelContextWindow() {
+                const model = (this.availableModels || []).find(
+                    m => m.id === this.currentModel || m.name === this.currentModel
+                );
+                return model?.context_window || null;
+            },
+
+            get maxTokensExceedsModelContext() {
+                const limit = this.currentModelContextWindow;
+                const value = Number(this.modelSettings?.max_tokens);
+                return !!(limit && value && value >= limit);
             },
 
             resolvePreferredDefaultModel(defaultModel) {
@@ -4037,7 +4056,10 @@
                 }).map(m => ({
                     id: this.aliasToGateway[m.id] || m.id, // gateway id for API calls
                     name: m.id, // original name (alias or directory name) for display
-                    owned_by: m.owned_by
+                    owned_by: m.owned_by,
+                    // enriched by the server from backend metadata (vLLM
+                    // max_model_len / admin overrides); used for hints
+                    context_window: m.context_window || m.max_model_len || null
                 }))
             );
 

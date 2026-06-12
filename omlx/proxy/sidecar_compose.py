@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-'''Shared settings and helpers for managed sidecar backends (vLLM, llama.cpp).
+"""Shared settings and helpers for managed sidecar backends (vLLM, llama.cpp).
 
 Backend-portable settings use the OMNI_* env prefix and live on
 ``CommonSidecarSettings``; backend-specific knobs keep VLLM_*/LLAMACPP_*
 prefixes on the per-backend subclasses.
-'''
+"""
 
 from __future__ import annotations
 
@@ -34,7 +34,9 @@ class CommonSidecarSettings:
     context_scaling: bool = False
     target_context_size: int = 200000
     sse_keepalive_mode: str = "ping"
-    sampling_max_tokens: int = 32768
+    # 0 = no default output cap injected; the backend applies its own
+    # limit (vLLM caps to the remaining context when max_tokens is unset).
+    sampling_max_tokens: int = 0
     sampling_temperature: float = 1.0
     sampling_top_p: float = 1.0
     sampling_top_k: int = 0
@@ -309,7 +311,9 @@ def write_env_file(
 ) -> Path:
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(render_env_file(values, keys, include_header=True), encoding="utf-8")
+    output.write_text(
+        render_env_file(values, keys, include_header=True), encoding="utf-8"
+    )
     return output
 
 
@@ -348,7 +352,7 @@ def render_proxy_service(
     project_context: str,
     compose_output_dir: str,
 ) -> str:
-    return f'''  omlx-proxy:
+    return f"""  omlx-proxy:
     build:
       context: {_yaml_quote(project_context)}
       dockerfile: docker/Dockerfile.proxy
@@ -387,7 +391,7 @@ def render_proxy_service(
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - {backend_service}
-'''
+"""
 
 
 def render_env_reload_snippet(env_name: str) -> str:
@@ -397,20 +401,24 @@ def render_env_reload_snippet(env_name: str) -> str:
     the bind-mounted env file on every start lets a plain container restart
     pick up settings saved from the admin UI.
     """
-    return f'''        if [ -f "/compose-output/{env_name}" ]; then
+    return f"""        if [ -f "/compose-output/{env_name}" ]; then
           while IFS= read -r omni_env_line; do
             case "$$omni_env_line" in ''|'#'*) continue;; esac
             export "$$omni_env_line"
           done < "/compose-output/{env_name}"
-        fi'''
+        fi"""
 
 
 def compose_paths_for_render(
     path: str | os.PathLike[str],
     repo_root: str | os.PathLike[str] | None = None,
 ) -> tuple[str, str]:
-    '''Project context and compose-output dir, relative to a compose file path.'''
-    root = Path(repo_root) if repo_root is not None else Path(__file__).resolve().parents[2]
+    """Project context and compose-output dir, relative to a compose file path."""
+    root = (
+        Path(repo_root)
+        if repo_root is not None
+        else Path(__file__).resolve().parents[2]
+    )
     output_dir = Path(path).parent.resolve()
     project_context = _relative_path(root.resolve(), output_dir)
     compose_output_dir = _relative_path((root / "docker").resolve(), output_dir)
@@ -553,4 +561,4 @@ def _compose_default_expr(name: str, value: Any) -> str:
 
 def _yaml_quote(value: Any) -> str:
     text = str(value)
-    return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -45,6 +46,7 @@ from .backend import (
 )
 from .admin import configure_admin
 from .config import ProxyConfig
+from .metrics import backend_context_limit
 from .responses_adapter import (
     non_streaming_responses_response,
     responses_to_chat_body,
@@ -225,6 +227,7 @@ def create_app(
             openai_body,
             getattr(request.app.state, "proxy_admin_state", None),
             include_chat_template=True,
+            context_limit=await _request_context_limit(backend),
         )
         if anth_request.stream:
             return StreamingResponse(
@@ -306,6 +309,7 @@ def create_app(
             cc_body,
             getattr(request.app.state, "proxy_admin_state", None),
             include_chat_template=True,
+            context_limit=await _request_context_limit(backend),
         )
         auth = _backend_authorization(request, backend.config)
         resp_id = f"resp_{uuid.uuid4().hex}"
@@ -490,10 +494,17 @@ def apply_proxy_request_defaults(
     state: Any,
     *,
     include_chat_template: bool = False,
-) -> dict[str, Any]:
-    """Apply saved admin sampling defaults before forwarding to the backend."""
+    context_limit: int | None = None,
+    inject_max_tokens: bool = True,
+) -> bool:
+    """Apply saved admin sampling defaults before forwarding to the backend.
+
+    Mutates ``body`` in place. Returns True when a default ``max_tokens``
+    was injected (callers use this to retry without it on a backend
+    context-length rejection).
+    """
     if state is None or not isinstance(body, dict):
-        return body
+        return False
 
     model_id = body.get("model")
     model_settings = {}
@@ -501,6 +512,7 @@ def apply_proxy_request_defaults(
         model_settings = state.model_settings.get(str(model_id), {}) or {}
     overrides = state.global_overrides or {}
     force = bool(model_settings.get("force_sampling"))
+    injected_max_tokens = False
 
     sampling_fields = (
         ("max_tokens", "sampling_max_tokens"),
@@ -516,6 +528,25 @@ def apply_proxy_request_defaults(
             model_settings.get(request_key), overrides.get(global_key)
         )
         if value is None:
+            continue
+        if request_key == "max_tokens":
+            if not inject_max_tokens:
+                continue
+            value = _positive_int_or_none(value)
+            if value is None:
+                # 0/empty means "no output cap configured" — let the
+                # backend apply its own limit.
+                continue
+            if context_limit and value >= context_limit:
+                # An output cap at or above the context window guarantees
+                # rejections on strict backends (vLLM enforces
+                # prompt + max_tokens <= max_model_len). Leave the
+                # request untouched; the admin UI surfaces the
+                # misconfiguration.
+                continue
+            if force or body.get(request_key) is None:
+                body[request_key] = value
+                injected_max_tokens = True
             continue
         if force or body.get(request_key) is None:
             body[request_key] = value
@@ -534,7 +565,7 @@ def apply_proxy_request_defaults(
         budget = model_settings.get("thinking_budget_tokens")
         if budget_enabled and _configured_value(budget):
             body["thinking_budget"] = budget
-    return body
+    return injected_max_tokens
 
 
 def _body_with_proxy_defaults(
@@ -542,19 +573,50 @@ def _body_with_proxy_defaults(
     state: Any,
     *,
     include_chat_template: bool = False,
-) -> bytes:
+    context_limit: int | None = None,
+    inject_max_tokens: bool = True,
+) -> tuple[bytes, bool]:
+    """Encode ``body`` with proxy defaults; also report max_tokens injection."""
     try:
         payload = json.loads(body.decode("utf-8"))
     except Exception:
-        return body
+        return body, False
     if not isinstance(payload, dict):
-        return body
-    apply_proxy_request_defaults(
+        return body, False
+    injected_max_tokens = apply_proxy_request_defaults(
         payload,
         state,
         include_chat_template=include_chat_template,
+        context_limit=context_limit,
+        inject_max_tokens=inject_max_tokens,
     )
-    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return encoded, injected_max_tokens
+
+
+async def _request_context_limit(backend: OpenAIBackend) -> int | None:
+    """Context window used to guard injected sampling defaults.
+
+    Prefers what the backend itself reports; managed sidecar stacks fall
+    back to the launch-time context length (OMLX_ACTUAL_CONTEXT_SIZE).
+    """
+    try:
+        limit = await backend_context_limit(backend)
+    except Exception:
+        limit = None
+    if limit:
+        return limit
+    if os.getenv("OMLX_SIDECAR_BACKEND", "").strip():
+        return backend.config.actual_context_size or None
+    return None
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
 def _first_configured(*values: Any) -> Any | None:
@@ -587,16 +649,32 @@ async def _passthrough_backend(
     path: str,
     metrics: ServerMetrics | None = None,
 ) -> Response:
-    body = await request.body()
+    raw_body = await request.body()
+    body = raw_body
     track_stats = metrics is not None and path in {"chat/completions", "completions"}
+    injected_max_tokens = False
+    admin_state = getattr(request.app.state, "proxy_admin_state", None)
     if path in {"chat/completions", "completions"}:
-        body = _body_with_proxy_defaults(
-            body,
-            getattr(request.app.state, "proxy_admin_state", None),
+        context_limit = await _request_context_limit(backend)
+        body, injected_max_tokens = _body_with_proxy_defaults(
+            raw_body,
+            admin_state,
             include_chat_template=path == "chat/completions",
+            context_limit=context_limit,
         )
     headers = _backend_headers(request, backend)
     wants_stream = _body_requests_stream(body)
+
+    def _body_without_max_tokens() -> bytes:
+        # Rebuild with all defaults except the injected output cap; used
+        # when the backend rejects the request for context-length reasons.
+        rebuilt, _ = _body_with_proxy_defaults(
+            raw_body,
+            admin_state,
+            include_chat_template=path == "chat/completions",
+            inject_max_tokens=False,
+        )
+        return rebuilt
 
     if wants_stream:
         send_body = body
@@ -620,6 +698,23 @@ async def _passthrough_backend(
                     request.method,
                     path,
                     body,
+                    headers,
+                )
+            if injected_max_tokens and response.status_code == 400:
+                # The injected default max_tokens may exceed the room the
+                # prompt leaves (vLLM rejects with a context-length error);
+                # retry once without the cap so the client still gets a
+                # response.
+                await response.aclose()
+                injected_max_tokens = False
+                body = _body_without_max_tokens()
+                send_body = body
+                if track_stats:
+                    send_body, injected_usage = inject_include_usage(body)
+                response = await backend.raw_stream(
+                    request.method,
+                    path,
+                    send_body,
                     headers,
                 )
         except Exception as exc:
@@ -650,6 +745,11 @@ async def _passthrough_backend(
 
     try:
         response = await backend.raw_request(request.method, path, body, headers)
+        if injected_max_tokens and response.status_code == 400:
+            # Same context-length safety net as the streaming path.
+            response = await backend.raw_request(
+                request.method, path, _body_without_max_tokens(), headers
+            )
     except Exception as exc:
         raise _backend_http_exception(exc)
     if track_stats and response.status_code < 400:

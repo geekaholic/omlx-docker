@@ -28,7 +28,11 @@ from .docker_control import (
     restart_compose_service,
     service_gpu_memory_bytes,
 )
-from .metrics import collect_backend_metrics_cached, host_memory_info
+from .metrics import (
+    backend_context_limit,
+    collect_backend_metrics_cached,
+    host_memory_info,
+)
 from .sidecar_compose import (
     backend_spec,
     env_from_compose,
@@ -177,9 +181,14 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
 
     @router.get("/api/proxy/config")
     async def proxy_config():
+        try:
+            context_limit = await backend_context_limit(backend)
+        except Exception:
+            context_limit = None
         return {
             "backend_url": backend.config.normalized_backend_url,
             "backend_type": _proxy_backend_type(state),
+            "backend_context_limit": context_limit,
             "backend_api_key": backend.config.backend_api_key or "",
             "backend_api_key_set": bool(backend.config.backend_api_key),
             "proxy_host": backend.config.host,
@@ -231,7 +240,14 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
 
     @router.get("/api/global-settings")
     async def get_global_settings():
-        return _global_settings_payload(backend.config, state)
+        payload = _global_settings_payload(backend.config, state)
+        try:
+            payload["proxy"]["backend_context_limit"] = await backend_context_limit(
+                backend
+            )
+        except Exception:
+            payload["proxy"]["backend_context_limit"] = None
+        return payload
 
     @router.post("/api/global-settings")
     async def update_global_settings(request: Request):
@@ -1237,9 +1253,10 @@ def _global_settings_payload(
                 "sampling_max_context_window",
                 sidecar_settings.context_length,
             ),
-            "max_tokens": overrides.get(
-                "sampling_max_tokens", config.actual_context_size
-            ),
+            # None = no output cap injected (backend default). Never
+            # pre-fill with the context size: saving that guarantees
+            # vLLM rejects every request (prompt + max_tokens > context).
+            "max_tokens": _positive_int_or_none(overrides.get("sampling_max_tokens")),
             "temperature": overrides.get("sampling_temperature", 1.0),
             "top_p": overrides.get("sampling_top_p", 1.0),
             "top_k": overrides.get("sampling_top_k", 0),
@@ -1291,6 +1308,14 @@ def _global_settings_payload(
         "ui": {"language": "en"},
         "idle_timeout": {"idle_timeout_seconds": None},
     }
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
 def _format_size_bytes(num: float) -> str:

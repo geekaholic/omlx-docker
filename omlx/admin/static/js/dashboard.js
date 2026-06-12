@@ -91,7 +91,7 @@
                 memory: { prefill_memory_guard: true, memory_guard_tier: 'balanced', memory_guard_custom_ceiling_gb: 0 },
                 scheduler: { max_concurrent_requests: 8, embedding_batch_size: 32, chunked_prefill: false },
                 cache: { enabled: true, ssd_cache_dir: '', ssd_cache_max_size: 'auto', hot_cache_max_size: '0', initial_cache_blocks: 256, hot_cache_only: false },
-                sampling: { max_context_window: 32768, max_context_window_policy: null, max_tokens: 32768, temperature: 1.0, top_p: 0.95, top_k: 0, repetition_penalty: 1.0 },
+                sampling: { max_context_window: 32768, max_context_window_policy: null, max_tokens: null, temperature: 1.0, top_p: 0.95, top_k: 0, repetition_penalty: 1.0 },
                 mcp: { config_path: '' },
                 huggingface: { endpoint: '', hf_cache_enabled: true, hf_cache_path: '' },
                 network: { http_proxy: '', https_proxy: '', no_proxy: '', ca_bundle: '' },
@@ -2390,6 +2390,34 @@
 
             get backendCacheSummary() {
                 return this.proxyMetrics?.summary || {};
+            },
+
+            get backendContextLimit() {
+                // Live limit reported by the backend (vLLM max_model_len,
+                // llama.cpp /props), delivered with global settings.
+                const live = Number(this.globalSettings.proxy?.backend_context_limit) || null;
+                const configured = this.proxyMode
+                    ? Number(this.globalSettings.proxy?.sidecar?.context_length) || null
+                    : null;
+                if (live && configured) return Math.min(live, configured);
+                return live || configured;
+            },
+
+            get maxTokensExceedsContext() {
+                const limit = this.backendContextLimit;
+                const value = Number(this.globalSettings.sampling?.max_tokens);
+                return !!(this.proxyMode && limit && value && value >= limit);
+            },
+
+            get recommendedMaxTokens() {
+                const limit = this.backendContextLimit;
+                return limit ? Math.floor(limit / 2) : null;
+            },
+
+            applyRecommendedMaxTokens() {
+                if (this.recommendedMaxTokens) {
+                    this.globalSettings.sampling.max_tokens = this.recommendedMaxTokens;
+                }
             },
 
             get backendCacheMetricsAvailable() {

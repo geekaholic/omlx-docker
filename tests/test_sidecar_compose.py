@@ -165,3 +165,14 @@ def test_vllm_compose_enables_prompt_tokens_details():
     # which vLLM only reports with this flag.
     content = render_vllm_compose(VllmComposeSettings())
     assert "--enable-prompt-tokens-details" in content
+
+
+def test_sampling_max_tokens_defaults_to_unset():
+    # 0 = no output cap injected by the proxy; prevents the out-of-box
+    # default from exceeding small context windows (vLLM rejects those).
+    from omlx.proxy.llamacpp_compose import LlamacppComposeSettings
+
+    assert VllmComposeSettings().sampling_max_tokens == 0
+    assert LlamacppComposeSettings().sampling_max_tokens == 0
+    content = render_vllm_compose(VllmComposeSettings())
+    assert "OMLX_SAMPLING_MAX_TOKENS:-0" in content

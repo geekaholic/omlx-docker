@@ -1315,3 +1315,44 @@ async def test_standalone_launch_clears_stale_sidecar_state(monkeypatch, tmp_pat
     assert config["backend_type"] == "openai-compatible"
     # Falls back to the env/config-provided URL, not the dead vllm host.
     assert config["backend_url"] != "http://vllm:8000/v1"
+
+
+@pytest.mark.asyncio
+async def test_proxy_config_reports_backend_context_limit(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            return httpx.Response(
+                200, json={"data": [{"id": "gemma", "max_model_len": 65000}]}
+            )
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        config = (await client.get("/admin/api/proxy/config")).json()
+        settings = (await client.get("/admin/api/global-settings")).json()
+
+    assert config["backend_context_limit"] == 65000
+    assert settings["proxy"]["backend_context_limit"] == 65000
+
+
+@pytest.mark.asyncio
+async def test_global_settings_never_prefill_max_tokens(monkeypatch, tmp_path):
+    """The Max Tokens field must not default to the context size."""
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        settings = (await client.get("/admin/api/global-settings")).json()
+
+    assert settings["sampling"]["max_tokens"] is None

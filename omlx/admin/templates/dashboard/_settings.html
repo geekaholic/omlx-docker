@@ -902,10 +902,26 @@
                                     <input type="number" x-model.number="globalSettings.sampling.max_context_window" min="1" max="2097152"
                                            class="w-full sm:w-48 px-3 py-2 text-sm text-right border border-neutral-200 rounded-lg focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all">
                                 </div>
-                                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 sm:px-6 py-4">
-                                    <label class="text-sm text-neutral-700">{{ t('settings.generation.max_tokens') }}</label>
-                                    <input type="number" x-model.number="globalSettings.sampling.max_tokens" min="1" max="131072"
-                                           class="w-full sm:w-48 px-3 py-2 text-sm text-right border border-neutral-200 rounded-lg focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all">
+                                <div class="flex flex-col px-4 sm:px-6 py-4 gap-2">
+                                    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                                        <div>
+                                            <label class="text-sm text-neutral-700">{{ t('settings.generation.max_tokens') }}</label>
+                                            <p x-show="proxyMode" x-cloak class="text-xs text-neutral-400 mt-0.5">{{ t('settings.generation.max_tokens_proxy_hint') }}</p>
+                                            <p x-show="proxyMode && backendContextLimit" x-cloak class="text-xs text-neutral-400 mt-0.5"
+                                               x-text="window.t('settings.generation.backend_context_window').replace('{n}', (backendContextLimit || 0).toLocaleString())"></p>
+                                        </div>
+                                        <input type="number" x-model.number="globalSettings.sampling.max_tokens" min="1" max="2097152"
+                                               :placeholder="proxyMode ? window.t('settings.generation.max_tokens_backend_default') : ''"
+                                               class="w-full sm:w-48 px-3 py-2 text-sm text-right border rounded-lg focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all"
+                                               :class="maxTokensExceedsContext ? 'border-amber-400 bg-amber-50' : 'border-neutral-200'">
+                                    </div>
+                                    <div x-show="maxTokensExceedsContext" x-cloak
+                                         class="flex flex-col sm:flex-row sm:items-center gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                                        <span class="flex-1">{{ t('settings.generation.max_tokens_exceeds_context') }}</span>
+                                        <button type="button" @click="applyRecommendedMaxTokens()"
+                                                class="shrink-0 px-2 py-1 rounded-md bg-amber-100 hover:bg-amber-200 font-medium transition-all"
+                                                x-text="window.t('settings.generation.use_recommended').replace('{n}', (recommendedMaxTokens || 0).toLocaleString())"></button>
+                                    </div>
                                 </div>
                                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 sm:px-6 py-4">
                                     <div>

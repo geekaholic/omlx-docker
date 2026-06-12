@@ -667,3 +667,191 @@ async def test_collect_backend_metrics_cached_respects_ttl(monkeypatch, tmp_path
     assert hits["metrics"] == 2
     assert third["summary"]["running_requests"] == 2.0
     await client.aclose()
+
+
+def _state_with_max_tokens(value):
+    from omlx.proxy.admin import ProxyAdminState
+
+    state = ProxyAdminState()
+    state.global_overrides["sampling_max_tokens"] = value
+    return state
+
+
+def test_max_tokens_injection_skipped_at_context_limit():
+    from omlx.proxy.app import apply_proxy_request_defaults
+
+    body = {"model": "m", "messages": []}
+    injected = apply_proxy_request_defaults(
+        body, _state_with_max_tokens(65000), context_limit=65000
+    )
+    assert injected is False
+    assert "max_tokens" not in body
+
+
+def test_max_tokens_injected_below_context_limit():
+    from omlx.proxy.app import apply_proxy_request_defaults
+
+    body = {"model": "m", "messages": []}
+    injected = apply_proxy_request_defaults(
+        body, _state_with_max_tokens(16384), context_limit=65000
+    )
+    assert injected is True
+    assert body["max_tokens"] == 16384
+
+
+def test_max_tokens_zero_or_unset_never_injected():
+    from omlx.proxy.app import apply_proxy_request_defaults
+
+    for value in (0, "0", None, ""):
+        body = {"model": "m", "messages": []}
+        injected = apply_proxy_request_defaults(
+            body, _state_with_max_tokens(value), context_limit=None
+        )
+        assert injected is False, value
+        assert "max_tokens" not in body, value
+
+
+def test_max_tokens_client_value_never_overridden():
+    from omlx.proxy.app import apply_proxy_request_defaults
+
+    body = {"model": "m", "messages": [], "max_tokens": 50}
+    injected = apply_proxy_request_defaults(
+        body, _state_with_max_tokens(16384), context_limit=65000
+    )
+    assert injected is False
+    assert body["max_tokens"] == 50
+
+
+@pytest.mark.asyncio
+async def test_passthrough_retries_without_injected_max_tokens(monkeypatch, tmp_path):
+    """A 400 caused by the injected cap retries once without it."""
+    calls = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            # context-limit probe: no max_model_len reported
+            return httpx.Response(200, json={"data": [{"id": "qwen"}]})
+        body = json.loads(request.content.decode())
+        calls.append(body)
+        if body.get("max_tokens"):
+            return httpx.Response(
+                400,
+                json={
+                    "error": {"message": "This model's maximum context length is..."}
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-1",
+                "model": "qwen",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": _USAGE,
+            },
+        )
+
+    app = _make_app(handler, monkeypatch, tmp_path)
+    app.state.proxy_admin_state.global_overrides["sampling_max_tokens"] = 4096
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "qwen", "messages": []},
+        )
+
+    assert response.status_code == 200
+    assert "ok" in response.text
+    assert len(calls) == 2
+    assert calls[0]["max_tokens"] == 4096
+    assert "max_tokens" not in calls[1]
+
+
+@pytest.mark.asyncio
+async def test_streaming_passthrough_retries_without_injected_max_tokens(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "qwen"}]})
+        body = json.loads(request.content.decode())
+        calls.append(body)
+        if body.get("max_tokens"):
+            return httpx.Response(400, json={"error": "too long"})
+        return httpx.Response(
+            200,
+            content=_sse(_chat_chunk(content="ok", finish="stop"), "[DONE]"),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    app = _make_app(handler, monkeypatch, tmp_path)
+    app.state.proxy_admin_state.global_overrides["sampling_max_tokens"] = 4096
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "qwen", "messages": [], "stream": True},
+        )
+
+    assert response.status_code == 200
+    assert "ok" in response.text
+    assert any("max_tokens" not in c for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_context_limit_probe_vllm_max_model_len(monkeypatch, tmp_path):
+    from omlx.proxy.metrics import backend_context_limit
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            return httpx.Response(
+                200, json={"data": [{"id": "gemma", "max_model_len": 65000}]}
+            )
+        return httpx.Response(404)
+
+    config = ProxyConfig(backend_url="http://backend/v1")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    backend = OpenAIBackend(config=config, client=client)
+    assert await backend_context_limit(backend) == 65000
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_context_limit_probe_llamacpp_props(monkeypatch, tmp_path):
+    from omlx.proxy.metrics import backend_context_limit
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "qwen"}]})
+        if request.url.path == "/props":
+            return httpx.Response(
+                200, json={"default_generation_settings": {"n_ctx": 16384}}
+            )
+        return httpx.Response(404)
+
+    config = ProxyConfig(backend_url="http://backend/v1")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    backend = OpenAIBackend(config=config, client=client)
+    assert await backend_context_limit(backend) == 16384
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_context_limit_probe_none_when_unreported(monkeypatch, tmp_path):
+    from omlx.proxy.metrics import backend_context_limit
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "m"}]})
+        return httpx.Response(404)
+
+    config = ProxyConfig(backend_url="http://backend/v1")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    backend = OpenAIBackend(config=config, client=client)
+    assert await backend_context_limit(backend) is None
+    await client.aclose()
