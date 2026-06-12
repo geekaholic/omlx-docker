@@ -12,7 +12,12 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import (
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
 
@@ -30,6 +35,7 @@ from omlx.api.anthropic_utils import (
     convert_internal_to_anthropic_response,
     request_has_cache_control,
 )
+from omlx.server_metrics import ServerMetrics
 
 from .backend import (
     BackendError,
@@ -45,6 +51,14 @@ from .responses_adapter import (
     stream_responses_events,
 )
 from .scaling import anthropic_keepalive_frame, scale_token_count
+from .stats import (
+    inject_include_usage,
+    model_from_body,
+    record_chat_response,
+    record_request,
+    stats_path_from_env,
+    track_usage_stream,
+)
 
 security = HTTPBearer(auto_error=False)
 
@@ -55,12 +69,14 @@ def create_app(
 ) -> FastAPI:
     proxy_config = config or ProxyConfig.from_env()
     backend = backend or OpenAIBackend(proxy_config)
+    server_metrics = ServerMetrics(stats_path=stats_path_from_env())
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.proxy_config = backend.config
         app.state.backend = backend
         yield
+        server_metrics.save_alltime()
         await backend.close()
 
     app = FastAPI(
@@ -68,6 +84,7 @@ def create_app(
         version=__version__,
         lifespan=lifespan,
     )
+    app.state.server_metrics = server_metrics
     configure_admin(app, backend, proxy_config)
 
     @app.get("/", include_in_schema=False)
@@ -217,6 +234,7 @@ def create_app(
                     anth_request,
                     openai_body,
                     _backend_authorization(request, backend.config),
+                    metrics=server_metrics,
                 ),
                 media_type="text/event-stream",
             )
@@ -227,6 +245,11 @@ def create_app(
                 _backend_authorization(request, backend.config),
             )
             internal = openai_response_to_internal(data)
+            # Stats record the real backend token counts, before any
+            # Claude Code context scaling is applied to the client reply.
+            record_chat_response(
+                server_metrics, data, fallback_model=str(anth_request.model)
+            )
             active_config = backend.config
             prompt_tokens = scale_token_count(internal.prompt_tokens, active_config)
             completion_tokens = scale_token_count(
@@ -291,7 +314,15 @@ def create_app(
 
         if cc_body.get("stream"):
             return StreamingResponse(
-                stream_responses_events(backend, cc_body, auth, resp_id, model, created_at),
+                stream_responses_events(
+                    backend,
+                    cc_body,
+                    auth,
+                    resp_id,
+                    model,
+                    created_at,
+                    metrics=server_metrics,
+                ),
                 media_type="text/event-stream",
             )
 
@@ -299,6 +330,7 @@ def create_app(
             data = await backend.chat_completion(cc_body, auth)
         except Exception as exc:
             raise _backend_http_exception(exc)
+        record_chat_response(server_metrics, data, fallback_model=str(model))
         return non_streaming_responses_response(data, resp_id, created_at)
 
     @app.api_route(
@@ -318,7 +350,9 @@ def create_app(
     )
     async def passthrough(request: Request):
         path = request.url.path.removeprefix("/v1/")
-        return await _passthrough_backend(request, backend, path)
+        return await _passthrough_backend(
+            request, backend, path, metrics=server_metrics
+        )
 
     return app
 
@@ -369,57 +403,86 @@ async def _stream_anthropic_response(
     request: MessagesRequest,
     openai_body: dict[str, Any],
     inbound_authorization: str | None,
+    metrics: ServerMetrics | None = None,
 ) -> AsyncIterator[str]:
     adapter = AnthropicAdapter()
     first = True
     sent_last = False
     last_usage: tuple[int, int, int] = (0, 0, 0)
     keepalive = anthropic_keepalive_frame(config)
+    request_start = time.monotonic()
+    first_chunk_at: float | None = None
+    seen_model = ""
 
     try:
-        async for item in backend.stream_chat_completion(
-            openai_body,
-            inbound_authorization,
-        ):
-            if item == "[DONE]":
-                break
-            if not isinstance(item, dict):
-                continue
+        try:
+            async for item in backend.stream_chat_completion(
+                openai_body,
+                inbound_authorization,
+            ):
+                if item == "[DONE]":
+                    break
+                if not isinstance(item, dict):
+                    continue
+                if first_chunk_at is None and item.get("choices"):
+                    first_chunk_at = time.monotonic()
+                if item.get("model"):
+                    seen_model = str(item["model"])
 
-            chunk = openai_chunk_to_stream_chunk(item, is_first=first)
-            first = False
-            if chunk.prompt_tokens or chunk.completion_tokens or chunk.cached_tokens:
-                last_usage = (
-                    chunk.prompt_tokens,
-                    chunk.completion_tokens,
-                    chunk.cached_tokens,
+                chunk = openai_chunk_to_stream_chunk(item, is_first=first)
+                first = False
+                if (
+                    chunk.prompt_tokens
+                    or chunk.completion_tokens
+                    or chunk.cached_tokens
+                ):
+                    last_usage = (
+                        chunk.prompt_tokens,
+                        chunk.completion_tokens,
+                        chunk.cached_tokens,
+                    )
+                if chunk.is_last:
+                    chunk.prompt_tokens = scale_token_count(last_usage[0], config)
+                    chunk.completion_tokens = scale_token_count(last_usage[1], config)
+                    chunk.cached_tokens = scale_token_count(last_usage[2], config)
+                    sent_last = True
+                formatted = adapter.format_stream_chunk(chunk, request)
+                if formatted:
+                    yield formatted
+                elif keepalive:
+                    await asyncio.sleep(0)
+
+            if not sent_last:
+                prompt, completion, cached = last_usage
+                yield adapter.format_stream_chunk(
+                    StreamChunk(
+                        is_first=first,
+                        is_last=True,
+                        finish_reason="stop",
+                        prompt_tokens=scale_token_count(prompt, config),
+                        completion_tokens=scale_token_count(completion, config),
+                        cached_tokens=scale_token_count(cached, config),
+                    ),
+                    request,
                 )
-            if chunk.is_last:
-                chunk.prompt_tokens = scale_token_count(last_usage[0], config)
-                chunk.completion_tokens = scale_token_count(last_usage[1], config)
-                chunk.cached_tokens = scale_token_count(last_usage[2], config)
-                sent_last = True
-            formatted = adapter.format_stream_chunk(chunk, request)
-            if formatted:
-                yield formatted
-            elif keepalive:
-                await asyncio.sleep(0)
-
-        if not sent_last:
-            prompt, completion, cached = last_usage
-            yield adapter.format_stream_chunk(
-                StreamChunk(
-                    is_first=first,
-                    is_last=True,
-                    finish_reason="stop",
-                    prompt_tokens=scale_token_count(prompt, config),
-                    completion_tokens=scale_token_count(completion, config),
-                    cached_tokens=scale_token_count(cached, config),
-                ),
-                request,
-            )
-    except Exception as exc:
-        yield adapter.format_error_event(str(exc))
+        except Exception as exc:
+            yield adapter.format_error_event(str(exc))
+    finally:
+        end = time.monotonic()
+        prefill_duration = 0.0
+        generation_duration = 0.0
+        if first_chunk_at is not None:
+            prefill_duration = max(0.0, first_chunk_at - request_start)
+            generation_duration = max(0.0, end - first_chunk_at)
+        record_request(
+            metrics,
+            model_id=seen_model or str(openai_body.get("model") or ""),
+            prompt_tokens=last_usage[0],
+            completion_tokens=last_usage[1],
+            cached_tokens=last_usage[2],
+            prefill_duration=prefill_duration,
+            generation_duration=generation_duration,
+        )
 
 
 def apply_proxy_request_defaults(
@@ -449,7 +512,9 @@ def apply_proxy_request_defaults(
         ("repetition_penalty", "sampling_repetition_penalty"),
     )
     for request_key, global_key in sampling_fields:
-        value = _first_configured(model_settings.get(request_key), overrides.get(global_key))
+        value = _first_configured(
+            model_settings.get(request_key), overrides.get(global_key)
+        )
         if value is None:
             continue
         if force or body.get(request_key) is None:
@@ -520,8 +585,10 @@ async def _passthrough_backend(
     request: Request,
     backend: OpenAIBackend,
     path: str,
+    metrics: ServerMetrics | None = None,
 ) -> Response:
     body = await request.body()
+    track_stats = metrics is not None and path in {"chat/completions", "completions"}
     if path in {"chat/completions", "completions"}:
         body = _body_with_proxy_defaults(
             body,
@@ -532,13 +599,29 @@ async def _passthrough_backend(
     wants_stream = _body_requests_stream(body)
 
     if wants_stream:
+        send_body = body
+        injected_usage = False
+        if track_stats:
+            send_body, injected_usage = inject_include_usage(body)
+        request_start = time.monotonic()
         try:
             response = await backend.raw_stream(
                 request.method,
                 path,
-                body,
+                send_body,
                 headers,
             )
+            if injected_usage and response.status_code >= 400:
+                # Backend rejected stream_options; retry untouched so the
+                # client still gets a response (stats lose usage counts).
+                await response.aclose()
+                injected_usage = False
+                response = await backend.raw_stream(
+                    request.method,
+                    path,
+                    body,
+                    headers,
+                )
         except Exception as exc:
             raise _backend_http_exception(exc)
 
@@ -549,8 +632,18 @@ async def _passthrough_backend(
             finally:
                 await response.aclose()
 
+        stream: AsyncIterator[bytes] = iterator()
+        if track_stats and response.status_code < 400:
+            stream = track_usage_stream(
+                stream,
+                metrics=metrics,
+                model_id=model_from_body(body),
+                request_start=request_start,
+                strip_usage_chunk=injected_usage,
+            )
+
         return StreamingResponse(
-            iterator(),
+            stream,
             status_code=response.status_code,
             media_type=response.headers.get("content-type", "text/event-stream"),
         )
@@ -559,6 +652,12 @@ async def _passthrough_backend(
         response = await backend.raw_request(request.method, path, body, headers)
     except Exception as exc:
         raise _backend_http_exception(exc)
+    if track_stats and response.status_code < 400:
+        try:
+            data = json.loads(response.content.decode("utf-8"))
+        except Exception:
+            data = None
+        record_chat_response(metrics, data, fallback_model=model_from_body(body))
     return Response(
         content=response.content,
         status_code=response.status_code,

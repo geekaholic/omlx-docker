@@ -248,9 +248,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
         if new_type in SIDECAR_BACKEND_TYPES:
             # Sidecar URLs are managed by the compose stack; the field is
             # readonly in the UI and enforced here for any other caller.
-            state.global_overrides["proxy_backend_url"] = _default_backend_url(
-                new_type
-            )
+            state.global_overrides["proxy_backend_url"] = _default_backend_url(new_type)
         _archive_backend_profile(state, new_type)
         if proxy_updates or type_changed:
             backend.config = _config_with_proxy_overrides(backend.config, state)
@@ -290,9 +288,8 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             ),
             "runtime_applied": runtime_applied,
             "compose": compose_result,
-            "requires_restart": bool(sidecar_updates) or (
-                type_changed and new_type in SIDECAR_BACKEND_TYPES
-            ),
+            "requires_restart": bool(sidecar_updates)
+            or (type_changed and new_type in SIDECAR_BACKEND_TYPES),
             "restart_required_settings": ["proxy_host", "proxy_port", "sidecar"],
         }
 
@@ -387,12 +384,28 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
     @router.get("/api/stats")
     async def stats(model: str = "", scope: str = "session"):
         models = await _admin_models(backend, state)
-        return _stats_payload(backend.config, state, models)
+        metrics_obj = getattr(app.state, "server_metrics", None)
+        snapshot = (
+            metrics_obj.get_snapshot(model_id=model, scope=scope)
+            if metrics_obj is not None
+            else None
+        )
+        return _stats_payload(backend.config, state, models, snapshot=snapshot)
 
     @router.post("/api/stats/clear")
-    @router.post("/api/stats/clear-alltime")
     async def clear_stats():
-        state.log("cleared proxy dashboard stats")
+        metrics_obj = getattr(app.state, "server_metrics", None)
+        if metrics_obj is not None:
+            metrics_obj.clear_metrics()
+        state.log("cleared proxy session stats")
+        return {"status": "ok"}
+
+    @router.post("/api/stats/clear-alltime")
+    async def clear_alltime_stats():
+        metrics_obj = getattr(app.state, "server_metrics", None)
+        if metrics_obj is not None:
+            metrics_obj.clear_alltime_metrics()
+        state.log("cleared proxy all-time stats")
         return {"status": "ok"}
 
     @router.post("/api/ssd-cache/clear")
@@ -405,7 +418,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
 
     @router.get("/api/logs")
     async def logs(lines: int = 200, file: str = "server.log"):
-        content = "\n".join(state.logs[-max(1, min(lines, 1000)):])
+        content = "\n".join(state.logs[-max(1, min(lines, 1000)) :])
         return {
             "logs": content,
             "total_lines": len(state.logs),
@@ -597,7 +610,6 @@ def _apply_env_sampling_overrides(state: ProxyAdminState) -> None:
         )
 
 
-
 def _coerce_sampling_env_value(key: str, value: str) -> int | float | str:
     try:
         if key in {"sampling_max_tokens", "sampling_top_k"}:
@@ -605,7 +617,6 @@ def _coerce_sampling_env_value(key: str, value: str) -> int | float | str:
         return float(value)
     except ValueError:
         return value
-
 
 
 def _config_with_proxy_overrides(
@@ -720,7 +731,10 @@ def _extract_sidecar_compose_updates(
     updates = {key: payload[key] for key in fields if key in payload}
     if not updates:
         return {}
-    if "sampling_max_context_window" in payload and "omni_context_length" not in updates:
+    if (
+        "sampling_max_context_window" in payload
+        and "omni_context_length" not in updates
+    ):
         updates["omni_context_length"] = payload["sampling_max_context_window"]
     if "max_concurrent_requests" in payload and "omni_max_parallel" not in updates:
         updates["omni_max_parallel"] = payload["max_concurrent_requests"]
@@ -919,7 +933,9 @@ def _write_sidecar_compose_if_configured(
     errors = []
     if env_path is not None:
         try:
-            written_env = write_env_file(env_path, spec.environment(settings), spec.env_keys)
+            written_env = write_env_file(
+                env_path, spec.environment(settings), spec.env_keys
+            )
         except Exception as exc:
             state.log(f"failed to write {backend} env file: {exc}")
             errors.append(str(exc))
@@ -1165,7 +1181,9 @@ def _global_settings_payload(
                 "sampling_max_context_window",
                 sidecar_settings.context_length,
             ),
-            "max_tokens": overrides.get("sampling_max_tokens", config.actual_context_size),
+            "max_tokens": overrides.get(
+                "sampling_max_tokens", config.actual_context_size
+            ),
             "temperature": overrides.get("sampling_temperature", 1.0),
             "top_p": overrides.get("sampling_top_p", 1.0),
             "top_k": overrides.get("sampling_top_k", 0),
@@ -1224,12 +1242,11 @@ def _stats_payload(
     state: ProxyAdminState,
     models: list[dict[str, Any]],
     metrics: dict[str, Any] | None = None,
+    snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     uptime = max(0.0, time.time() - state.started_at)
     metrics = metrics or {}
     summary = metrics.get("summary") or {}
-    prompt_tokens = int(summary.get("prompt_tokens_total") or 0)
-    generation_tokens = int(summary.get("generation_tokens_total") or 0)
     running = int(summary.get("running_requests") or 0)
     waiting = int(summary.get("waiting_requests") or 0)
     active_models = [
@@ -1252,21 +1269,23 @@ def _stats_payload(
         }
         for m in models
     ]
+    snapshot = snapshot or {}
     return {
         "uptime_seconds": uptime,
         "host": config.host,
         "port": config.port,
         "api_key": config.proxy_api_key or "",
         "cli_prefix": "omni",
-        "total_requests": int(summary.get("requests_total") or 0),
+        "total_requests": int(snapshot.get("total_requests") or 0),
         "active_requests": running,
         "waiting_requests": waiting,
-        "total_prompt_tokens": prompt_tokens,
-        "total_completion_tokens": generation_tokens,
-        "total_cached_tokens": 0,
-        "cache_efficiency": 0.0,
-        "avg_prefill_tps": 0.0,
-        "avg_generation_tps": 0.0,
+        "total_prompt_tokens": int(snapshot.get("total_prompt_tokens") or 0),
+        "total_completion_tokens": int(snapshot.get("total_completion_tokens") or 0),
+        "total_cached_tokens": int(snapshot.get("total_cached_tokens") or 0),
+        "total_tokens_served": int(snapshot.get("total_tokens_served") or 0),
+        "cache_efficiency": float(snapshot.get("cache_efficiency") or 0.0),
+        "avg_prefill_tps": float(snapshot.get("avg_prefill_tps") or 0.0),
+        "avg_generation_tps": float(snapshot.get("avg_generation_tps") or 0.0),
         "claude_code_context_scaling_enabled": config.context_scaling_enabled,
         "claude_code_target_context_size": config.target_context_size,
         "engines": {"mode": "proxy", "backend_url": config.normalized_backend_url},
