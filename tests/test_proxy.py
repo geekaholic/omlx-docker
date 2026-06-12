@@ -1280,3 +1280,38 @@ async def test_sidecar_env_matching_state_leaves_overrides_alone(monkeypatch, tm
     config = response.json()
     assert config["backend_type"] == "vllm"
     assert config["backend_api_key_set"] is True
+
+
+@pytest.mark.asyncio
+async def test_standalone_launch_clears_stale_sidecar_state(monkeypatch, tmp_path):
+    """Without OMLX_SIDECAR_BACKEND, a persisted sidecar type is stale."""
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "model_settings": {},
+                "global_overrides": {
+                    "proxy_backend_type": "vllm",
+                    "proxy_backend_url": "http://vllm:8000/v1",
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(state_path))
+    monkeypatch.delenv("OMLX_SIDECAR_BACKEND", raising=False)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/admin/api/proxy/config")
+
+    assert response.status_code == 200
+    config = response.json()
+    assert config["backend_type"] == "openai-compatible"
+    # Falls back to the env/config-provided URL, not the dead vllm host.
+    assert config["backend_url"] != "http://vllm:8000/v1"

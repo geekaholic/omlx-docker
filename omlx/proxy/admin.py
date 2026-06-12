@@ -1029,10 +1029,24 @@ def _reconcile_sidecar_backend_state(state: ProxyAdminState) -> None:
     the compose-managed URL.
     """
     sidecar = os.getenv("OMLX_SIDECAR_BACKEND", "").strip().lower()
+    current_type = _proxy_backend_type(state)
     if sidecar not in ("vllm", "llamacpp"):
+        # Standalone proxy stack (openai-compatible). A persisted sidecar
+        # type would route to a compose hostname that doesn't exist here;
+        # drop the stale overrides so the env-provided backend URL wins.
+        if current_type not in SIDECAR_BACKEND_TYPES:
+            return
+        _archive_backend_profile(state, current_type)
+        state.global_overrides["proxy_backend_type"] = "openai-compatible"
+        state.global_overrides.pop("proxy_backend_url", None)
+        state.global_overrides.pop("proxy_backend_api_key", None)
+        state.log(
+            f"standalone proxy launch overrode persisted sidecar backend "
+            f"type {current_type!r}; routing to the configured backend URL"
+        )
+        state.save()
         return
     expected_type = "llama.cpp" if sidecar == "llamacpp" else "vllm"
-    current_type = _proxy_backend_type(state)
     if current_type == expected_type:
         return
     _archive_backend_profile(state, current_type)
