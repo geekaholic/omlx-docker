@@ -23,6 +23,17 @@ vllm:num_requests_running{model_name="qwen"} 0.0
 vllm:gpu_prefix_cache_hit_rate{model_name="qwen"} 0.4
 """
 
+# Observed on vllm/vllm-openai:latest (June 2026, DGX Spark): the gpu_
+# prefix is gone and external_* families must not be double-counted.
+_VLLM_2026_TEXT = """\
+vllm:num_requests_running{engine="0",model_name="gemma"} 1.0
+vllm:kv_cache_usage_perc{engine="0",model_name="gemma"} 0.37
+vllm:prefix_cache_queries_total{engine="0",model_name="gemma"} 800.0
+vllm:prefix_cache_hits_total{engine="0",model_name="gemma"} 200.0
+vllm:external_prefix_cache_queries_total{engine="0",model_name="gemma"} 999.0
+vllm:external_prefix_cache_hits_total{engine="0",model_name="gemma"} 999.0
+"""
+
 _LLAMACPP_TEXT = """\
 # HELP llamacpp:prompt_tokens_total Number of prompt tokens processed.
 llamacpp:prompt_tokens_total 1024.0
@@ -55,6 +66,14 @@ def test_vllm_v1_summary_computes_prefix_hit_rate():
 def test_vllm_v0_hit_rate_gauge_fallback():
     summary = summarize_selected_metrics(_selected(_VLLM_V0_TEXT))
     assert summary["prefix_cache_hit_rate"] == 40.0
+
+
+def test_vllm_2026_renamed_metrics_selected_without_external_families():
+    summary = summarize_selected_metrics(_selected(_VLLM_2026_TEXT))
+    assert summary["prefix_cache_queries"] == 800.0
+    assert summary["prefix_cache_hits"] == 200.0
+    assert summary["prefix_cache_hit_rate"] == 25.0
+    assert summary["gpu_cache_usage_perc"] == 0.37
 
 
 def test_llamacpp_metrics_selected():

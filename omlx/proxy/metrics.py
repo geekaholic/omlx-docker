@@ -223,19 +223,26 @@ def select_prometheus_metrics(samples: list[dict[str, Any]]) -> dict[str, float]
         "gpu_cache_usage_perc": (
             "vllm:gpu_cache_usage_perc",
             "vllm_gpu_cache_usage_perc",
+            # Renamed in 2026 vLLM releases (unified-memory friendly name).
+            "vllm:kv_cache_usage_perc",
             "gpu_cache_usage_perc",
         ),
         # vLLM prefix cache: v1 exposes hit/query counters (the client
-        # appends _total); v0 exposed a 0..1 hit-rate gauge instead.
+        # appends _total); v0 exposed a 0..1 hit-rate gauge instead. Newer
+        # builds dropped the gpu_ prefix — keep the vllm:-prefixed names
+        # first so suffix matching never picks up the *external_* prefix
+        # cache families (they would double-count).
         "prefix_cache_queries": (
             "vllm:gpu_prefix_cache_queries_total",
             "vllm:gpu_prefix_cache_queries",
+            "vllm:prefix_cache_queries_total",
             "gpu_prefix_cache_queries_total",
             "gpu_prefix_cache_queries",
         ),
         "prefix_cache_hits": (
             "vllm:gpu_prefix_cache_hits_total",
             "vllm:gpu_prefix_cache_hits",
+            "vllm:prefix_cache_hits_total",
             "gpu_prefix_cache_hits_total",
             "gpu_prefix_cache_hits",
         ),

@@ -76,7 +76,9 @@ def test_scale_token_count_uses_target_context_ratio():
 @pytest.mark.asyncio
 async def test_proxy_root_redirects_to_admin_dashboard():
     async def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError(f"root redirect should not reach backend: {request.url.path}")
+        raise AssertionError(
+            f"root redirect should not reach backend: {request.url.path}"
+        )
 
     app = _app_with_mock_backend(handler)
 
@@ -369,14 +371,18 @@ def _app_with_mock_backend(handler):
 
 
 @pytest.mark.asyncio
-async def test_proxy_applies_saved_sampling_defaults_to_openai_passthrough(monkeypatch, tmp_path):
+async def test_proxy_applies_saved_sampling_defaults_to_openai_passthrough(
+    monkeypatch, tmp_path
+):
     state_path = tmp_path / "state.json"
     monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(state_path))
     seen_request = {}
 
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":
-            return httpx.Response(200, json={"object": "list", "data": [{"id": "qwen"}]})
+            return httpx.Response(
+                200, json={"object": "list", "data": [{"id": "qwen"}]}
+            )
         assert request.url.path == "/v1/chat/completions"
         seen_request.update(json.loads(request.content.decode()))
         return httpx.Response(200, json={"model": "qwen", "choices": [], "usage": {}})
@@ -410,14 +416,18 @@ async def test_proxy_applies_saved_sampling_defaults_to_openai_passthrough(monke
 
 
 @pytest.mark.asyncio
-async def test_proxy_model_force_sampling_overrides_openai_request(monkeypatch, tmp_path):
+async def test_proxy_model_force_sampling_overrides_openai_request(
+    monkeypatch, tmp_path
+):
     state_path = tmp_path / "state.json"
     monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(state_path))
     seen_request = {}
 
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":
-            return httpx.Response(200, json={"object": "list", "data": [{"id": "qwen"}]})
+            return httpx.Response(
+                200, json={"object": "list", "data": [{"id": "qwen"}]}
+            )
         seen_request.update(json.loads(request.content.decode()))
         return httpx.Response(200, json={"model": "qwen", "choices": [], "usage": {}})
 
@@ -453,7 +463,10 @@ async def test_proxy_model_force_sampling_overrides_openai_request(monkeypatch, 
     assert response.status_code == 200
     assert seen_request["temperature"] == 0.1
     assert seen_request["top_k"] == 20
-    assert seen_request["chat_template_kwargs"] == {"foo": "bar", "enable_thinking": False}
+    assert seen_request["chat_template_kwargs"] == {
+        "foo": "bar",
+        "enable_thinking": False,
+    }
     assert seen_request["thinking_budget"] == 512
 
 
@@ -640,7 +653,9 @@ async def test_proxy_backend_config_updates_runtime_and_persists(monkeypatch, tm
         assert response.status_code == 200
         assert response.json()["data"][0]["id"] == "new-backend-model"
 
-    model_requests = [request for request in seen_requests if request.url.path == "/v1/models"]
+    model_requests = [
+        request for request in seen_requests if request.url.path == "/v1/models"
+    ]
     assert model_requests[-1].url.host == "new-backend"
     assert model_requests[-1].headers["authorization"] == "Bearer backend-secret"
 
@@ -805,7 +820,9 @@ async def test_admin_vllm_settings_save_writes_env_and_compose(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
-async def test_admin_llamacpp_settings_save_writes_env_and_compose(monkeypatch, tmp_path):
+async def test_admin_llamacpp_settings_save_writes_env_and_compose(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
     compose_path = tmp_path / "docker-compose.llamacpp.yml"
     env_path = tmp_path / "docker-compose.llamacpp.env"
@@ -867,7 +884,9 @@ async def test_proxy_sampling_defaults_seed_from_env(monkeypatch, tmp_path):
 
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":
-            return httpx.Response(200, json={"object": "list", "data": [{"id": "qwen"}]})
+            return httpx.Response(
+                200, json={"object": "list", "data": [{"id": "qwen"}]}
+            )
         seen_request.update(json.loads(request.content.decode()))
         return httpx.Response(200, json={"model": "qwen", "choices": [], "usage": {}})
 
@@ -1049,12 +1068,17 @@ async def test_backend_profiles_round_trip(monkeypatch, tmp_path):
 
     saved = json.loads(state_path.read_text())
     profiles = saved["backend_profiles"]
-    assert profiles["openai-compatible"]["proxy_backend_url"] == "http://my-ollama:11434/v1"
+    assert (
+        profiles["openai-compatible"]["proxy_backend_url"]
+        == "http://my-ollama:11434/v1"
+    )
     assert profiles["llama.cpp"]["proxy_backend_url"] == "http://llamacpp:8000/v1"
 
 
 @pytest.mark.asyncio
-async def test_global_settings_payload_exposes_backend_url_defaults(monkeypatch, tmp_path):
+async def test_global_settings_payload_exposes_backend_url_defaults(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -1075,7 +1099,10 @@ async def test_global_settings_payload_exposes_backend_url_defaults(monkeypatch,
     }
     assert proxy["backend_url_locked"] == ["vllm", "llama.cpp"]
     profiles = proxy["backend_profiles"]
-    assert profiles["openai-compatible"]["backend_url"] == "http://host.docker.internal:11434/v1"
+    assert (
+        profiles["openai-compatible"]["backend_url"]
+        == "http://host.docker.internal:11434/v1"
+    )
     assert profiles["vllm"]["backend_url"] == "http://vllm:8000/v1"
 
 
@@ -1178,3 +1205,78 @@ async def test_global_settings_payload_reports_docker_socket(monkeypatch, tmp_pa
     socket_path.touch()
     monkeypatch.setenv("OMLX_DOCKER_SOCK", str(socket_path))
     assert (await fetch_payload())["docker_socket_available"] is True
+
+
+@pytest.mark.asyncio
+async def test_sidecar_launch_overrides_stale_backend_state(monkeypatch, tmp_path):
+    """OMLX_SIDECAR_BACKEND wins over a state file from another stack."""
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "model_settings": {},
+                "global_overrides": {
+                    "proxy_backend_type": "llama.cpp",
+                    "proxy_backend_url": "http://llamacpp:8000/v1",
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(state_path))
+    monkeypatch.setenv("OMLX_SIDECAR_BACKEND", "vllm")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/admin/api/proxy/config")
+
+    assert response.status_code == 200
+    config = response.json()
+    assert config["backend_type"] == "vllm"
+    assert config["backend_url"] == "http://vllm:8000/v1"
+    # The state file was rewritten so the next boot agrees.
+    saved = json.loads(state_path.read_text())
+    assert saved["global_overrides"]["proxy_backend_type"] == "vllm"
+    # The llama.cpp profile was archived for switching back.
+    assert (
+        saved["backend_profiles"]["llama.cpp"]["proxy_backend_url"]
+        == "http://llamacpp:8000/v1"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sidecar_env_matching_state_leaves_overrides_alone(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "model_settings": {},
+                "global_overrides": {
+                    "proxy_backend_type": "vllm",
+                    "proxy_backend_api_key": "sk-keep",
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(state_path))
+    monkeypatch.setenv("OMLX_SIDECAR_BACKEND", "vllm")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/admin/api/proxy/config")
+
+    assert response.status_code == 200
+    config = response.json()
+    assert config["backend_type"] == "vllm"
+    assert config["backend_api_key_set"] is True

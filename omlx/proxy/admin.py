@@ -104,6 +104,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
     state_path = Path(os.getenv("OMLX_PROXY_STATE_PATH", "/data/proxy-state.json"))
     state = ProxyAdminState.load(state_path)
     _apply_env_sampling_overrides(state)
+    _reconcile_sidecar_backend_state(state)
     app.state.proxy_admin_state = state
     _apply_proxy_backend_overrides(backend, config, state)
     templates = _templates()
@@ -1015,6 +1016,35 @@ def _default_backend_url(backend_type: str) -> str:
     return BACKEND_URL_DEFAULTS.get(
         backend_type, BACKEND_URL_DEFAULTS["openai-compatible"]
     )
+
+
+def _reconcile_sidecar_backend_state(state: ProxyAdminState) -> None:
+    """Make a CLI sidecar launch authoritative over persisted overrides.
+
+    ``omni serve --backend X`` sets OMLX_SIDECAR_BACKEND for the proxy
+    container. If the operator switched stacks since the state file was
+    written, the saved backend type/URL would still point the proxy at the
+    previous (now stopped) sidecar hostname. Mirror the admin UI's
+    type-switch flow: archive the old profile, seed the new one, and pin
+    the compose-managed URL.
+    """
+    sidecar = os.getenv("OMLX_SIDECAR_BACKEND", "").strip().lower()
+    if sidecar not in ("vllm", "llamacpp"):
+        return
+    expected_type = "llama.cpp" if sidecar == "llamacpp" else "vllm"
+    current_type = _proxy_backend_type(state)
+    if current_type == expected_type:
+        return
+    _archive_backend_profile(state, current_type)
+    state.global_overrides.update(_backend_profile_seed(state, expected_type))
+    state.global_overrides["proxy_backend_type"] = expected_type
+    state.global_overrides["proxy_backend_url"] = _default_backend_url(expected_type)
+    _archive_backend_profile(state, expected_type)
+    state.log(
+        f"sidecar launch ({sidecar}) overrode persisted backend type "
+        f"{current_type!r}; now routing to {expected_type!r}"
+    )
+    state.save()
 
 
 def _archive_backend_profile(state: ProxyAdminState, backend_type: str) -> None:

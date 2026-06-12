@@ -93,9 +93,9 @@ def test_env_file_round_trip(tmp_path):
 def test_env_from_compose_parses_default_expressions(tmp_path):
     compose = tmp_path / "compose.yml"
     compose.write_text(
-        'services:\n'
-        '  x:\n'
-        '    environment:\n'
+        "services:\n"
+        "  x:\n"
+        "    environment:\n"
         '      OMNI_MODEL: "${OMNI_MODEL:-a/b}"\n'
         '      OMNI_CONTEXT_LENGTH: "${OMNI_CONTEXT_LENGTH:-16384}"\n'
         '      OTHER: "literal"\n'
@@ -126,7 +126,10 @@ def test_proxy_service_parity_between_backends():
         .replace("- llamacpp", "- vllm")
     )
     assert normalized == vllm_proxy
-    assert 'OMLX_COMPOSE_OUTPUT_PATH: "/compose-output/docker-compose.vllm.yml"' in vllm_proxy
+    assert (
+        'OMLX_COMPOSE_OUTPUT_PATH: "/compose-output/docker-compose.vllm.yml"'
+        in vllm_proxy
+    )
     assert "OMLX_ACTUAL_CONTEXT_SIZE" in vllm_proxy
     assert "${OMNI_CONTEXT_LENGTH:-8192}" in vllm_proxy
 
@@ -155,3 +158,10 @@ def test_sidecar_reloads_env_file_on_restart():
         assert f'if [ -f "/compose-output/{env_name}" ]' in content
         assert f'done < "/compose-output/{env_name}"' in content
         assert 'export "$$omni_env_line"' in content
+
+
+def test_vllm_compose_enables_prompt_tokens_details():
+    # Proxy serving stats need usage.prompt_tokens_details.cached_tokens,
+    # which vLLM only reports with this flag.
+    content = render_vllm_compose(VllmComposeSettings())
+    assert "--enable-prompt-tokens-details" in content

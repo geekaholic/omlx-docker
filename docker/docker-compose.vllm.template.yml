@@ -148,6 +148,7 @@ services:
         set -- "$${@}" --gpu-memory-utilization "$${VLLM_GPU_MEMORY_UTILIZATION:-0.80}"
         set -- "$${@}" --max-num-seqs "$${OMNI_MAX_PARALLEL:-4}"
         set -- "$${@}" --generation-config "$${VLLM_GENERATION_CONFIG:-vllm}"
+        set -- "$${@}" --enable-prompt-tokens-details
         if [ -n "$${VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS:-}" ]; then
           set -- "$${@}" --default-chat-template-kwargs "$${VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS}"
         fi
