@@ -3044,7 +3044,13 @@
             activeModelsPressureLabel() {
                 const mp = this.stats.active_models?.memory_pressure;
                 if (!mp || !mp.enabled || !mp.hard_bytes) {
-                    return window.t('status.active_models.enforcer_disabled');
+                    // Proxy mode has no MLX memory enforcer; the bar is fed
+                    // by backend-reported memory when available instead.
+                    return this.proxyMode ? '—' : window.t('status.active_models.enforcer_disabled');
+                }
+                if (!mp.soft_bytes || mp.soft_bytes >= mp.hard_bytes) {
+                    // No distinct soft limit (llama.cpp/Ollama backends).
+                    return `${this.formatSizeBytes(mp.current_bytes)} / ${this.formatSizeBytes(mp.hard_bytes)}`;
                 }
                 return `${this.formatSizeBytes(mp.current_bytes)} / ${this.formatSizeBytes(mp.soft_bytes)} soft / ${this.formatSizeBytes(mp.hard_bytes)} hard`;
             },

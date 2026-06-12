@@ -76,3 +76,24 @@ def test_llamacpp_summary_exposes_kv_cache():
     assert summary["prompt_tokens_seconds"] == 120.5
     assert summary["predicted_tokens_seconds"] == 35.2
     assert summary["prefix_cache_hit_rate"] is None
+
+
+def test_host_memory_info_parses_meminfo(tmp_path):
+    from omlx.proxy.metrics import host_memory_info
+
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text(
+        "MemTotal:       127600524 kB\n"
+        "MemFree:        99159460 kB\n"
+        "MemAvailable:   111584904 kB\n"
+    )
+    info = host_memory_info(str(meminfo))
+    assert info["total_bytes"] == 127600524 * 1024
+    assert info["available_bytes"] == 111584904 * 1024
+
+
+def test_host_memory_info_zero_when_unreadable(tmp_path):
+    from omlx.proxy.metrics import host_memory_info
+
+    info = host_memory_info(str(tmp_path / "missing"))
+    assert info == {"total_bytes": 0, "available_bytes": 0}

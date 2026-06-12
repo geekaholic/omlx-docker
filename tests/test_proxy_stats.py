@@ -528,6 +528,81 @@ async def test_stats_active_models_ollama_shows_size_and_ttl(monkeypatch, tmp_pa
     assert active["model_memory_used"] == 8 * 1024**3
 
 
+@pytest.mark.asyncio
+async def test_stats_memory_pressure_populated_from_ollama(monkeypatch, tmp_path):
+    import omlx.proxy.admin as proxy_admin
+
+    monkeypatch.setattr(
+        proxy_admin,
+        "host_memory_info",
+        lambda: {"total_bytes": 32 * 1024**3, "available_bytes": 16 * 1024**3},
+    )
+    app = _make_app(_ollama_handler_factory(), monkeypatch, tmp_path)
+    async with _client(app) as client:
+        stats = await _get_stats(client)
+
+    active = stats["active_models"]
+    mp = active["memory_pressure"]
+    assert mp["enabled"] is True
+    assert mp["current_bytes"] == 8 * 1024**3
+    assert mp["soft_bytes"] == 0
+    assert mp["hard_bytes"] == 32 * 1024**3
+    assert mp["pressure_level"] == "ok"
+    assert active["model_memory_max"] == 32 * 1024**3
+
+
+def test_active_models_memory_pressure_sidecar_branch():
+    from omlx.proxy.admin import _active_models_payload
+
+    metrics = {
+        "summary": {"running_requests": 1, "waiting_requests": 0},
+        "ollama": {},
+    }
+    payload = _active_models_payload(
+        [{"id": "qwen"}],
+        metrics,
+        memory={
+            "host_total_bytes": 32 * 1024**3,
+            "sidecar_bytes": 8 * 1024**3,
+            "soft_fraction": 0.8,
+        },
+    )
+
+    mp = payload["memory_pressure"]
+    assert mp["enabled"] is True
+    assert mp["current_bytes"] == 8 * 1024**3
+    assert mp["soft_bytes"] == int(32 * 1024**3 * 0.8)
+    assert mp["hard_bytes"] == 32 * 1024**3
+    assert mp["pressure_level"] == "ok"
+    row = payload["models"][0]
+    assert row["estimated_size"] == 8 * 1024**3
+    assert "GB" in row["estimated_size_formatted"]
+    assert payload["model_memory_used"] == 8 * 1024**3
+
+
+def test_active_models_memory_pressure_disabled_without_signals():
+    from omlx.proxy.admin import _active_models_payload
+
+    payload = _active_models_payload([{"id": "qwen"}], {"summary": {}}, memory=None)
+
+    mp = payload["memory_pressure"]
+    assert mp["enabled"] is False
+    assert mp["hard_bytes"] == 0
+    assert payload["models"][0]["estimated_size_formatted"] == "remote"
+
+
+def test_memory_pressure_levels():
+    from omlx.proxy.admin import _memory_pressure_payload
+
+    gib = 1024**3
+    ok = _memory_pressure_payload(10 * gib, 24 * gib, 32 * gib)
+    assert ok["pressure_level"] == "ok"
+    soft = _memory_pressure_payload(28 * gib, 24 * gib, 32 * gib)
+    assert soft["pressure_level"] == "soft"
+    hard = _memory_pressure_payload(33 * gib, 24 * gib, 32 * gib)
+    assert hard["pressure_level"] == "hard"
+
+
 _VLLM_METRICS_TEXT = """\
 # HELP vllm:num_requests_running Number of requests currently running.
 vllm:num_requests_running{model_name="qwen"} 2.0

@@ -56,6 +56,29 @@ async def collect_backend_metrics_cached(
     return result
 
 
+def host_memory_info(meminfo_path: str = "/proc/meminfo") -> dict[str, int]:
+    """Total/available system memory in bytes (zeros when unreadable).
+
+    Inside a container /proc/meminfo reflects the host, which on
+    unified-memory machines (DGX Spark GB10) is also the GPU memory pool —
+    so MemTotal is the real ceiling for model loading.
+    """
+    total = 0
+    available = 0
+    try:
+        with open(meminfo_path, encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemTotal:"):
+                    total = int(line.split()[1]) * 1024
+                elif line.startswith("MemAvailable:"):
+                    available = int(line.split()[1]) * 1024
+                if total and available:
+                    break
+    except (OSError, ValueError, IndexError):
+        pass
+    return {"total_bytes": total, "available_bytes": available}
+
+
 async def _collect_prometheus(backend: OpenAIBackend) -> dict[str, Any]:
     try:
         text = await backend.get_root_text("metrics")

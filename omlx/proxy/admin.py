@@ -26,8 +26,9 @@ from .docker_control import (
     DockerUnavailableError,
     docker_socket_path,
     restart_compose_service,
+    service_gpu_memory_bytes,
 )
-from .metrics import collect_backend_metrics_cached
+from .metrics import collect_backend_metrics_cached, host_memory_info
 from .sidecar_compose import (
     backend_spec,
     env_from_compose,
@@ -393,12 +394,14 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             else None
         )
         backend_metrics = await collect_backend_metrics_cached(backend)
+        memory = await _memory_context(state)
         return _stats_payload(
             backend.config,
             state,
             models,
             metrics=backend_metrics,
             snapshot=snapshot,
+            memory=memory,
         )
 
     @router.post("/api/stats/clear")
@@ -1296,15 +1299,92 @@ def _model_row(model_id: str, **overrides: Any) -> dict[str, Any]:
     return row
 
 
+# Per-process GPU memory queried via docker exec is slow (~200ms); cache it
+# beyond the 5s backend-metrics TTL since model footprint moves slowly.
+_GPU_MEMORY_TTL = 10.0
+_gpu_memory_cache: dict[str, tuple[float, int | None]] = {}
+
+
+async def _sidecar_gpu_memory_cached(service: str) -> int | None:
+    now = time.monotonic()
+    cached = _gpu_memory_cache.get(service)
+    if cached is not None and now - cached[0] < _GPU_MEMORY_TTL:
+        return cached[1]
+    try:
+        value = await service_gpu_memory_bytes(service)
+    except Exception:
+        value = None
+    _gpu_memory_cache[service] = (now, value)
+    return value
+
+
+async def _memory_context(state: ProxyAdminState) -> dict[str, Any]:
+    """Best-effort model-memory signals for the Active Models pressure bar."""
+    host = host_memory_info()
+    backend_type = _proxy_backend_type(state)
+    sidecar_bytes: int | None = None
+    soft_fraction = 0.0
+    if backend_type in SIDECAR_BACKEND_TYPES:
+        sidecar_bytes = await _sidecar_gpu_memory_cached(_sidecar_backend(state))
+        if backend_type == "vllm":
+            # vLLM's GPU budget is its declared memory-utilization share of
+            # the (unified) memory pool — surface it as the soft limit.
+            try:
+                settings = _sidecar_settings_from_files(state)
+                soft_fraction = float(
+                    getattr(settings, "gpu_memory_utilization", 0.0) or 0.0
+                )
+            except Exception:
+                soft_fraction = 0.0
+    return {
+        "host_total_bytes": int(host.get("total_bytes") or 0),
+        "sidecar_bytes": sidecar_bytes,
+        "soft_fraction": soft_fraction,
+    }
+
+
+def _memory_pressure_payload(
+    current_bytes: int,
+    soft_bytes: int,
+    hard_bytes: int,
+) -> dict[str, Any]:
+    enabled = current_bytes > 0 and hard_bytes > 0
+    level = "ok"
+    if enabled:
+        if soft_bytes and current_bytes >= soft_bytes:
+            level = "soft"
+        if current_bytes >= hard_bytes:
+            level = "hard"
+    return {
+        "enabled": enabled,
+        "current_bytes": current_bytes if enabled else 0,
+        "soft_bytes": soft_bytes if enabled else 0,
+        "hard_bytes": hard_bytes if enabled else 0,
+        "current_formatted": (
+            _format_size_bytes(current_bytes) if enabled else "remote"
+        ),
+        "soft_formatted": (
+            _format_size_bytes(soft_bytes) if enabled and soft_bytes else "remote"
+        ),
+        "hard_formatted": _format_size_bytes(hard_bytes) if enabled else "remote",
+        "pressure_level": level,
+    }
+
+
 def _active_models_payload(
     models: list[dict[str, Any]],
     metrics: dict[str, Any],
+    memory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the Active Models panel data from backend-reported state."""
     summary = metrics.get("summary") or {}
     running = int(summary.get("running_requests") or 0)
     waiting = int(summary.get("waiting_requests") or 0)
     ollama = metrics.get("ollama") or {}
+    memory = memory or {}
+    hard_bytes = int(memory.get("host_total_bytes") or 0)
+    sidecar_bytes = memory.get("sidecar_bytes")
+    soft_fraction = float(memory.get("soft_fraction") or 0.0)
 
     rows: list[dict[str, Any]]
     memory_used = 0
@@ -1336,21 +1416,21 @@ def _active_models_payload(
         if len(rows) == 1:
             rows[0]["active_requests"] = running
             rows[0]["waiting_requests"] = waiting
+        if sidecar_bytes:
+            memory_used = int(sidecar_bytes)
+            # One served model: its footprint is the sidecar's GPU memory.
+            if len(rows) == 1:
+                rows[0]["estimated_size"] = memory_used
+                rows[0]["estimated_size_formatted"] = _format_size_bytes(memory_used)
 
+    soft_bytes = int(hard_bytes * soft_fraction) if 0.0 < soft_fraction < 1.0 else 0
     return {
         "models": rows,
         "model_memory_used": memory_used,
-        "model_memory_max": 0,
-        "memory_pressure": {
-            "enabled": False,
-            "current_bytes": 0,
-            "soft_bytes": 0,
-            "hard_bytes": 0,
-            "current_formatted": "remote",
-            "soft_formatted": "remote",
-            "hard_formatted": "remote",
-            "pressure_level": "ok",
-        },
+        "model_memory_max": hard_bytes,
+        "memory_pressure": _memory_pressure_payload(
+            memory_used, soft_bytes, hard_bytes
+        ),
         "total_active_requests": running,
         "total_waiting_requests": waiting,
     }
@@ -1362,13 +1442,14 @@ def _stats_payload(
     models: list[dict[str, Any]],
     metrics: dict[str, Any] | None = None,
     snapshot: dict[str, Any] | None = None,
+    memory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     uptime = max(0.0, time.time() - state.started_at)
     metrics = metrics or {}
     summary = metrics.get("summary") or {}
     running = int(summary.get("running_requests") or 0)
     waiting = int(summary.get("waiting_requests") or 0)
-    active_models_data = _active_models_payload(models, metrics)
+    active_models_data = _active_models_payload(models, metrics, memory=memory)
     snapshot = snapshot or {}
     return {
         "uptime_seconds": uptime,

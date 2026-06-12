@@ -66,6 +66,129 @@ async def restart_compose_service(
             ) from exc
 
 
+async def service_gpu_memory_bytes(
+    service: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> int | None:
+    """Total GPU memory (bytes) used by processes in a sidecar container.
+
+    Runs ``nvidia-smi --query-compute-apps`` inside the container via the
+    Docker exec API — the NVIDIA container runtime injects nvidia-smi into
+    GPU containers, and on unified-memory machines (DGX Spark) this is the
+    only per-process model-memory signal: CUDA allocations appear neither
+    in the container cgroup nor in process RSS.
+
+    Returns None when the query is unavailable (no Docker socket, no such
+    container, no nvidia-smi, or no compute processes reported).
+    """
+    try:
+        exit_code, output = await exec_in_service(
+            service,
+            [
+                "nvidia-smi",
+                "--query-compute-apps=used_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            client=client,
+        )
+    except DockerControlError:
+        return None
+    if exit_code != 0:
+        return None
+    total = 0
+    seen = False
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            total += int(float(line)) * 1024 * 1024
+        except ValueError:
+            continue
+        seen = True
+    return total if seen else None
+
+
+async def exec_in_service(
+    service: str,
+    cmd: list[str],
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> tuple[int, str]:
+    """Run a command in a Compose service's container; (exit_code, stdout)."""
+    if client is not None:
+        return await _exec_with_client(client, service, cmd)
+    path = docker_socket_path()
+    if not Path(path).exists():
+        raise DockerUnavailableError(f"Docker socket {path} is not available.")
+    transport = httpx.AsyncHTTPTransport(uds=path)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://docker",
+        timeout=30.0,
+    ) as owned_client:
+        try:
+            return await _exec_with_client(owned_client, service, cmd)
+        except httpx.HTTPError as exc:
+            raise DockerUnavailableError(
+                f"Docker socket {path} is not reachable: {exc}."
+            ) from exc
+
+
+async def _exec_with_client(
+    client: httpx.AsyncClient,
+    service: str,
+    cmd: list[str],
+) -> tuple[int, str]:
+    container = await _find_service_container(client, service)
+    container_id = str(container.get("Id") or "")
+    response = await client.post(
+        f"/containers/{container_id}/exec",
+        json={"AttachStdout": True, "AttachStderr": True, "Cmd": cmd},
+    )
+    if response.status_code != 201:
+        raise DockerControlError(
+            f"Docker exec create in {service} failed with status "
+            f"{response.status_code}: {response.text}"
+        )
+    exec_id = str(response.json().get("Id") or "")
+    response = await client.post(
+        f"/exec/{exec_id}/start",
+        json={"Detach": False, "Tty": False},
+    )
+    if response.status_code != 200:
+        raise DockerControlError(
+            f"Docker exec start in {service} failed with status "
+            f"{response.status_code}: {response.text}"
+        )
+    output = _demux_docker_stream(response.content)
+    inspect = await client.get(f"/exec/{exec_id}/json")
+    exit_code = 0
+    if inspect.status_code == 200:
+        exit_code = int(inspect.json().get("ExitCode") or 0)
+    return exit_code, output
+
+
+def _demux_docker_stream(raw: bytes) -> str:
+    """Decode Docker's multiplexed attach stream (stdout frames only)."""
+    # Each frame: 1 byte stream type, 3 bytes padding, 4 bytes big-endian
+    # length, then payload. Tty-less exec output always uses this format.
+    chunks: list[bytes] = []
+    offset = 0
+    while offset + 8 <= len(raw):
+        stream_type = raw[offset]
+        length = int.from_bytes(raw[offset + 4 : offset + 8], "big")
+        payload = raw[offset + 8 : offset + 8 + length]
+        if stream_type == 1:  # stdout
+            chunks.append(payload)
+        offset += 8 + length
+    if not chunks and raw and raw[0] not in (0, 1, 2):
+        # Defensive: a Tty stream has no framing; pass it through.
+        return raw.decode("utf-8", errors="replace")
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
 async def _restart_with_client(
     client: httpx.AsyncClient,
     service: str,
