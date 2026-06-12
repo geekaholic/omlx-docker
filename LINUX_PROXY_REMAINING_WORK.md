@@ -69,9 +69,66 @@ llama.cpp server, or any OpenAI-compatible endpoint (Ollama, for example).
   Versions panel are hidden in proxy mode; the sidecar restart card replaces
   native restart.
 
+## Spark Verification Log (June 2026, DGX Spark GB10)
+
+- Proxy test suites run natively on Linux: 266 pass in a plain venv with
+  fastapi/uvicorn/httpx/pydantic/jinja2/jsonschema/regex + pytest/pytest-asyncio
+  and `PYTHONPATH=.` (no MLX install needed for these files).
+- **llama.cpp sidecar (ghcr.io/ggml-org/llama.cpp:server-cuda, b9570)**:
+  - Streamed + non-streamed chat OK through the proxy; `usage` injection
+    works (backend honors `stream_options.include_usage`; trailing usage
+    chunk is stripped when the client didn't ask, relayed when it did).
+  - Repeated prompts: llama.cpp reports `cached_tokens` on the second hit
+    (22/26 prompt tokens); Serving Stats cached tokens + cache efficiency
+    move accordingly; avg prompt/generation tok/s populate.
+  - Finding: this build no longer emits `llamacpp:kv_cache_usage_ratio` /
+    `llamacpp:kv_cache_tokens`. Fixed by selecting `llamacpp:n_tokens_max`
+    as a "Peak Context Tokens" tile and counting throughput metrics toward
+    cache-panel availability (commit 2fd4ba7).
+- **Active Models memory bar (green bar) now works in proxy mode**
+  (commit 769bcc0): per-process GPU memory via `nvidia-smi` run inside the
+  sidecar through the Docker exec API (on GB10 unified memory, CUDA
+  allocations show up neither in the container cgroup — 922MiB vs the real
+  8.8GiB — nor in process RSS); Ollama uses `/api/ps` sizes; hard limit is
+  host MemTotal from `/proc/meminfo`; vLLM's `gpu_memory_utilization`
+  budget is surfaced as the soft limit. Verified live with all three
+  backends (llama.cpp 8.62 GB, vLLM 97.05 GB vs 97.35 GB soft, Ollama
+  17.76 GB from `/api/ps`).
+- **vLLM sidecar (vllm/vllm-openai:latest, gemma-4-26B-A4B-it)**:
+  - Prometheus metric names drifted as predicted: this generation emits
+    `vllm:prefix_cache_{hits,queries}_total` (no `gpu_` prefix) and
+    `vllm:kv_cache_usage_perc`. Candidates extended (commit 37bacf1),
+    ordered so the `*external_prefix_cache*` families are never
+    double-counted. Live: 63% prefix hit rate on repeated prompts.
+  - `usage.prompt_tokens_details.cached_tokens` requires vLLM's
+    `--enable-prompt-tokens-details`; the generated compose now passes it
+    (verified: cached_tokens 480/499 on a repeated prompt).
+  - Sidecar restart from the admin API works (202 + container restart).
+  - Streamed + non-streamed chat, stats accumulation, tok/s all good.
+- **Backend switching (CLI vs persisted state)**: launching a stack with
+  `omni serve` now overrides stale persisted backend routing in both
+  directions (sidecar↔sidecar in 37bacf1, sidecar→standalone/openai in
+  dafe959); per-backend profiles are archived for switching back.
+- **Ollama (host service 0.14.2, via openai-compatible)**: Active Models
+  rows show real size + TTL countdown from `/api/ps`; cache panel takes
+  the "not exposed" path; streamed usage honored
+  (`stream_options.include_usage`); stats accumulate.
+- **Cross-cutting**: Session/All-Time scopes, both Clear endpoints,
+  per-model filter, API Endpoints data (host/port/aliases/cli_prefix
+  "omni"), dashboard + chat pages render. All-Time stats survived
+  multiple proxy container rebuilds/restarts via the `proxy-state`
+  volume; clear-alltime zeroes them. (Browser-console check still worth
+  an eyeball on a real browser.)
+- **Environment gotchas** (documented in `docs/SPARK_RUNBOOK.md`): broken
+  DNS sandbox in containers created during a failed first `up`
+  (force-recreate fixes); pre-merge generated env files use old
+  `VLLM_*` key names and silently fall back to template defaults —
+  regenerate with `omni serve` or the admin UI.
+
 ## Remaining Implementation Steps
 
-1. Test against real backends.
+1. Test against real backends. — **Done** (June 2026 on DGX Spark; see
+   the verification log above and `docs/SPARK_RUNBOOK.md`).
    - Ollama (via the OpenAI-compatible backend type): verify chat, `/v1/models`, `/admin/api/proxy/metrics`, `/api/tags`, `/api/ps`, and the Active Models size/TTL display.
    - vLLM: verify chat streaming, tool calls, Prometheus `/metrics`, token counters, prefix-cache hit rate movement on repeated prompts, and restart flows on Spark.
    - llama.cpp server: verify OpenAI compatibility, model listing behavior, streaming, tool calling, and that `--metrics` exposes the `llamacpp:*` families the dashboard parses.
@@ -80,13 +137,9 @@ llama.cpp server, or any OpenAI-compatible endpoint (Ollama, for example).
      <backend>/metrics` on the deployed image and extend the candidates if a
      family is missed.
 
-2. Add Spark/Linux runbook coverage.
-   - External Ollama through the OpenAI-compatible backend type.
-   - External vLLM.
-   - vLLM sidecar with known-good model examples.
-   - llama.cpp sidecar.
-   - Troubleshooting for HF cache mounts, gated models, NVIDIA runtime, vLLM env settings, and backend restarts.
-   - Known unsupported native oMLX/MLX features.
+2. Add Spark/Linux runbook coverage. — **Done**: `docs/SPARK_RUNBOOK.md`
+   (sidecar quick starts, external Ollama/vLLM, troubleshooting from
+   real incidents, unsupported native features).
 
 3. Continue fork cleanup.
    - Isolate or remove native MLX/Metal imports from the Linux proxy path.
@@ -109,7 +162,11 @@ llama.cpp server, or any OpenAI-compatible endpoint (Ollama, for example).
   sandboxed, virtualized, or Linux sessions without an accessible Metal device.
 - The proxy-specific and `omni` test suites (`tests/test_proxy*.py`,
   `tests/test_omni_cli.py`, `tests/test_*_compose.py`,
-  `tests/test_server_metrics.py`) are the reliable Linux-port signal until
-  native MLX paths are isolated or removed.
-- Real backend behavior still needs manual testing with Ollama, vLLM, and
-  llama.cpp server.
+  `tests/test_server_metrics.py`, `tests/test_docker_control.py`,
+  `tests/test_integrations.py`) are the reliable Linux-port signal until
+  native MLX paths are isolated or removed — 270+ tests, run on the Spark
+  in a plain venv with `PYTHONPATH=.`.
+- Real-backend manual testing with Ollama, vLLM, and llama.cpp is done
+  (see the Spark Verification Log above); re-run it when bumping backend
+  images, since both vLLM and llama.cpp have renamed metrics between
+  releases.
