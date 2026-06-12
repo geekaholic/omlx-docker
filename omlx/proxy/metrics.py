@@ -176,21 +176,25 @@ def select_prometheus_metrics(samples: list[dict[str, Any]]) -> dict[str, float]
         "prompt_tokens_total": (
             "vllm:prompt_tokens_total",
             "vllm_prompt_tokens_total",
+            "llamacpp:prompt_tokens_total",
             "prompt_tokens_total",
         ),
         "generation_tokens_total": (
             "vllm:generation_tokens_total",
             "vllm_generation_tokens_total",
+            "llamacpp:tokens_predicted_total",
             "generation_tokens_total",
         ),
         "running_requests": (
             "vllm:num_requests_running",
             "vllm_num_requests_running",
+            "llamacpp:requests_processing",
             "num_requests_running",
         ),
         "waiting_requests": (
             "vllm:num_requests_waiting",
             "vllm_num_requests_waiting",
+            "llamacpp:requests_deferred",
             "num_requests_waiting",
         ),
         "gpu_cache_usage_perc": (
@@ -198,12 +202,68 @@ def select_prometheus_metrics(samples: list[dict[str, Any]]) -> dict[str, float]
             "vllm_gpu_cache_usage_perc",
             "gpu_cache_usage_perc",
         ),
+        # vLLM prefix cache: v1 exposes hit/query counters (the client
+        # appends _total); v0 exposed a 0..1 hit-rate gauge instead.
+        "prefix_cache_queries": (
+            "vllm:gpu_prefix_cache_queries_total",
+            "vllm:gpu_prefix_cache_queries",
+            "gpu_prefix_cache_queries_total",
+            "gpu_prefix_cache_queries",
+        ),
+        "prefix_cache_hits": (
+            "vllm:gpu_prefix_cache_hits_total",
+            "vllm:gpu_prefix_cache_hits",
+            "gpu_prefix_cache_hits_total",
+            "gpu_prefix_cache_hits",
+        ),
+        "prefix_cache_hit_rate_gauge": (
+            "vllm:gpu_prefix_cache_hit_rate",
+            "gpu_prefix_cache_hit_rate",
+        ),
+        # llama.cpp server --metrics
+        "kv_cache_usage_ratio": ("llamacpp:kv_cache_usage_ratio",),
+        "kv_cache_tokens": ("llamacpp:kv_cache_tokens",),
+        "prompt_tokens_seconds": ("llamacpp:prompt_tokens_seconds",),
+        "predicted_tokens_seconds": ("llamacpp:predicted_tokens_seconds",),
+    }
+    _MAX_KEYS = {
+        "gpu_cache_usage_perc",
+        "prefix_cache_hit_rate_gauge",
+        "kv_cache_usage_ratio",
+        "prompt_tokens_seconds",
+        "predicted_tokens_seconds",
     }
     for key, names in candidates.items():
-        value = pick(*names, aggregate="max" if key.endswith("_perc") else "sum")
+        value = pick(*names, aggregate="max" if key in _MAX_KEYS else "sum")
         if value is not None:
             selected[key] = value
     return selected
+
+
+def summarize_selected_metrics(selected: dict[str, float]) -> dict[str, Any]:
+    """Flatten selected Prometheus metrics into the dashboard summary shape."""
+    hits = selected.get("prefix_cache_hits")
+    queries = selected.get("prefix_cache_queries")
+    hit_rate: float | None = None
+    if hits is not None and queries is not None and queries > 0:
+        hit_rate = round(hits / queries * 100, 1)
+    elif selected.get("prefix_cache_hit_rate_gauge") is not None:
+        hit_rate = round(selected["prefix_cache_hit_rate_gauge"] * 100, 1)
+    return {
+        "requests_total": selected.get("requests_total"),
+        "prompt_tokens_total": selected.get("prompt_tokens_total"),
+        "generation_tokens_total": selected.get("generation_tokens_total"),
+        "running_requests": selected.get("running_requests"),
+        "waiting_requests": selected.get("waiting_requests"),
+        "gpu_cache_usage_perc": selected.get("gpu_cache_usage_perc"),
+        "prefix_cache_hits": hits,
+        "prefix_cache_queries": queries,
+        "prefix_cache_hit_rate": hit_rate,
+        "kv_cache_usage_ratio": selected.get("kv_cache_usage_ratio"),
+        "kv_cache_tokens": selected.get("kv_cache_tokens"),
+        "prompt_tokens_seconds": selected.get("prompt_tokens_seconds"),
+        "predicted_tokens_seconds": selected.get("predicted_tokens_seconds"),
+    }
 
 
 def _split_label_parts(text: str) -> list[str]:
@@ -255,17 +315,11 @@ def _summarize_ollama_models(models: Any) -> list[dict[str, Any]]:
 
 def _summary(prometheus: dict[str, Any], ollama: dict[str, Any]) -> dict[str, Any]:
     selected = prometheus.get("selected") or {}
-    return {
-        "requests_total": selected.get("requests_total"),
-        "prompt_tokens_total": selected.get("prompt_tokens_total"),
-        "generation_tokens_total": selected.get("generation_tokens_total"),
-        "running_requests": selected.get("running_requests"),
-        "waiting_requests": selected.get("waiting_requests"),
-        "gpu_cache_usage_perc": selected.get("gpu_cache_usage_perc"),
-        "ollama_models_count": (
-            ollama.get("models_count") if ollama.get("available") else None
-        ),
-        "ollama_loaded_count": (
-            ollama.get("loaded_count") if ollama.get("available") else None
-        ),
-    }
+    summary = summarize_selected_metrics(selected)
+    summary["ollama_models_count"] = (
+        ollama.get("models_count") if ollama.get("available") else None
+    )
+    summary["ollama_loaded_count"] = (
+        ollama.get("loaded_count") if ollama.get("available") else None
+    )
+    return summary

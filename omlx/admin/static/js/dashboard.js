@@ -2388,6 +2388,19 @@
                     || this.stats.proxy?.mode === 'proxy';
             },
 
+            get backendCacheSummary() {
+                return this.proxyMetrics?.summary || {};
+            },
+
+            get backendCacheMetricsAvailable() {
+                const s = this.backendCacheSummary;
+                return s.prefix_cache_hit_rate != null
+                    || s.prefix_cache_queries != null
+                    || s.gpu_cache_usage_perc != null
+                    || s.kv_cache_usage_ratio != null
+                    || s.kv_cache_tokens != null;
+            },
+
             get isSidecarBackendType() {
                 const locked = this.globalSettings.proxy?.backend_url_locked
                     || ['vllm', 'llama.cpp'];

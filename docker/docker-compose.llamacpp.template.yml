@@ -156,6 +156,7 @@ services:
         set -- "$${@}" --ctx-size "$${OMNI_CONTEXT_LENGTH:-8192}"
         set -- "$${@}" --parallel "$${OMNI_MAX_PARALLEL:-4}"
         set -- "$${@}" --n-gpu-layers "$${LLAMACPP_N_GPU_LAYERS:-999}"
+        set -- "$${@}" --metrics
         if [ "$${LLAMACPP_JINJA:-true}" = "true" ]; then
           set -- "$${@}" --jinja
         fi

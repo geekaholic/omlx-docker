@@ -37,6 +37,8 @@ def test_render_compose_contains_model_dispatch_and_portable_args():
     assert '--parallel "$${OMNI_MAX_PARALLEL:-4}"' in content
     assert '--n-gpu-layers "$${LLAMACPP_N_GPU_LAYERS:-999}"' in content
     assert "--jinja" in content
+    # Prometheus endpoint for the dashboard's backend cache observability
+    assert "--metrics" in content
 
 
 def test_render_compose_mounts_hf_cache_and_llamacpp_cache():
