@@ -34,6 +34,9 @@ class CommonSidecarSettings:
     context_scaling: bool = False
     target_context_size: int = 200000
     sse_keepalive_mode: str = "ping"
+    # Opt-in local model scan (omni serve --scan-models [--model-dir DIR]).
+    scan_models: bool = False
+    model_scan_host_dir: str = ""
     # 0 = no default output cap injected; the backend applies its own
     # limit (vLLM caps to the remaining context when max_tokens is unset).
     sampling_max_tokens: int = 0
@@ -64,6 +67,8 @@ OMLX_PROXY_SIDECAR_KEYS = (
     "OMLX_CONTEXT_SCALING",
     "OMLX_TARGET_CONTEXT_SIZE",
     "OMLX_SSE_KEEPALIVE_MODE",
+    "OMLX_MODEL_SCAN",
+    "OMLX_MODEL_SCAN_HOST_DIR",
     "OMLX_SAMPLING_MAX_TOKENS",
     "OMLX_SAMPLING_TEMPERATURE",
     "OMLX_SAMPLING_TOP_P",
@@ -128,6 +133,8 @@ def proxy_sidecar_environment(settings: CommonSidecarSettings) -> dict[str, str]
         "OMLX_CONTEXT_SCALING": _bool_str(settings.context_scaling),
         "OMLX_TARGET_CONTEXT_SIZE": str(settings.target_context_size),
         "OMLX_SSE_KEEPALIVE_MODE": settings.sse_keepalive_mode,
+        "OMLX_MODEL_SCAN": _bool_str(settings.scan_models),
+        "OMLX_MODEL_SCAN_HOST_DIR": settings.model_scan_host_dir,
         "OMLX_SAMPLING_MAX_TOKENS": str(settings.sampling_max_tokens),
         "OMLX_SAMPLING_TEMPERATURE": str(settings.sampling_temperature),
         "OMLX_SAMPLING_TOP_P": str(settings.sampling_top_p),
@@ -171,6 +178,10 @@ def common_settings_kwargs_from_env(
         ),
         "sse_keepalive_mode": values.get(
             "OMLX_SSE_KEEPALIVE_MODE", defaults.sse_keepalive_mode
+        ),
+        "scan_models": _bool_value(values.get("OMLX_MODEL_SCAN"), defaults.scan_models),
+        "model_scan_host_dir": values.get(
+            "OMLX_MODEL_SCAN_HOST_DIR", defaults.model_scan_host_dir
         ),
         "sampling_max_tokens": _int_value(
             values.get("OMLX_SAMPLING_MAX_TOKENS"), defaults.sampling_max_tokens
@@ -351,7 +362,10 @@ def render_proxy_service(
     env_name: str,
     project_context: str,
     compose_output_dir: str,
+    extra_scan_volumes: str = "",
 ) -> str:
+    hf_default = _compose_default_expr("OMNI_HF_HOME", settings.hf_home)
+    scan_source = "${OMLX_MODEL_SCAN_HOST_DIR:-" + hf_default + "}"
     return f"""  omlx-proxy:
     build:
       context: {_yaml_quote(project_context)}
@@ -369,6 +383,8 @@ def render_proxy_service(
       OMLX_TARGET_CONTEXT_SIZE: {_yaml_quote(_compose_default_expr('OMLX_TARGET_CONTEXT_SIZE', str(settings.target_context_size)))}
       OMLX_ACTUAL_CONTEXT_SIZE: {_yaml_quote(_compose_default_expr('OMNI_CONTEXT_LENGTH', str(settings.context_length)))}
       OMLX_SSE_KEEPALIVE_MODE: {_yaml_quote(_compose_default_expr('OMLX_SSE_KEEPALIVE_MODE', settings.sse_keepalive_mode))}
+      OMLX_MODEL_SCAN: {_yaml_quote(_compose_default_expr('OMLX_MODEL_SCAN', _bool_str(settings.scan_models)))}
+      OMLX_MODEL_SCAN_DIR: "/models-scan"
       OMLX_SAMPLING_MAX_TOKENS: {_yaml_quote(_compose_default_expr('OMLX_SAMPLING_MAX_TOKENS', str(settings.sampling_max_tokens)))}
       OMLX_SAMPLING_TEMPERATURE: {_yaml_quote(_compose_default_expr('OMLX_SAMPLING_TEMPERATURE', str(settings.sampling_temperature)))}
       OMLX_SAMPLING_TOP_P: {_yaml_quote(_compose_default_expr('OMLX_SAMPLING_TOP_P', str(settings.sampling_top_p)))}
@@ -385,7 +401,10 @@ def render_proxy_service(
     volumes:
       - proxy-state:/data
       - {_yaml_quote(f'{compose_output_dir}:/compose-output')}
-      # Grants the admin UI control of the sidecar container (restart
+      # Read-only host model caches for the opt-in local model scan
+      # (omni serve --scan-models); inert while the feature is off.
+      - {_yaml_quote(f'{scan_source}:/models-scan/hf:ro')}
+{extra_scan_volumes}      # Grants the admin UI control of the sidecar container (restart
       # backend). Remove if you don't want the proxy to reach the Docker
       # daemon; the restart button then reports it is unavailable.
       - /var/run/docker.sock:/var/run/docker.sock

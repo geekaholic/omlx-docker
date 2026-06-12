@@ -333,6 +333,10 @@
             // True after a save reported requires_restart: shows the
             // "restart backend to apply" banner.
             backendRestartNeeded: false,
+            // Scanned local models (proxy mode, omni serve --scan-models).
+            localModels: { enabled: false, models: [], current_model: '', backend_type: '' },
+            localModelsLoading: false,
+            localModelSwitching: false,
             // Client-side stash of per-backend sidecar image edits; the
             // server profiles don't carry the image field.
             _sidecarImageByType: {},
@@ -705,7 +709,7 @@
                 }
                 if (value === 'models') {
                     if (this.proxyMode) {
-                        await this.loadModels();
+                        await Promise.all([this.loadModels(), this.loadLocalModels()]);
                         return;
                     }
                     const loads = [this.loadHFModels(), this.loadHFTasks(), this.loadOQTasks()];
@@ -2593,6 +2597,48 @@
                     setTimeout(() => window.location.reload(), 500);
                 };
                 tick();
+            },
+
+            async loadLocalModels(refresh = false) {
+                if (!this.proxyMode) return;
+                this.localModelsLoading = true;
+                try {
+                    const url = '/admin/api/proxy/local-models' + (refresh ? '?refresh=1' : '');
+                    const response = await fetch(url, { credentials: 'same-origin' });
+                    if (response.ok) {
+                        this.localModels = await response.json();
+                    }
+                } catch (err) {
+                    // Scan endpoint is best-effort; leave the section as-is.
+                } finally {
+                    this.localModelsLoading = false;
+                }
+            },
+
+            async useLocalModel(model) {
+                if (this.localModelSwitching) return;
+                this.localModelSwitching = true;
+                try {
+                    const servedName = model.repo_id.split('/').pop();
+                    const response = await fetch('/admin/api/global-settings', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            omni_model: model.repo_id,
+                            omni_served_model_name: servedName,
+                        }),
+                    });
+                    if (!response.ok) return;
+                    this.localModels.current_model = model.repo_id;
+                    this.backendRestartNeeded = true;
+                    await this.loadGlobalSettings();
+                    // The env file is regenerated server-side; the switch
+                    // takes effect when the sidecar restarts (confirm dialog
+                    // inside restartBackendStart).
+                    await this.restartBackendStart();
+                } finally {
+                    this.localModelSwitching = false;
+                }
             },
 
             async restartBackendStart() {

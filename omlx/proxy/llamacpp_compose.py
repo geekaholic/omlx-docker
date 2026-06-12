@@ -208,6 +208,7 @@ def render_llamacpp_compose(
         f"      {key}: {_yaml_quote(_compose_default_expr(key, value))}"
         for key, value in env.items()
     )
+    scan_cache_expr = _compose_default_expr("LLAMACPP_CACHE_DIR", settings.cache_dir)
     proxy_service = render_proxy_service(
         settings,
         backend_name="llamacpp",
@@ -216,6 +217,11 @@ def render_llamacpp_compose(
         env_name=DEFAULT_LLAMACPP_ENV_NAME,
         project_context=project_context,
         compose_output_dir=compose_output_dir,
+        extra_scan_volumes=(
+            "      - "
+            + _yaml_quote(f"{scan_cache_expr}:/models-scan/llamacpp:ro")
+            + "\n"
+        ),
     )
     env_reload = render_env_reload_snippet(DEFAULT_LLAMACPP_ENV_NAME)
     cache_dir_expr = _compose_default_expr("LLAMACPP_CACHE_DIR", settings.cache_dir)

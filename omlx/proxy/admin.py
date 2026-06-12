@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -28,6 +29,7 @@ from .docker_control import (
     restart_compose_service,
     service_gpu_memory_bytes,
 )
+from .local_models import scan_dir, scan_enabled, scan_local_models
 from .metrics import (
     backend_context_limit,
     collect_backend_metrics_cached,
@@ -237,6 +239,35 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
         result = _write_sidecar_compose_if_configured(state)
         status = 200 if result.get("written") or not result.get("error") else 500
         return JSONResponse(result, status_code=status)
+
+    local_models_cache: list[dict[str, Any]] | None = None
+
+    @router.get("/api/proxy/local-models")
+    async def local_models(refresh: int = 0):
+        nonlocal local_models_cache
+        directory = scan_dir()
+        enabled = scan_enabled() and directory.is_dir()
+        if not enabled:
+            return {
+                "enabled": False,
+                "scan_dir": str(directory),
+                "models": [],
+                "current_model": "",
+                "backend_type": _proxy_backend_type(state),
+            }
+        if refresh or local_models_cache is None:
+            local_models_cache = await asyncio.to_thread(scan_local_models, directory)
+        try:
+            current_model = _sidecar_settings_from_files(state).model
+        except Exception:
+            current_model = ""
+        return {
+            "enabled": True,
+            "scan_dir": str(directory),
+            "models": local_models_cache,
+            "current_model": current_model,
+            "backend_type": _proxy_backend_type(state),
+        }
 
     @router.get("/api/global-settings")
     async def get_global_settings():

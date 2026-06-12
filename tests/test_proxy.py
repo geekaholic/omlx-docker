@@ -1356,3 +1356,67 @@ async def test_global_settings_never_prefill_max_tokens(monkeypatch, tmp_path):
         settings = (await client.get("/admin/api/global-settings")).json()
 
     assert settings["sampling"]["max_tokens"] is None
+
+
+@pytest.mark.asyncio
+async def test_local_models_endpoint_disabled_by_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.delenv("OMLX_MODEL_SCAN", raising=False)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        data = (await client.get("/admin/api/proxy/local-models")).json()
+
+    assert data["enabled"] is False
+    assert data["models"] == []
+
+
+@pytest.mark.asyncio
+async def test_local_models_endpoint_scans_when_enabled(monkeypatch, tmp_path):
+    import json as jsonlib
+
+    scan_root = tmp_path / "scan"
+    model = scan_root / "tiny-model"
+    model.mkdir(parents=True)
+    (model / "config.json").write_text(
+        jsonlib.dumps({"model_type": "llama", "architectures": ["LlamaForCausalLM"]})
+    )
+    (model / "model.safetensors").write_bytes(b"\0" * 128)
+
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setenv("OMLX_MODEL_SCAN", "true")
+    monkeypatch.setenv("OMLX_MODEL_SCAN_DIR", str(scan_root))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        data = (await client.get("/admin/api/proxy/local-models")).json()
+        # Cache is reused until refresh=1 rescans.
+        (model / "config2.json").write_text("{}")
+        second = scan_root / "second-model"
+        second.mkdir()
+        (second / "config.json").write_text(
+            jsonlib.dumps(
+                {"model_type": "llama", "architectures": ["LlamaForCausalLM"]}
+            )
+        )
+        (second / "model.safetensors").write_bytes(b"\0" * 64)
+        cached = (await client.get("/admin/api/proxy/local-models")).json()
+        refreshed = (await client.get("/admin/api/proxy/local-models?refresh=1")).json()
+
+    assert data["enabled"] is True
+    assert [m["repo_id"] for m in data["models"]] == ["tiny-model"]
+    assert data["models"][0]["backends"] == ["vllm"]
+    assert len(cached["models"]) == 1
+    assert len(refreshed["models"]) == 2

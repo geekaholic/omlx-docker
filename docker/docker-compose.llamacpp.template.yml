@@ -18,6 +18,8 @@ services:
       OMLX_TARGET_CONTEXT_SIZE: "${OMLX_TARGET_CONTEXT_SIZE:-200000}"
       OMLX_ACTUAL_CONTEXT_SIZE: "${OMNI_CONTEXT_LENGTH:-8192}"
       OMLX_SSE_KEEPALIVE_MODE: "${OMLX_SSE_KEEPALIVE_MODE:-ping}"
+      OMLX_MODEL_SCAN: "${OMLX_MODEL_SCAN:-false}"
+      OMLX_MODEL_SCAN_DIR: "/models-scan"
       OMLX_SAMPLING_MAX_TOKENS: "${OMLX_SAMPLING_MAX_TOKENS:-0}"
       OMLX_SAMPLING_TEMPERATURE: "${OMLX_SAMPLING_TEMPERATURE:-1.0}"
       OMLX_SAMPLING_TOP_P: "${OMLX_SAMPLING_TOP_P:-1.0}"
@@ -34,6 +36,10 @@ services:
     volumes:
       - proxy-state:/data
       - "../docker:/compose-output"
+      # Read-only host model caches for the opt-in local model scan
+      # (omni serve --scan-models); inert while the feature is off.
+      - "${OMLX_MODEL_SCAN_HOST_DIR:-${OMNI_HF_HOME:-${HOME}/.cache/huggingface}}:/models-scan/hf:ro"
+      - "${LLAMACPP_CACHE_DIR:-${HOME}/.cache/llama.cpp}:/models-scan/llamacpp:ro"
       # Grants the admin UI control of the sidecar container (restart
       # backend). Remove if you don't want the proxy to reach the Docker
       # daemon; the restart button then reports it is unavailable.

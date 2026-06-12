@@ -134,16 +134,16 @@ def test_status_command_runs_compose_ps(monkeypatch, tmp_path):
         calls.append((command, check, kwargs))
 
     monkeypatch.setattr(omni_cli.subprocess, "run", fake_run)
-    args = omni_cli.build_parser().parse_args([
-        "status",
-        "--compose-file",
-        str(compose_file),
-    ])
+    args = omni_cli.build_parser().parse_args(
+        [
+            "status",
+            "--compose-file",
+            str(compose_file),
+        ]
+    )
 
     assert omni_cli.status_command(args) == 0
-    assert calls == [
-        (["docker", "compose", "-f", str(compose_file), "ps"], True, {})
-    ]
+    assert calls == [(["docker", "compose", "-f", str(compose_file), "ps"], True, {})]
 
 
 def test_logs_command_runs_all_service_logs_without_discovery(monkeypatch, tmp_path):
@@ -155,16 +155,16 @@ def test_logs_command_runs_all_service_logs_without_discovery(monkeypatch, tmp_p
         calls.append((command, check, kwargs))
 
     monkeypatch.setattr(omni_cli.subprocess, "run", fake_run)
-    args = omni_cli.build_parser().parse_args([
-        "logs",
-        "--compose-file",
-        str(compose_file),
-    ])
+    args = omni_cli.build_parser().parse_args(
+        [
+            "logs",
+            "--compose-file",
+            str(compose_file),
+        ]
+    )
 
     assert omni_cli.logs_command(args) == 0
-    assert calls == [
-        (["docker", "compose", "-f", str(compose_file), "logs"], True, {})
-    ]
+    assert calls == [(["docker", "compose", "-f", str(compose_file), "logs"], True, {})]
 
 
 def test_logs_command_filters_proxy_service(monkeypatch, tmp_path):
@@ -180,13 +180,15 @@ def test_logs_command_filters_proxy_service(monkeypatch, tmp_path):
         return Result()
 
     monkeypatch.setattr(omni_cli.subprocess, "run", fake_run)
-    args = omni_cli.build_parser().parse_args([
-        "logs",
-        "--target",
-        "proxy",
-        "--compose-file",
-        str(compose_file),
-    ])
+    args = omni_cli.build_parser().parse_args(
+        [
+            "logs",
+            "--target",
+            "proxy",
+            "--compose-file",
+            str(compose_file),
+        ]
+    )
 
     assert omni_cli.logs_command(args) == 0
     assert calls == [
@@ -216,14 +218,16 @@ def test_logs_command_follows_backend_service(monkeypatch, tmp_path):
         return Result()
 
     monkeypatch.setattr(omni_cli.subprocess, "run", fake_run)
-    args = omni_cli.build_parser().parse_args([
-        "logs",
-        "--target",
-        "backend",
-        "--follow",
-        "--compose-file",
-        str(compose_file),
-    ])
+    args = omni_cli.build_parser().parse_args(
+        [
+            "logs",
+            "--target",
+            "backend",
+            "--follow",
+            "--compose-file",
+            str(compose_file),
+        ]
+    )
 
     assert omni_cli.logs_command(args) == 0
     assert calls == [
@@ -251,13 +255,15 @@ def test_logs_backend_errors_for_external_backend_stack(monkeypatch, tmp_path):
         return Result()
 
     monkeypatch.setattr(omni_cli.subprocess, "run", fake_run)
-    args = omni_cli.build_parser().parse_args([
-        "logs",
-        "--target",
-        "backend",
-        "--compose-file",
-        str(compose_file),
-    ])
+    args = omni_cli.build_parser().parse_args(
+        [
+            "logs",
+            "--target",
+            "backend",
+            "--compose-file",
+            str(compose_file),
+        ]
+    )
 
     with pytest.raises(SystemExit, match="external or not managed"):
         omni_cli.logs_command(args)
@@ -276,13 +282,15 @@ def test_restart_command_restarts_backend_service(monkeypatch, tmp_path):
         return Result()
 
     monkeypatch.setattr(omni_cli.subprocess, "run", fake_run)
-    args = omni_cli.build_parser().parse_args([
-        "restart",
-        "--target",
-        "backend",
-        "--compose-file",
-        str(compose_file),
-    ])
+    args = omni_cli.build_parser().parse_args(
+        [
+            "restart",
+            "--target",
+            "backend",
+            "--compose-file",
+            str(compose_file),
+        ]
+    )
 
     assert omni_cli.restart_command(args) == 0
     assert calls == [
@@ -312,13 +320,15 @@ def test_stop_command_stops_proxy_service(monkeypatch, tmp_path):
         return Result()
 
     monkeypatch.setattr(omni_cli.subprocess, "run", fake_run)
-    args = omni_cli.build_parser().parse_args([
-        "stop",
-        "--target",
-        "proxy",
-        "--compose-file",
-        str(compose_file),
-    ])
+    args = omni_cli.build_parser().parse_args(
+        [
+            "stop",
+            "--target",
+            "proxy",
+            "--compose-file",
+            str(compose_file),
+        ]
+    )
 
     assert omni_cli.stop_command(args) == 0
     assert calls == [
@@ -348,13 +358,15 @@ def test_stop_command_stops_backend_service(monkeypatch, tmp_path):
         return Result()
 
     monkeypatch.setattr(omni_cli.subprocess, "run", fake_run)
-    args = omni_cli.build_parser().parse_args([
-        "stop",
-        "--target",
-        "backend",
-        "--compose-file",
-        str(compose_file),
-    ])
+    args = omni_cli.build_parser().parse_args(
+        [
+            "stop",
+            "--target",
+            "backend",
+            "--compose-file",
+            str(compose_file),
+        ]
+    )
 
     assert omni_cli.stop_command(args) == 0
     assert calls == [
@@ -380,18 +392,18 @@ def test_stop_command_stops_all_services_without_discovery(monkeypatch, tmp_path
         calls.append((command, check, kwargs))
 
     monkeypatch.setattr(omni_cli.subprocess, "run", fake_run)
-    args = omni_cli.build_parser().parse_args([
-        "stop",
-        "--target",
-        "both",
-        "--compose-file",
-        str(compose_file),
-    ])
+    args = omni_cli.build_parser().parse_args(
+        [
+            "stop",
+            "--target",
+            "both",
+            "--compose-file",
+            str(compose_file),
+        ]
+    )
 
     assert omni_cli.stop_command(args) == 0
-    assert calls == [
-        (["docker", "compose", "-f", str(compose_file), "stop"], True, {})
-    ]
+    assert calls == [(["docker", "compose", "-f", str(compose_file), "stop"], True, {})]
 
 
 def test_stop_backend_errors_for_external_backend_command(monkeypatch, tmp_path):
@@ -405,13 +417,15 @@ def test_stop_backend_errors_for_external_backend_command(monkeypatch, tmp_path)
         return Result()
 
     monkeypatch.setattr(omni_cli.subprocess, "run", fake_run)
-    args = omni_cli.build_parser().parse_args([
-        "stop",
-        "--target",
-        "backend",
-        "--compose-file",
-        str(compose_file),
-    ])
+    args = omni_cli.build_parser().parse_args(
+        [
+            "stop",
+            "--target",
+            "backend",
+            "--compose-file",
+            str(compose_file),
+        ]
+    )
 
     with pytest.raises(SystemExit, match="external or not managed"):
         omni_cli.stop_command(args)
@@ -420,18 +434,20 @@ def test_stop_backend_errors_for_external_backend_command(monkeypatch, tmp_path)
 def test_vllm_generate_only_writes_compose(tmp_path, capsys):
     compose_file = tmp_path / "docker-compose.vllm.yml"
 
-    result = omni_cli.main([
-        "serve",
-        "--backend",
-        "vllm",
-        "--model",
-        "Qwen/Qwen3-1.7B",
-        "--served-model-name",
-        "qwen-test",
-        "--compose-file",
-        str(compose_file),
-        "--generate-only",
-    ])
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "vllm",
+            "--model",
+            "Qwen/Qwen3-1.7B",
+            "--served-model-name",
+            "qwen-test",
+            "--compose-file",
+            str(compose_file),
+            "--generate-only",
+        ]
+    )
 
     assert result == 0
     content = compose_file.read_text()
@@ -462,15 +478,17 @@ def test_serve_without_backend_defaults_to_proxy_stack(capsys):
 def test_vllm_serve_persists_last_backend(tmp_path):
     compose_file = tmp_path / "docker-compose.vllm.yml"
 
-    result = omni_cli.main([
-        "serve",
-        "--backend",
-        "vllm",
-        "--compose-file",
-        str(compose_file),
-        "--generate-only",
-        "--no-build",
-    ])
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "vllm",
+            "--compose-file",
+            str(compose_file),
+            "--generate-only",
+            "--no-build",
+        ]
+    )
 
     assert result == 0
     state = omni_cli.load_serve_state()
@@ -497,15 +515,17 @@ def test_vllm_generate_only_writes_env_file_defaults(tmp_path, capsys):
     compose_file = tmp_path / "docker-compose.vllm.yml"
     env_file = compose_file.with_suffix(".env")
 
-    result = omni_cli.main([
-        "serve",
-        "--backend",
-        "vllm",
-        "--compose-file",
-        str(compose_file),
-        "--generate-only",
-        "--no-build",
-    ])
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "vllm",
+            "--compose-file",
+            str(compose_file),
+            "--generate-only",
+            "--no-build",
+        ]
+    )
 
     assert result == 0
     env = omni_cli.load_env_file(env_file)
@@ -524,15 +544,17 @@ def test_vllm_serve_preserves_existing_env_model_when_model_omitted(tmp_path):
     existing["OMNI_CONTEXT_LENGTH"] = "16384"
     write_vllm_env_file(env_file, existing)
 
-    result = omni_cli.main([
-        "serve",
-        "--backend",
-        "vllm",
-        "--compose-file",
-        str(compose_file),
-        "--generate-only",
-        "--no-build",
-    ])
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "vllm",
+            "--compose-file",
+            str(compose_file),
+            "--generate-only",
+            "--no-build",
+        ]
+    )
 
     assert result == 0
     env = omni_cli.load_env_file(env_file)
@@ -550,17 +572,19 @@ def test_vllm_serve_updates_only_supplied_model_flag(tmp_path):
     existing["OMNI_CONTEXT_LENGTH"] = "16384"
     write_vllm_env_file(env_file, existing)
 
-    result = omni_cli.main([
-        "serve",
-        "--backend",
-        "vllm",
-        "--model",
-        "example/new-model",
-        "--compose-file",
-        str(compose_file),
-        "--generate-only",
-        "--no-build",
-    ])
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "vllm",
+            "--model",
+            "example/new-model",
+            "--compose-file",
+            str(compose_file),
+            "--generate-only",
+            "--no-build",
+        ]
+    )
 
     assert result == 0
     env = omni_cli.load_env_file(env_file)
@@ -579,15 +603,17 @@ def test_vllm_serve_seeds_env_from_existing_compose_when_env_missing(tmp_path):
     )
     omni_cli.write_vllm_compose_for_path(compose_file, settings)
 
-    result = omni_cli.main([
-        "serve",
-        "--backend",
-        "vllm",
-        "--compose-file",
-        str(compose_file),
-        "--generate-only",
-        "--no-build",
-    ])
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "vllm",
+            "--compose-file",
+            str(compose_file),
+            "--generate-only",
+            "--no-build",
+        ]
+    )
 
     assert result == 0
     env = omni_cli.load_env_file(env_file)
@@ -600,14 +626,16 @@ def test_vllm_dry_run_does_not_write_env_file(tmp_path, capsys):
     compose_file = tmp_path / "docker-compose.vllm.yml"
     env_file = compose_file.with_suffix(".env")
 
-    result = omni_cli.main([
-        "serve",
-        "--backend",
-        "vllm",
-        "--compose-file",
-        str(compose_file),
-        "--dry-run",
-    ])
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "vllm",
+            "--compose-file",
+            str(compose_file),
+            "--dry-run",
+        ]
+    )
 
     assert result == 0
     assert not compose_file.exists()
@@ -632,35 +660,37 @@ def test_vllm_serve_maps_advanced_flags_to_env_and_compose(tmp_path):
     compose_file = tmp_path / "docker-compose.vllm.yml"
     env_file = compose_file.with_suffix(".env")
 
-    result = omni_cli.main([
-        "serve",
-        "--backend",
-        "vllm",
-        "--compose-file",
-        str(compose_file),
-        "--dtype",
-        "bfloat16",
-        "--tokenizer",
-        "example/tokenizer",
-        "--max-num-batched-tokens",
-        "8192",
-        "--enable-chunked-prefill",
-        "--no-enable-prefix-caching",
-        "--kv-cache-dtype",
-        "fp8",
-        "--cpu-offload-gb",
-        "8",
-        "--tensor-parallel-size",
-        "2",
-        "--http-proxy",
-        "http://proxy:8080",
-        "--hf-endpoint",
-        "https://hf.example",
-        "--extra-args-json",
-        '["--foo","bar baz"]',
-        "--generate-only",
-        "--no-build",
-    ])
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "vllm",
+            "--compose-file",
+            str(compose_file),
+            "--dtype",
+            "bfloat16",
+            "--tokenizer",
+            "example/tokenizer",
+            "--max-num-batched-tokens",
+            "8192",
+            "--enable-chunked-prefill",
+            "--no-enable-prefix-caching",
+            "--kv-cache-dtype",
+            "fp8",
+            "--cpu-offload-gb",
+            "8",
+            "--tensor-parallel-size",
+            "2",
+            "--http-proxy",
+            "http://proxy:8080",
+            "--hf-endpoint",
+            "https://hf.example",
+            "--extra-args-json",
+            '["--foo","bar baz"]',
+            "--generate-only",
+            "--no-build",
+        ]
+    )
 
     assert result == 0
     env = omni_cli.load_env_file(env_file)
@@ -682,7 +712,6 @@ def test_vllm_serve_maps_advanced_flags_to_env_and_compose(tmp_path):
     assert "--no-enable-prefix-caching" in content
     assert "HF_ENDPOINT" in content
     assert "HTTP_PROXY" in content
-
 
 
 def test_vllm_compose_sanitizes_empty_runtime_url_env(tmp_path):
@@ -764,17 +793,19 @@ def test_proxy_serve_preserves_existing_env_when_flags_omitted(tmp_path):
         omni_cli.PROXY_ENV_KEYS,
     )
 
-    result = omni_cli.main([
-        "serve",
-        "--backend",
-        "openai",
-        "--compose-file",
-        str(compose_file),
-        "--proxy-port",
-        "9090",
-        "--generate-only",
-        "--no-build",
-    ])
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "openai",
+            "--compose-file",
+            str(compose_file),
+            "--proxy-port",
+            "9090",
+            "--generate-only",
+            "--no-build",
+        ]
+    )
 
     assert result == 0
     env = omni_cli.load_env_file(env_file)
@@ -790,23 +821,27 @@ def test_proxy_serve_writes_backend_url_and_recalls_it(tmp_path):
     env_file = compose_file.with_suffix(".env")
     compose_file.write_text("services: {}")
 
-    result = omni_cli.main([
-        "serve",
-        "--backend",
-        "openai",
-        "--backend-url",
-        "https://api.example.test/v1",
-        "--compose-file",
-        str(compose_file),
-        "--generate-only",
-        "--no-build",
-    ])
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "openai",
+            "--backend-url",
+            "https://api.example.test/v1",
+            "--compose-file",
+            str(compose_file),
+            "--generate-only",
+            "--no-build",
+        ]
+    )
 
     assert result == 0
     env = omni_cli.load_env_file(env_file)
     assert env["OMLX_BACKEND_URL"] == "https://api.example.test/v1"
 
-    result = omni_cli.main(["serve", "--proxy-port", "9191", "--generate-only", "--no-build"])
+    result = omni_cli.main(
+        ["serve", "--proxy-port", "9191", "--generate-only", "--no-build"]
+    )
 
     assert result == 0
     env = omni_cli.load_env_file(env_file)
@@ -819,12 +854,14 @@ def test_proxy_dry_run_does_not_write_state_or_env(tmp_path):
     env_file = compose_file.with_suffix(".env")
     compose_file.write_text("services: {}")
 
-    result = omni_cli.main([
-        "serve",
-        "--compose-file",
-        str(compose_file),
-        "--dry-run",
-    ])
+    result = omni_cli.main(
+        [
+            "serve",
+            "--compose-file",
+            str(compose_file),
+            "--dry-run",
+        ]
+    )
 
     assert result == 0
     assert not env_file.exists()
@@ -860,7 +897,15 @@ def test_compose_command_defaults_to_detached_build(tmp_path):
 
     command = omni_cli.compose_command(compose_file, foreground=False, build=True)
 
-    assert command == ["docker", "compose", "-f", str(compose_file), "up", "-d", "--build"]
+    assert command == [
+        "docker",
+        "compose",
+        "-f",
+        str(compose_file),
+        "up",
+        "-d",
+        "--build",
+    ]
 
 
 def test_vllm_settings_from_args_maps_model_flags():
@@ -896,21 +941,23 @@ def test_llamacpp_generate_only_writes_compose_and_env(tmp_path, capsys):
     compose_file = tmp_path / "docker-compose.llamacpp.yml"
     env_file = compose_file.with_suffix(".env")
 
-    result = omni_cli.main([
-        "serve",
-        "--backend",
-        "llamacpp",
-        "--model",
-        "ggml-org/Qwen3-1.7B-GGUF:Q8_0",
-        "--served-model-name",
-        "qwen-gguf",
-        "--context-length",
-        "16384",
-        "--compose-file",
-        str(compose_file),
-        "--generate-only",
-        "--no-build",
-    ])
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "llamacpp",
+            "--model",
+            "ggml-org/Qwen3-1.7B-GGUF:Q8_0",
+            "--served-model-name",
+            "qwen-gguf",
+            "--context-length",
+            "16384",
+            "--compose-file",
+            str(compose_file),
+            "--generate-only",
+            "--no-build",
+        ]
+    )
 
     assert result == 0
     content = compose_file.read_text()
@@ -933,17 +980,19 @@ def test_llamacpp_backend_url_stays_proxy_only(tmp_path):
     compose_file = tmp_path / "docker-compose.proxy.yml"
     compose_file.write_text("services: {}")
 
-    result = omni_cli.main([
-        "serve",
-        "--backend",
-        "llamacpp",
-        "--backend-url",
-        "http://host.docker.internal:9000/v1",
-        "--compose-file",
-        str(compose_file),
-        "--generate-only",
-        "--no-build",
-    ])
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "llamacpp",
+            "--backend-url",
+            "http://host.docker.internal:9000/v1",
+            "--compose-file",
+            str(compose_file),
+            "--generate-only",
+            "--no-build",
+        ]
+    )
 
     assert result == 0
     env = omni_cli.load_env_file(compose_file.with_suffix(".env"))
@@ -982,15 +1031,17 @@ def test_plain_serve_reuses_saved_external_llamacpp_proxy(tmp_path):
 def test_llamacpp_specific_flag_resolves_backend(tmp_path):
     compose_file = tmp_path / "docker-compose.llamacpp.yml"
 
-    result = omni_cli.main([
-        "serve",
-        "--n-gpu-layers",
-        "80",
-        "--compose-file",
-        str(compose_file),
-        "--generate-only",
-        "--no-build",
-    ])
+    result = omni_cli.main(
+        [
+            "serve",
+            "--n-gpu-layers",
+            "80",
+            "--compose-file",
+            str(compose_file),
+            "--generate-only",
+            "--no-build",
+        ]
+    )
 
     assert result == 0
     env = omni_cli.load_env_file(compose_file.with_suffix(".env"))
@@ -1008,13 +1059,15 @@ def test_portable_flags_reuse_saved_managed_backend(tmp_path):
         mode="managed",
     )
 
-    result = omni_cli.main([
-        "serve",
-        "--model",
-        "ggml-org/example-GGUF:Q4_K_M",
-        "--generate-only",
-        "--no-build",
-    ])
+    result = omni_cli.main(
+        [
+            "serve",
+            "--model",
+            "ggml-org/example-GGUF:Q4_K_M",
+            "--generate-only",
+            "--no-build",
+        ]
+    )
 
     assert result == 0
     env = omni_cli.load_env_file(compose_file.with_suffix(".env"))
@@ -1026,17 +1079,19 @@ def test_portable_flags_reuse_saved_managed_backend(tmp_path):
 def test_llamacpp_local_gguf_model_uses_dash_m(tmp_path):
     compose_file = tmp_path / "docker-compose.llamacpp.yml"
 
-    result = omni_cli.main([
-        "serve",
-        "--backend",
-        "llamacpp",
-        "--model",
-        "qwen3.gguf",
-        "--compose-file",
-        str(compose_file),
-        "--generate-only",
-        "--no-build",
-    ])
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "llamacpp",
+            "--model",
+            "qwen3.gguf",
+            "--compose-file",
+            str(compose_file),
+            "--generate-only",
+            "--no-build",
+        ]
+    )
 
     assert result == 0
     content = compose_file.read_text()
@@ -1077,9 +1132,12 @@ def test_launch_parser_recognizes_tool_with_model_and_port():
 def test_launch_parser_recognizes_claude_tier_models():
     args = parse_launch(
         "claude",
-        "--opus-model", "big",
-        "--sonnet-model", "mid",
-        "--haiku-model", "small",
+        "--opus-model",
+        "big",
+        "--sonnet-model",
+        "mid",
+        "--haiku-model",
+        "small",
     )
     assert args.opus_model == "big"
     assert args.sonnet_model == "mid"
@@ -1178,6 +1236,7 @@ def test_launch_command_calls_integration_launch(monkeypatch):
     launched = []
 
     from omlx.integrations import get_integration
+
     real_integration = get_integration("codex")
     monkeypatch.setattr(real_integration, "is_installed", lambda: True)
     monkeypatch.setattr(real_integration, "launch", lambda ctx: launched.append(ctx))
@@ -1243,6 +1302,7 @@ def test_launch_command_uses_env_api_key(monkeypatch):
     monkeypatch.setattr(omni_cli.urllib.request, "urlopen", fake_open)
 
     from omlx.integrations import get_integration
+
     real_integration = get_integration("claude")
     monkeypatch.setattr(real_integration, "is_installed", lambda: True)
     monkeypatch.setattr(real_integration, "launch", lambda ctx: None)
@@ -1259,3 +1319,24 @@ def test_top_level_help_documents_launch_command(capsys):
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
     assert "omni launch" in out
+
+
+def test_scan_models_flags_map_to_env():
+    from omlx.omni_cli import build_parser, portable_cli_environment
+
+    args = build_parser().parse_args(
+        ["serve", "--backend", "vllm", "--scan-models", "--model-dir", "~/models"]
+    )
+    env = portable_cli_environment(args)
+    assert env["OMLX_MODEL_SCAN"] == "true"
+    assert env["OMLX_MODEL_SCAN_HOST_DIR"].endswith("/models")
+    assert not env["OMLX_MODEL_SCAN_HOST_DIR"].startswith("~")
+
+
+def test_scan_models_absent_by_default():
+    from omlx.omni_cli import build_parser, portable_cli_environment
+
+    args = build_parser().parse_args(["serve", "--backend", "vllm"])
+    env = portable_cli_environment(args)
+    assert "OMLX_MODEL_SCAN" not in env
+    assert "OMLX_MODEL_SCAN_HOST_DIR" not in env

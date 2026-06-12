@@ -117,13 +117,19 @@ def test_proxy_service_parity_between_backends():
     )
 
     # The proxy blocks differ only in backend URL, sidecar identity,
-    # generated-file names, and depends_on.
+    # generated-file names, depends_on, and the extra llama.cpp cache
+    # scan mount.
     normalized = (
         lcpp_proxy.replace("http://llamacpp:8000/v1", "http://vllm:8000/v1")
         .replace('OMLX_SIDECAR_BACKEND: "llamacpp"', 'OMLX_SIDECAR_BACKEND: "vllm"')
         .replace("docker-compose.llamacpp.yml", "docker-compose.vllm.yml")
         .replace("docker-compose.llamacpp.env", "docker-compose.vllm.env")
         .replace("- llamacpp", "- vllm")
+        .replace(
+            '      - "${LLAMACPP_CACHE_DIR:-${HOME}/.cache/llama.cpp}'
+            ':/models-scan/llamacpp:ro"\n',
+            "",
+        )
     )
     assert normalized == vllm_proxy
     assert (
@@ -176,3 +182,20 @@ def test_sampling_max_tokens_defaults_to_unset():
     assert LlamacppComposeSettings().sampling_max_tokens == 0
     content = render_vllm_compose(VllmComposeSettings())
     assert "OMLX_SAMPLING_MAX_TOKENS:-0" in content
+
+
+def test_proxy_service_carries_model_scan_env_and_mounts():
+    vllm = render_vllm_compose(VllmComposeSettings())
+    assert 'OMLX_MODEL_SCAN: "${OMLX_MODEL_SCAN:-false}"' in vllm
+    assert 'OMLX_MODEL_SCAN_DIR: "/models-scan"' in vllm
+    assert ":/models-scan/hf:ro" in vllm
+    assert "${OMLX_MODEL_SCAN_HOST_DIR:-${OMNI_HF_HOME:-" in vllm
+
+    from omlx.proxy.llamacpp_compose import (
+        LlamacppComposeSettings,
+        render_llamacpp_compose,
+    )
+
+    llamacpp = render_llamacpp_compose(LlamacppComposeSettings())
+    assert ":/models-scan/hf:ro" in llamacpp
+    assert ":/models-scan/llamacpp:ro" in llamacpp

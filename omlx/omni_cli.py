@@ -77,6 +77,7 @@ PORTABLE_ARG_ATTRS = (
     "max_parallel",
     "hf_home",
     "hf_endpoint",
+    "model_dir",
 )
 VLLM_SPECIFIC_ARG_ATTRS = (
     "vllm_image",
@@ -286,7 +287,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="OpenAI-compatible backend URL including /v1 for proxy backends",
     )
     serve.add_argument("--backend-api-key", default=None, help="Backend API key")
-    serve.add_argument("--api-key", default=None, help="API key required by the oMNI proxy")
+    serve.add_argument(
+        "--api-key", default=None, help="API key required by the oMNI proxy"
+    )
     serve.add_argument("--proxy-port", type=int, default=None, help="Host proxy port")
     serve.add_argument(
         "--compose-file",
@@ -305,7 +308,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run docker compose detached (default)",
     )
     serve.set_defaults(foreground=False)
-    serve.add_argument("--no-build", action="store_true", help="Do not pass --build to compose up")
+    serve.add_argument(
+        "--no-build", action="store_true", help="Do not pass --build to compose up"
+    )
     serve.add_argument(
         "--generate-only",
         action="store_true",
@@ -322,7 +327,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Model id or container-local path (llama.cpp: owner/repo[:quant] or .gguf path)",
     )
-    serve.add_argument("--served-model-name", default=None, help="API-visible model name")
+    serve.add_argument(
+        "--served-model-name", default=None, help="API-visible model name"
+    )
     serve.add_argument("--port", type=int, default=None, help="Host backend port")
     serve.add_argument(
         "--context-length",
@@ -336,7 +343,25 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Max concurrent sequences (vLLM --max-num-seqs, llama.cpp --parallel)",
     )
-    serve.add_argument("--hf-home", default=None, help="Host Hugging Face cache directory")
+    serve.add_argument(
+        "--hf-home", default=None, help="Host Hugging Face cache directory"
+    )
+    serve.add_argument(
+        "--scan-models",
+        action="store_true",
+        help=(
+            "Let the admin UI scan the host model caches (read-only) and "
+            "list downloaded models with a one-click sidecar switch"
+        ),
+    )
+    serve.add_argument(
+        "--model-dir",
+        default=None,
+        help=(
+            "Host directory to scan for local models with --scan-models "
+            "(default: the Hugging Face cache)"
+        ),
+    )
 
     serve.add_argument("--vllm-image", default=None, help="vLLM container image")
     serve.add_argument(
@@ -354,7 +379,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--default-chat-template-kwargs",
         default=None,
-        help='JSON passed to vLLM --default-chat-template-kwargs',
+        help="JSON passed to vLLM --default-chat-template-kwargs",
     )
     serve.add_argument(
         "--trust-remote-code",
@@ -369,7 +394,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Do not pass --trust-remote-code to vLLM",
     )
-    serve.add_argument("--enforce-eager", action="store_true", default=None, help="Pass --enforce-eager")
+    serve.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        default=None,
+        help="Pass --enforce-eager",
+    )
     serve.add_argument(
         "--enable-auto-tool-choice",
         action="store_true",
@@ -422,11 +452,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pass --no-enable-prefix-caching to vLLM",
     )
     serve.add_argument("--kv-cache-dtype", default=None, help="vLLM KV cache dtype")
-    serve.add_argument("--cpu-offload-gb", type=float, default=None, help="CPU offload GB per GPU")
-    serve.add_argument("--swap-space", type=float, default=None, help="CPU swap space GB per GPU")
-    serve.add_argument("--tensor-parallel-size", type=int, default=None, help="vLLM tensor parallel size")
-    serve.add_argument("--pipeline-parallel-size", type=int, default=None, help="vLLM pipeline parallel size")
-    serve.add_argument("--uvicorn-log-level", default=None, help="vLLM API server log level")
+    serve.add_argument(
+        "--cpu-offload-gb", type=float, default=None, help="CPU offload GB per GPU"
+    )
+    serve.add_argument(
+        "--swap-space", type=float, default=None, help="CPU swap space GB per GPU"
+    )
+    serve.add_argument(
+        "--tensor-parallel-size",
+        type=int,
+        default=None,
+        help="vLLM tensor parallel size",
+    )
+    serve.add_argument(
+        "--pipeline-parallel-size",
+        type=int,
+        default=None,
+        help="vLLM pipeline parallel size",
+    )
+    serve.add_argument(
+        "--uvicorn-log-level", default=None, help="vLLM API server log level"
+    )
     serve.add_argument(
         "--disable-log-stats",
         action="store_true",
@@ -439,7 +485,9 @@ def build_parser() -> argparse.ArgumentParser:
         help='Raw vLLM args as a JSON array, appended last, e.g. ["--foo","bar"]',
     )
 
-    serve.add_argument("--llamacpp-image", default=None, help="llama.cpp server container image")
+    serve.add_argument(
+        "--llamacpp-image", default=None, help="llama.cpp server container image"
+    )
     serve.add_argument(
         "--n-gpu-layers",
         type=int,
@@ -452,11 +500,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="llama.cpp flash attention mode",
     )
-    serve.add_argument("--cache-type-k", default=None, help="llama.cpp KV cache K type (e.g. q8_0)")
-    serve.add_argument("--cache-type-v", default=None, help="llama.cpp KV cache V type (e.g. q8_0)")
-    serve.add_argument("--threads", type=int, default=None, help="llama.cpp CPU threads")
-    serve.add_argument("--batch-size", type=int, default=None, help="llama.cpp logical batch size")
-    serve.add_argument("--ubatch-size", type=int, default=None, help="llama.cpp physical batch size")
+    serve.add_argument(
+        "--cache-type-k", default=None, help="llama.cpp KV cache K type (e.g. q8_0)"
+    )
+    serve.add_argument(
+        "--cache-type-v", default=None, help="llama.cpp KV cache V type (e.g. q8_0)"
+    )
+    serve.add_argument(
+        "--threads", type=int, default=None, help="llama.cpp CPU threads"
+    )
+    serve.add_argument(
+        "--batch-size", type=int, default=None, help="llama.cpp logical batch size"
+    )
+    serve.add_argument(
+        "--ubatch-size", type=int, default=None, help="llama.cpp physical batch size"
+    )
     serve.add_argument(
         "--jinja",
         dest="jinja",
@@ -470,7 +528,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Disable llama.cpp jinja chat templates",
     )
-    serve.add_argument("--reasoning-format", default=None, help="llama.cpp reasoning format")
+    serve.add_argument(
+        "--reasoning-format", default=None, help="llama.cpp reasoning format"
+    )
     serve.add_argument(
         "--llamacpp-cache-dir",
         default=None,
@@ -487,11 +547,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Raw llama-server args appended last (whitespace separated)",
     )
 
-    serve.add_argument("--http-proxy", default=None, help="HTTP proxy for proxy and backend containers")
-    serve.add_argument("--https-proxy", default=None, help="HTTPS proxy for proxy and backend containers")
-    serve.add_argument("--no-proxy", default=None, help="Comma-separated hosts that bypass proxy")
-    serve.add_argument("--ca-bundle", default=None, help="CA bundle path for TLS verification")
-    serve.add_argument("--hf-endpoint", default=None, help="Hugging Face endpoint for model downloads")
+    serve.add_argument(
+        "--http-proxy", default=None, help="HTTP proxy for proxy and backend containers"
+    )
+    serve.add_argument(
+        "--https-proxy",
+        default=None,
+        help="HTTPS proxy for proxy and backend containers",
+    )
+    serve.add_argument(
+        "--no-proxy", default=None, help="Comma-separated hosts that bypass proxy"
+    )
+    serve.add_argument(
+        "--ca-bundle", default=None, help="CA bundle path for TLS verification"
+    )
+    serve.add_argument(
+        "--hf-endpoint", default=None, help="Hugging Face endpoint for model downloads"
+    )
     serve.add_argument(
         "--context-scaling",
         action="store_true",
@@ -524,7 +596,9 @@ def build_parser() -> argparse.ArgumentParser:
         "tool",
         help="Tool to launch: claude, codex, opencode, openclaw, copilot, hermes, pi, or 'list'",
     )
-    launch.add_argument("--model", default=None, help="Model id to use (skips interactive selection)")
+    launch.add_argument(
+        "--model", default=None, help="Model id to use (skips interactive selection)"
+    )
     launch.add_argument(
         "--host",
         default=None,
@@ -541,9 +615,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="oMNI proxy API key (default: OMLX_PROXY_API_KEY or OMLX_API_KEY env)",
     )
-    launch.add_argument("--opus-model", default=None, help="Claude Code Opus-tier model override")
-    launch.add_argument("--sonnet-model", default=None, help="Claude Code Sonnet-tier model override")
-    launch.add_argument("--haiku-model", default=None, help="Claude Code Haiku-tier model override")
+    launch.add_argument(
+        "--opus-model", default=None, help="Claude Code Opus-tier model override"
+    )
+    launch.add_argument(
+        "--sonnet-model", default=None, help="Claude Code Sonnet-tier model override"
+    )
+    launch.add_argument(
+        "--haiku-model", default=None, help="Claude Code Haiku-tier model override"
+    )
 
     status = subparsers.add_parser(
         "status",
@@ -767,7 +847,9 @@ def merged_sidecar_environment(
     if env_file is not None:
         values.update(known_env(load_env_file(env_file), spec.env_keys))
     if env_file is not None and not env_file.exists() and compose_file is not None:
-        values.update(known_env(env_from_compose(compose_file, spec.env_keys), spec.env_keys))
+        values.update(
+            known_env(env_from_compose(compose_file, spec.env_keys), spec.env_keys)
+        )
     values.update(sidecar_cli_environment(backend, args))
     return values
 
@@ -813,6 +895,10 @@ def portable_cli_environment(args: argparse.Namespace) -> dict[str, str]:
         values["OMNI_HF_HOME"] = _host_path(args.hf_home)
     if getattr(args, "context_scaling", False):
         values["OMLX_CONTEXT_SCALING"] = "true"
+    if getattr(args, "scan_models", False):
+        values["OMLX_MODEL_SCAN"] = "true"
+    if getattr(args, "model_dir", None) is not None:
+        values["OMLX_MODEL_SCAN_HOST_DIR"] = _host_path(args.model_dir)
     return values
 
 
@@ -965,10 +1051,9 @@ def compose_file_for_serve_backend(
 ) -> Path:
     if args.compose_file:
         return Path(args.compose_file).expanduser()
-    if (
-        (state or {}).get("backend") == backend
-        and (state or {}).get("mode", "managed") == mode
-    ):
+    if (state or {}).get("backend") == backend and (state or {}).get(
+        "mode", "managed"
+    ) == mode:
         state_compose = _path_from_state((state or {}).get("compose_file"))
         if state_compose is not None:
             return state_compose
@@ -977,9 +1062,7 @@ def compose_file_for_serve_backend(
 
 def default_proxy_environment(backend: str) -> dict[str, str]:
     return {
-        "OMLX_BACKEND_URL": (
-            OPENAI_DEFAULT_BACKEND_URL if backend == "openai" else ""
-        ),
+        "OMLX_BACKEND_URL": (OPENAI_DEFAULT_BACKEND_URL if backend == "openai" else ""),
         "OMLX_BACKEND_API_KEY": "",
         "OMLX_PROXY_API_KEY": "",
         "OMLX_PROXY_PORT": str(VllmComposeSettings.proxy_port),
@@ -1117,7 +1200,11 @@ def proxy_environment(
     values = default_proxy_environment(effective_backend)
     if existing_env is not None:
         values.update(
-            {key: str(existing_env[key]) for key in PROXY_ENV_KEYS if key in existing_env}
+            {
+                key: str(existing_env[key])
+                for key in PROXY_ENV_KEYS
+                if key in existing_env
+            }
         )
     values.update(proxy_cli_environment(args))
     values["OMLX_BACKEND_URL"] = proxy_backend_url(effective_backend, values)
