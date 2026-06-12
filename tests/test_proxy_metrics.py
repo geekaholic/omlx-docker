@@ -78,6 +78,28 @@ def test_llamacpp_summary_exposes_kv_cache():
     assert summary["prefix_cache_hit_rate"] is None
 
 
+# Current llama.cpp builds (b9570+) dropped the kv_cache_* families; the
+# context high-water mark is the remaining occupancy signal.
+_LLAMACPP_MODERN_TEXT = """\
+llamacpp:prompt_tokens_total 38.0
+llamacpp:tokens_predicted_total 3336.0
+llamacpp:n_tokens_max 3373.0
+llamacpp:prompt_tokens_seconds 1.22
+llamacpp:predicted_tokens_seconds 35.76
+llamacpp:requests_processing 0.0
+llamacpp:requests_deferred 0.0
+"""
+
+
+def test_llamacpp_modern_build_without_kv_cache_metrics():
+    summary = summarize_selected_metrics(_selected(_LLAMACPP_MODERN_TEXT))
+    assert summary["kv_cache_usage_ratio"] is None
+    assert summary["kv_cache_tokens"] is None
+    assert summary["context_tokens_peak"] == 3373.0
+    assert summary["prompt_tokens_seconds"] == 1.22
+    assert summary["predicted_tokens_seconds"] == 35.76
+
+
 def test_host_memory_info_parses_meminfo(tmp_path):
     from omlx.proxy.metrics import host_memory_info
 

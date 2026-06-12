@@ -761,5 +761,6 @@
   "js.error.delete_model_failed": "Impossible de supprimer le modèle",
   "js.error.delete_model_connection": "Impossible de supprimer le modèle. Vérifiez la connexion au serveur.",
   "js.success.download_started": "Téléchargement démarré : {repo_id}",
-  "js.success.settings_saved": "Paramètres enregistrés avec succès"
+  "js.success.settings_saved": "Paramètres enregistrés avec succès",
+  "status.cache.peak_ctx_tokens": "Pic de tokens de contexte"
 }

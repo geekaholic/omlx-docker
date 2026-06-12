@@ -2393,12 +2393,18 @@
             },
 
             get backendCacheMetricsAvailable() {
+                // Throughput/peak metrics count too: current llama.cpp
+                // builds dropped the kv_cache_* families, and an all-null
+                // gate would blank the panel despite usable data.
                 const s = this.backendCacheSummary;
                 return s.prefix_cache_hit_rate != null
                     || s.prefix_cache_queries != null
                     || s.gpu_cache_usage_perc != null
                     || s.kv_cache_usage_ratio != null
-                    || s.kv_cache_tokens != null;
+                    || s.kv_cache_tokens != null
+                    || s.context_tokens_peak != null
+                    || s.prompt_tokens_seconds != null
+                    || s.predicted_tokens_seconds != null;
             },
 
             get isSidecarBackendType() {

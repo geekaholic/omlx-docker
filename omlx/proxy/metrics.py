@@ -243,9 +243,12 @@ def select_prometheus_metrics(samples: list[dict[str, Any]]) -> dict[str, float]
             "vllm:gpu_prefix_cache_hit_rate",
             "gpu_prefix_cache_hit_rate",
         ),
-        # llama.cpp server --metrics
+        # llama.cpp server --metrics; current builds (b9570+) dropped the
+        # kv_cache_* families, keeping n_tokens_max as the context
+        # high-water mark — surface it so the cache panel isn't empty.
         "kv_cache_usage_ratio": ("llamacpp:kv_cache_usage_ratio",),
         "kv_cache_tokens": ("llamacpp:kv_cache_tokens",),
+        "context_tokens_peak": ("llamacpp:n_tokens_max",),
         "prompt_tokens_seconds": ("llamacpp:prompt_tokens_seconds",),
         "predicted_tokens_seconds": ("llamacpp:predicted_tokens_seconds",),
     }
@@ -253,6 +256,7 @@ def select_prometheus_metrics(samples: list[dict[str, Any]]) -> dict[str, float]
         "gpu_cache_usage_perc",
         "prefix_cache_hit_rate_gauge",
         "kv_cache_usage_ratio",
+        "context_tokens_peak",
         "prompt_tokens_seconds",
         "predicted_tokens_seconds",
     }
@@ -284,6 +288,7 @@ def summarize_selected_metrics(selected: dict[str, float]) -> dict[str, Any]:
         "prefix_cache_hit_rate": hit_rate,
         "kv_cache_usage_ratio": selected.get("kv_cache_usage_ratio"),
         "kv_cache_tokens": selected.get("kv_cache_tokens"),
+        "context_tokens_peak": selected.get("context_tokens_peak"),
         "prompt_tokens_seconds": selected.get("prompt_tokens_seconds"),
         "predicted_tokens_seconds": selected.get("predicted_tokens_seconds"),
     }

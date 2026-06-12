@@ -612,6 +612,11 @@
                                     <p class="text-lg font-bold text-neutral-900"
                                        x-text="formatNumber(backendCacheSummary.kv_cache_tokens || 0)"></p>
                                 </div>
+                                <div x-show="backendCacheSummary.context_tokens_peak != null">
+                                    <p class="text-[11px] text-neutral-400 mb-0.5">{{ t('status.cache.peak_ctx_tokens') }}</p>
+                                    <p class="text-lg font-bold text-neutral-900"
+                                       x-text="formatNumber(backendCacheSummary.context_tokens_peak || 0)"></p>
+                                </div>
                                 <div x-show="backendCacheSummary.prompt_tokens_seconds != null">
                                     <p class="text-[11px] text-neutral-400 mb-0.5">{{ t('status.cache.avg_pp_tps') }}</p>
                                     <p class="text-lg font-bold text-neutral-900"

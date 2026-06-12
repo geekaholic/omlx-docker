@@ -761,5 +761,6 @@
   "js.error.delete_model_failed": "모델 삭제에 실패했습니다",
   "js.error.delete_model_connection": "모델 삭제에 실패했습니다. 서버 연결을 확인하세요.",
   "js.success.download_started": "다운로드 시작: {repo_id}",
-  "js.success.settings_saved": "설정이 저장되었습니다"
+  "js.success.settings_saved": "설정이 저장되었습니다",
+  "status.cache.peak_ctx_tokens": "최대 컨텍스트 토큰"
 }

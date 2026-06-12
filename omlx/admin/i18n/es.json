@@ -761,5 +761,6 @@
   "js.error.delete_model_failed": "Error al eliminar el modelo",
   "js.error.delete_model_connection": "Error al eliminar el modelo. Verifica la conexión con el servidor.",
   "js.success.download_started": "Descarga iniciada: {repo_id}",
-  "js.success.settings_saved": "Configuración guardada correctamente"
+  "js.success.settings_saved": "Configuración guardada correctamente",
+  "status.cache.peak_ctx_tokens": "Tokens de contexto pico"
 }

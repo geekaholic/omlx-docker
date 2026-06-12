@@ -82,6 +82,7 @@
   "status.cache.gpu_kv_usage": "GPU KV Cache Usage",
   "status.cache.kv_usage": "KV Cache Usage",
   "status.cache.kv_tokens": "KV Cache Tokens",
+  "status.cache.peak_ctx_tokens": "Peak Context Tokens",
   "status.cache.avg_pp_tps": "Avg Prompt tok/s",
   "status.cache.avg_tg_tps": "Avg Generation tok/s",
   "status.cache.backend_not_exposed": "Cache metrics are not exposed by this backend",

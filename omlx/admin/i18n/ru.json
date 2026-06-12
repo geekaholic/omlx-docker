@@ -761,5 +761,6 @@
   "js.error.delete_model_failed": "Не удалось удалить модель",
   "js.error.delete_model_connection": "Не удалось удалить модель. Проверьте соединение с сервером.",
   "js.success.download_started": "Загрузка начата: {repo_id}",
-  "js.success.settings_saved": "Настройки успешно сохранены"
+  "js.success.settings_saved": "Настройки успешно сохранены",
+  "status.cache.peak_ctx_tokens": "Пик контекстных токенов"
 }
