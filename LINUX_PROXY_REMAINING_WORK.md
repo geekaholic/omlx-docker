@@ -124,6 +124,16 @@ llama.cpp server, or any OpenAI-compatible endpoint (Ollama, for example).
   (force-recreate fixes); pre-merge generated env files use old
   `VLLM_*` key names and silently fall back to template defaults —
   regenerate with `omni serve` or the admin UI.
+- **max_tokens vs context window** (commit e6178c8): a Max Tokens
+  sampling default >= the backend context made vLLM reject every chat
+  request, and the Settings UI used to pre-fill Max Tokens with the
+  context size. Fixed with a backend context-limit probe
+  (`backend_context_limit` in `omlx/proxy/metrics.py`: vLLM
+  `max_model_len`, llama.cpp `/props`), injection guard + one retry
+  without the cap on context-length 400s, unset-by-default Max Tokens
+  (was hardcoded 32768), and inline Settings/chat warnings with a
+  "Use recommended (ctx/2)" action. Verified live against the
+  misconfigured env (OMLX_SAMPLING_MAX_TOKENS=65000, ctx 65000).
 
 ## Remaining Implementation Steps
 

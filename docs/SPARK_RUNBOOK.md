@@ -161,6 +161,15 @@ switch back.
   are git-ignored, generated files. If a template change doesn't show up,
   delete them or regenerate from the admin UI (Settings → Backend →
   Regenerate).
+- **Every chat request 400s with "maximum context length is N tokens"
+  on vLLM**: the proxy's Max Tokens sampling default
+  (`OMLX_SAMPLING_MAX_TOKENS` / Settings → Generation → Max Tokens) is
+  at or above the backend context window — vLLM enforces
+  `prompt + max_tokens ≤ max_model_len`. The proxy now refuses to
+  inject such a default (and retries once without it on a
+  context-length 400), and the Settings UI flags the value with a
+  "Use recommended" fix. Leave Max Tokens empty to use the backend's
+  own limit.
 - **`nvidia-smi` memory shows `[N/A]`** on GB10: unified memory. Real
   ceiling is host MemTotal (`/proc/meminfo`); per-process GPU usage is
   still reported by `nvidia-smi --query-compute-apps=used_memory ...`.
