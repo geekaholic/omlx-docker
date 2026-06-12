@@ -124,6 +124,14 @@ llama.cpp server, or any OpenAI-compatible endpoint (Ollama, for example).
   (force-recreate fixes); pre-merge generated env files use old
   `VLLM_*` key names and silently fall back to template defaults —
   regenerate with `omni serve` or the admin UI.
+- **Local model scan** (commit e43c082): opt-in `omni serve
+  --scan-models [--model-dir DIR]` mounts host caches read-only into the
+  proxy; `omlx/proxy/local_models.py` classifies HF-cache safetensors
+  (vLLM) and GGUF repos/files (llama.cpp) reusing MLX-free
+  `model_discovery` helpers; Models tab lists them with a one-click
+  "Use with sidecar" switch through the existing settings + restart
+  flows. Verified live: 12 HF repos listed on the vLLM stack, switch to
+  Qwen/Qwen3-1.7B via API + restart worked end-to-end.
 - **max_tokens vs context window** (commit e6178c8): a Max Tokens
   sampling default >= the backend context made vLLM reject every chat
   request, and the Settings UI used to pre-fill Max Tokens with the

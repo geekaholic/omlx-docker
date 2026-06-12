@@ -124,6 +124,26 @@ omni serve --backend openai --backend-url http://other-box:8000/v1 \
 Backend URL/key/type can also be changed live in the admin UI
 (Settings → Backend) without restarting the proxy.
 
+## Local model scan (`--scan-models`)
+
+```bash
+omni serve --backend vllm --scan-models            # scan the HF cache
+omni serve --backend vllm --scan-models --model-dir /path/to/models
+```
+
+Mounts the host model caches read-only into the proxy and adds a
+"Local Models (scanned)" section to the Models tab listing every
+downloaded model (safetensors → vLLM, GGUF → llama.cpp; type, size,
+context length). "Use with sidecar" rewrites `OMNI_MODEL` in the
+generated env and offers the backend-restart dialog — switching between
+already-downloaded models takes one click plus the model load time.
+`Rescan` picks up newly downloaded models without restarting anything.
+
+Notes: the llama.cpp stack also scans `LLAMACPP_CACHE_DIR`; GGUF rows
+pass the bare repo id (llama.cpp resolves its default quant). The flag
+persists in the generated env file — set `OMLX_MODEL_SCAN=false` there
+(or in the admin-regenerated env) to turn it back off.
+
 ## Operations
 
 ```bash

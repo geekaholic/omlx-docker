@@ -2620,13 +2620,21 @@
                 this.localModelSwitching = true;
                 try {
                     const servedName = model.repo_id.split('/').pop();
+                    const payload = {
+                        omni_model: model.repo_id,
+                        omni_served_model_name: servedName,
+                    };
+                    // Cap the launch context length at the model's own
+                    // limit — vLLM refuses to start when max-model-len
+                    // exceeds the config.json maximum.
+                    const currentCtx = Number(this.globalSettings.proxy?.sidecar?.context_length) || null;
+                    if (model.context_length && (!currentCtx || model.context_length < currentCtx)) {
+                        payload.omni_context_length = model.context_length;
+                    }
                     const response = await fetch('/admin/api/global-settings', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            omni_model: model.repo_id,
-                            omni_served_model_name: servedName,
-                        }),
+                        body: JSON.stringify(payload),
                     });
                     if (!response.ok) return;
                     this.localModels.current_model = model.repo_id;
