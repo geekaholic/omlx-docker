@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,12 @@ from .sidecar_compose import (
     render_proxy_service,
     write_env_file,
 )
+from .tool_config import (
+    AUTO_VALUES,
+    OFF_VALUES,
+    reasoning_parser_for,
+    resolve_vllm_tool_config,
+)
 
 DEFAULT_VLLM_COMPOSE_NAME = "docker-compose.vllm.yml"
 DEFAULT_VLLM_ENV_NAME = "docker-compose.vllm.env"
@@ -57,9 +64,13 @@ class VllmComposeSettings(CommonSidecarSettings):
     default_chat_template_kwargs: str = '{"enable_thinking":false}'
     trust_remote_code: bool = True
     enforce_eager: bool = False
-    enable_auto_tool_choice: bool = False
-    tool_call_parser: str = "hermes"
+    # Tool calling is on by default; the parser is auto-detected from the model
+    # family (see tool_config.resolve_vllm_tool_config). "auto" / "" -> detect,
+    # "none"/"off" -> disabled, any other value -> explicit vLLM parser name.
+    enable_auto_tool_choice: bool = True
+    tool_call_parser: str = "auto"
     reasoning_parser: str = ""
+    chat_template: str = ""
     dtype: str = ""
     tokenizer: str = ""
     tokenizer_mode: str = ""
@@ -90,6 +101,7 @@ VLLM_SPECIFIC_KEYS = (
     "VLLM_ENABLE_AUTO_TOOL_CHOICE",
     "VLLM_TOOL_CALL_PARSER",
     "VLLM_REASONING_PARSER",
+    "VLLM_CHAT_TEMPLATE",
     "VLLM_DTYPE",
     "VLLM_TOKENIZER",
     "VLLM_TOKENIZER_MODE",
@@ -154,6 +166,7 @@ def settings_from_overrides(overrides: dict[str, Any]) -> VllmComposeSettings:
         reasoning_parser=str(
             pick("vllm_reasoning_parser", defaults.reasoning_parser)
         ).strip(),
+        chat_template=str(pick("vllm_chat_template", defaults.chat_template)).strip(),
         dtype=str(pick("vllm_dtype", defaults.dtype)).strip(),
         tokenizer=str(pick("vllm_tokenizer", defaults.tokenizer)).strip(),
         tokenizer_mode=str(
@@ -203,7 +216,71 @@ def settings_from_overrides(overrides: dict[str, Any]) -> VllmComposeSettings:
         ).strip()
         or defaults.extra_args_json,
     )
-    return VllmComposeSettings(**kwargs)
+    return resolve_tool_settings(VllmComposeSettings(**kwargs))
+
+
+def resolve_tool_env(settings: VllmComposeSettings) -> dict[str, str]:
+    """Resolve the concrete vLLM tool-calling env from a model + user intent.
+
+    ``VLLM_ENABLE_AUTO_TOOL_CHOICE`` carries the user's master switch (on by
+    default). ``VLLM_TOOL_CALL_PARSER`` is the *resolved* parser, or empty when
+    tools should be off. Actual enablement is ``enable AND parser != ""`` — the
+    launch shell only passes ``--enable-auto-tool-choice`` when a concrete parser
+    is present, because vLLM refuses to start with the flag and no valid parser.
+
+    Parser precedence:
+
+    * master switch off, or ``tool_call_parser`` in {"none","off",...} -> empty.
+    * ``tool_call_parser`` in {"", "auto"} -> detect from the model family; an
+      unrecognized family leaves it empty (tools effectively off).
+    * any other value -> that explicit parser.
+
+    Auto-detected reasoning-parser / chat-template only fill in when the user
+    hasn't set them explicitly.
+    """
+    enable = settings.enable_auto_tool_choice
+    reasoning = settings.reasoning_parser
+    chat_template = settings.chat_template
+    intent = (settings.tool_call_parser or "").strip()
+    low = intent.lower()
+
+    parser = ""
+    if enable and low not in OFF_VALUES:
+        if low in AUTO_VALUES:
+            config = resolve_vllm_tool_config(settings.model)
+            if config is not None:
+                parser = config.tool_call_parser
+                reasoning = reasoning or config.reasoning_parser
+                chat_template = chat_template or config.chat_template
+        else:
+            parser = intent
+            # Pair the matching reasoning parser even for an explicit tool parser
+            # (e.g. gemma4 -> gemma4) so reasoning-channel markers don't leak.
+            reasoning = reasoning or reasoning_parser_for(intent)
+
+    return {
+        "VLLM_ENABLE_AUTO_TOOL_CHOICE": _bool_str(enable),
+        "VLLM_TOOL_CALL_PARSER": parser,
+        "VLLM_REASONING_PARSER": reasoning,
+        "VLLM_CHAT_TEMPLATE": chat_template,
+    }
+
+
+def resolve_tool_settings(settings: VllmComposeSettings) -> VllmComposeSettings:
+    """Return ``settings`` with the tool-call parser / reasoning / chat template
+    resolved to concrete values for the model (see :func:`resolve_tool_env`).
+
+    Idempotent: a resolved parser is treated as an explicit choice on re-runs.
+    The master switch ``enable_auto_tool_choice`` is preserved as user intent so
+    a later switch to a recognized model can still turn tools on.
+    """
+    env = resolve_tool_env(settings)
+    return dataclasses.replace(
+        settings,
+        tool_call_parser=env["VLLM_TOOL_CALL_PARSER"],
+        reasoning_parser=env["VLLM_REASONING_PARSER"],
+        chat_template=env["VLLM_CHAT_TEMPLATE"],
+    )
 
 
 def vllm_environment(settings: VllmComposeSettings) -> dict[str, str]:
@@ -218,6 +295,7 @@ def vllm_environment(settings: VllmComposeSettings) -> dict[str, str]:
         "VLLM_ENABLE_AUTO_TOOL_CHOICE": _bool_str(settings.enable_auto_tool_choice),
         "VLLM_TOOL_CALL_PARSER": settings.tool_call_parser,
         "VLLM_REASONING_PARSER": settings.reasoning_parser,
+        "VLLM_CHAT_TEMPLATE": settings.chat_template,
         "VLLM_DTYPE": settings.dtype,
         "VLLM_TOKENIZER": settings.tokenizer,
         "VLLM_TOKENIZER_MODE": settings.tokenizer_mode,
@@ -282,6 +360,7 @@ def vllm_settings_from_env(values: Mapping[str, str]) -> VllmComposeSettings:
         ),
         tool_call_parser=values.get("VLLM_TOOL_CALL_PARSER", defaults.tool_call_parser),
         reasoning_parser=values.get("VLLM_REASONING_PARSER", defaults.reasoning_parser),
+        chat_template=values.get("VLLM_CHAT_TEMPLATE", defaults.chat_template),
         dtype=values.get("VLLM_DTYPE", defaults.dtype),
         tokenizer=values.get("VLLM_TOKENIZER", defaults.tokenizer),
         tokenizer_mode=values.get("VLLM_TOKENIZER_MODE", defaults.tokenizer_mode),
@@ -327,7 +406,7 @@ def vllm_settings_from_env(values: Mapping[str, str]) -> VllmComposeSettings:
         ),
         extra_args_json=values.get("VLLM_EXTRA_ARGS_JSON", defaults.extra_args_json),
     )
-    return VllmComposeSettings(**kwargs)
+    return resolve_tool_settings(VllmComposeSettings(**kwargs))
 
 
 def load_vllm_env_file(path: str | os.PathLike[str]) -> dict[str, str]:
@@ -362,6 +441,7 @@ def render_vllm_compose(
     project_context: str = "..",
     compose_output_dir: str = "../docker",
 ) -> str:
+    settings = resolve_tool_settings(settings)
     env = vllm_environment(settings)
     env_lines = "\n".join(
         f"      {key}: {_yaml_quote(_compose_default_expr(key, value))}"
@@ -447,14 +527,26 @@ services:
         if [ "$${{VLLM_ENFORCE_EAGER:-false}}" = "true" ]; then
           set -- "$${{@}}" --enforce-eager
         fi
-        if [ "$${{VLLM_ENABLE_AUTO_TOOL_CHOICE:-false}}" = "true" ]; then
+        if [ "$${{VLLM_ENABLE_AUTO_TOOL_CHOICE:-true}}" = "true" ] && [ -n "$${{VLLM_TOOL_CALL_PARSER:-}}" ]; then
           set -- "$${{@}}" --enable-auto-tool-choice
-          if [ -n "$${{VLLM_TOOL_CALL_PARSER:-}}" ]; then
-            set -- "$${{@}}" --tool-call-parser "$${{VLLM_TOOL_CALL_PARSER}}"
-          fi
+          set -- "$${{@}}" --tool-call-parser "$${{VLLM_TOOL_CALL_PARSER}}"
         fi
         if [ -n "$${{VLLM_REASONING_PARSER:-}}" ]; then
           set -- "$${{@}}" --reasoning-parser "$${{VLLM_REASONING_PARSER}}"
+        fi
+        if [ -n "$${{VLLM_CHAT_TEMPLATE:-}}" ]; then
+          case "$${{VLLM_CHAT_TEMPLATE}}" in
+            /*)
+              if [ -f "$${{VLLM_CHAT_TEMPLATE}}" ]; then
+                set -- "$${{@}}" --chat-template "$${{VLLM_CHAT_TEMPLATE}}"
+              else
+                echo "omni: chat template $${{VLLM_CHAT_TEMPLATE}} not found in container; using model default" >&2
+              fi
+              ;;
+            *)
+              set -- "$${{@}}" --chat-template "$${{VLLM_CHAT_TEMPLATE}}"
+              ;;
+          esac
         fi
         if [ -n "$${{VLLM_DTYPE:-}}" ]; then
           set -- "$${{@}}" --dtype "$${{VLLM_DTYPE}}"
@@ -516,7 +608,7 @@ services:
           eval "set -- \\\"\\$$@\\\" $${{extra_args}}"
         fi
         unset OMNI_MODEL OMNI_SERVED_MODEL_NAME OMNI_CONTEXT_LENGTH OMNI_MAX_PARALLEL OMNI_BACKEND_PORT OMNI_HF_HOME OMNI_HF_OFFLINE OMNI_HF_ENDPOINT OMNI_HTTP_PROXY OMNI_HTTPS_PROXY OMNI_NO_PROXY OMNI_CA_BUNDLE
-        unset VLLM_IMAGE VLLM_GPU_MEMORY_UTILIZATION VLLM_GENERATION_CONFIG VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS VLLM_TRUST_REMOTE_CODE VLLM_ENFORCE_EAGER VLLM_ENABLE_AUTO_TOOL_CHOICE VLLM_TOOL_CALL_PARSER VLLM_REASONING_PARSER VLLM_DTYPE VLLM_TOKENIZER VLLM_TOKENIZER_MODE VLLM_REVISION VLLM_LOAD_FORMAT VLLM_QUANTIZATION VLLM_DOWNLOAD_DIR VLLM_MAX_NUM_BATCHED_TOKENS VLLM_ENABLE_CHUNKED_PREFILL VLLM_ENABLE_PREFIX_CACHING VLLM_KV_CACHE_DTYPE VLLM_CPU_OFFLOAD_GB VLLM_SWAP_SPACE VLLM_TENSOR_PARALLEL_SIZE VLLM_PIPELINE_PARALLEL_SIZE VLLM_UVICORN_LOG_LEVEL VLLM_DISABLE_LOG_STATS VLLM_EXTRA_ARGS_JSON VLLM_BUILD_COMMIT VLLM_BUILD_PIPELINE VLLM_BUILD_URL VLLM_IMAGE_TAG
+        unset VLLM_IMAGE VLLM_GPU_MEMORY_UTILIZATION VLLM_GENERATION_CONFIG VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS VLLM_TRUST_REMOTE_CODE VLLM_ENFORCE_EAGER VLLM_ENABLE_AUTO_TOOL_CHOICE VLLM_TOOL_CALL_PARSER VLLM_REASONING_PARSER VLLM_CHAT_TEMPLATE VLLM_DTYPE VLLM_TOKENIZER VLLM_TOKENIZER_MODE VLLM_REVISION VLLM_LOAD_FORMAT VLLM_QUANTIZATION VLLM_DOWNLOAD_DIR VLLM_MAX_NUM_BATCHED_TOKENS VLLM_ENABLE_CHUNKED_PREFILL VLLM_ENABLE_PREFIX_CACHING VLLM_KV_CACHE_DTYPE VLLM_CPU_OFFLOAD_GB VLLM_SWAP_SPACE VLLM_TENSOR_PARALLEL_SIZE VLLM_PIPELINE_PARALLEL_SIZE VLLM_UVICORN_LOG_LEVEL VLLM_DISABLE_LOG_STATS VLLM_EXTRA_ARGS_JSON VLLM_BUILD_COMMIT VLLM_BUILD_PIPELINE VLLM_BUILD_URL VLLM_IMAGE_TAG
         unset OMLX_PROXY_PORT OMLX_PROXY_API_KEY OMLX_BACKEND_API_KEY OMLX_CONTEXT_SCALING OMLX_TARGET_CONTEXT_SIZE OMLX_SSE_KEEPALIVE_MODE OMLX_SAMPLING_MAX_TOKENS OMLX_SAMPLING_TEMPERATURE OMLX_SAMPLING_TOP_P OMLX_SAMPLING_TOP_K OMLX_SAMPLING_REPETITION_PENALTY
         exec vllm serve "$${{@}}"
 

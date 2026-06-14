@@ -897,6 +897,7 @@ _VLLM_UPDATE_FIELDS = (
     "vllm_enable_auto_tool_choice",
     "vllm_tool_call_parser",
     "vllm_reasoning_parser",
+    "vllm_chat_template",
     "vllm_dtype",
     "vllm_tokenizer",
     "vllm_tokenizer_mode",
@@ -964,11 +965,17 @@ def _extract_sidecar_compose_updates(
 
 # vLLM knobs that depend on the specific model. On a model switch they are reset
 # to vLLM's auto defaults (empty -> let vLLM choose) so a value tuned for the
-# previous model can't break or pessimize the next one. Deliberately excludes
-# enforce_eager (GB10-required on some stacks), tool/reasoning parser, generation
-# config, chat-template kwargs, image, trust_remote_code, and max_parallel, which
-# are cross-model / hardware preferences rather than per-model tuning.
+# previous model can't break or pessimize the next one. The tool-call/reasoning
+# parser and tool chat template are per-model (gemma4 vs hermes vs llama3_json,
+# etc.), so they reset to "auto"/empty to re-run detection against the new model;
+# the enable_auto_tool_choice master switch is preserved as a cross-model
+# preference. Deliberately excludes enforce_eager (GB10-required on some stacks),
+# enable_auto_tool_choice, generation config, chat-template kwargs, image,
+# trust_remote_code, and max_parallel, which are cross-model / hardware prefs.
 _VLLM_MODEL_SPECIFIC_RESETS: dict[str, Any] = {
+    "vllm_tool_call_parser": "auto",
+    "vllm_reasoning_parser": "",
+    "vllm_chat_template": "",
     "vllm_dtype": "",
     "vllm_quantization": "",
     "vllm_kv_cache_dtype": "",
@@ -1110,6 +1117,7 @@ _VLLM_UPDATE_ENV_MAP = {
     "vllm_enable_auto_tool_choice": "VLLM_ENABLE_AUTO_TOOL_CHOICE",
     "vllm_tool_call_parser": "VLLM_TOOL_CALL_PARSER",
     "vllm_reasoning_parser": "VLLM_REASONING_PARSER",
+    "vllm_chat_template": "VLLM_CHAT_TEMPLATE",
     "vllm_dtype": "VLLM_DTYPE",
     "vllm_tokenizer": "VLLM_TOKENIZER",
     "vllm_tokenizer_mode": "VLLM_TOKENIZER_MODE",

@@ -1903,9 +1903,6 @@
                         <p x-show="currentModelContextWindow" x-cloak class="text-[10px]"
                             style="color: var(--text-secondary);"
                             x-text="'Context: ' + (currentModelContextWindow || 0).toLocaleString() + ' tokens'"></p>
-                        <p x-show="maxTokensExceedsModelContext" x-cloak class="text-[10px] font-medium text-amber-600">
-                            At/above the context window — the backend may reject requests.
-                        </p>
                     </div>
                 </div>
 
@@ -2535,12 +2532,6 @@
                     m => m.id === this.currentModel || m.name === this.currentModel
                 );
                 return model?.context_window || null;
-            },
-
-            get maxTokensExceedsModelContext() {
-                const limit = this.currentModelContextWindow;
-                const value = Number(this.modelSettings?.max_tokens);
-                return !!(limit && value && value >= limit);
             },
 
             resolvePreferredDefaultModel(defaultModel) {

@@ -821,11 +821,13 @@ def _int_or_none(value: Any) -> int | None:
 
 
 def _enrich_model_list(data: dict[str, Any], admin_state: Any) -> dict[str, Any]:
-    """Add context_window / max_context_window to each /v1/models entry.
+    """Advertise each model's context window so clients size requests correctly.
 
-    Codex (and other clients) use these fields to determine context limits
-    for custom providers. Priority: admin per-model setting > admin global
-    override > backend-reported max_model_len.
+    The window is the backend's reported ``max_model_len`` — exactly what the
+    serving backend enforces (vLLM ``--max-model-len`` == the sidecar Context
+    Length). That is the single source of truth: it is never capped by a
+    separate admin setting, which would let clients (Codex, etc.) either
+    overflow the real window or waste half of it.
     """
     items = data.get("data")
     if not isinstance(items, list):
@@ -835,16 +837,7 @@ def _enrich_model_list(data: dict[str, Any], admin_state: Any) -> dict[str, Any]
         if not isinstance(item, dict):
             enriched.append(item)
             continue
-        model_id = str(item.get("id", ""))
-        ctx: int | None = None
-        if admin_state is not None:
-            per_model = (admin_state.model_settings or {}).get(model_id, {}) or {}
-            ctx = _int_or_none(per_model.get("max_context_window"))
-            if ctx is None:
-                global_ov = admin_state.global_overrides or {}
-                ctx = _int_or_none(global_ov.get("sampling_max_context_window"))
-        if ctx is None:
-            ctx = _int_or_none(item.get("max_model_len"))
+        ctx = _int_or_none(item.get("max_model_len"))
         if ctx is not None:
             item = {**item, "context_window": ctx, "max_context_window": ctx}
         enriched.append(item)

@@ -63,8 +63,7 @@ class TestIntegrationCommands:
             cmd = ClaudeCodeIntegration().get_command(ctx())
 
         assert (
-            cmd
-            == "'/Users/me/My Apps/oMLX.app/Contents/MacOS/omlx-cli' launch claude"
+            cmd == "'/Users/me/My Apps/oMLX.app/Contents/MacOS/omlx-cli' launch claude"
         )
 
 
@@ -119,9 +118,7 @@ class TestCodexIntegration:
         # user's ~/.codex/config.toml.
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
         codex = CodexIntegration()
-        _capture_codex_launch(
-            codex, ctx(port=8000, api_key="key", model="qwen3.5")
-        )
+        _capture_codex_launch(codex, ctx(port=8000, api_key="key", model="qwen3.5"))
         assert not (tmp_path / ".codex" / "config.toml").exists()
 
     def test_launch_includes_provider_overrides(self):
@@ -135,12 +132,8 @@ class TestCodexIntegration:
             _override_value(argv, "model_providers.omlx.base_url")
             == '"http://192.168.1.100:9000/v1"'
         )
-        assert (
-            _override_value(argv, "model_providers.omlx.env_key") == '"OMLX_API_KEY"'
-        )
-        assert (
-            _override_value(argv, "model_providers.omlx.wire_api") == '"responses"'
-        )
+        assert _override_value(argv, "model_providers.omlx.env_key") == '"OMLX_API_KEY"'
+        assert _override_value(argv, "model_providers.omlx.wire_api") == '"responses"'
         assert captured["env"]["OMLX_API_KEY"] == "key"
 
     def test_launch_reasoning_model(self):
@@ -168,6 +161,29 @@ class TestCodexIntegration:
             codex, ctx(port=8000, model="deepseek-r1-distill", reasoning=False)
         )
         assert _override_value(captured["argv"], "model_reasoning_effort") is None
+
+    def test_launch_passes_context_window_and_max_output_tokens(self):
+        codex = CodexIntegration()
+        captured = _capture_codex_launch(
+            codex,
+            ctx(
+                port=8000,
+                model="gemma-4-26B-A4B-it",
+                context_window=32768,
+                max_tokens=8192,
+            ),
+        )
+        argv = captured["argv"]
+        # Bare ints so Codex parses them as TOML integers (no quotes).
+        assert _override_value(argv, "model_context_window") == "32768"
+        assert _override_value(argv, "model_max_output_tokens") == "8192"
+
+    def test_launch_omits_metadata_when_unknown(self):
+        codex = CodexIntegration()
+        captured = _capture_codex_launch(codex, ctx(port=8000, model="some-model"))
+        argv = captured["argv"]
+        assert _override_value(argv, "model_context_window") is None
+        assert _override_value(argv, "model_max_output_tokens") is None
 
     def test_launch_forwards_extra_args(self):
         codex = CodexIntegration()

@@ -14,6 +14,7 @@ from omlx.api.adapters.base import InternalResponse, StreamChunk
 from omlx.api.openai_models import FunctionCall, ToolCall
 
 from .config import ProxyConfig
+from .protocol_markers import strip_markers
 
 
 class BackendError(RuntimeError):
@@ -54,7 +55,9 @@ class OpenAIBackend:
             headers["authorization"] = inbound_authorization
         return headers
 
-    async def get_models(self, inbound_authorization: str | None = None) -> dict[str, Any]:
+    async def get_models(
+        self, inbound_authorization: str | None = None
+    ) -> dict[str, Any]:
         assert self.client is not None
         response = await self.client.get(
             self.url("models"),
@@ -181,7 +184,7 @@ def openai_response_to_internal(data: dict[str, Any]) -> InternalResponse:
     prompt_details = usage.get("prompt_tokens_details") or {}
 
     tool_calls = _coerce_tool_calls(message.get("tool_calls"))
-    text = message.get("content") or ""
+    text = strip_markers(message.get("content") or "")
     reasoning = message.get("reasoning_content")
     if reasoning and not text:
         text = ""

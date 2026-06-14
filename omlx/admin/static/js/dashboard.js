@@ -979,9 +979,12 @@
                             ),
                             initial_cache_blocks: this.globalSettings.cache.initial_cache_blocks,
                             hot_cache_only: this.globalSettings.cache.hot_cache_only,
-                            sampling_max_context_window: this.globalSettings.sampling.max_context_window,
+                            // Proxy mode: the context window comes from the serving
+                            // backend and Max Tokens is Auto, so clear these admin
+                            // overrides (power users set them via `omni serve`).
+                            sampling_max_context_window: this.proxyMode ? null : this.globalSettings.sampling.max_context_window,
                             sampling_max_context_window_policy: this.globalSettings.sampling.max_context_window_policy || null,
-                            sampling_max_tokens: this.globalSettings.sampling.max_tokens,
+                            sampling_max_tokens: this.proxyMode ? null : this.globalSettings.sampling.max_tokens,
                             sampling_temperature: this.globalSettings.sampling.temperature,
                             sampling_top_p: this.globalSettings.sampling.top_p,
                             sampling_top_k: this.globalSettings.sampling.top_k,
@@ -2414,23 +2417,6 @@
                     : null;
                 if (live && configured) return Math.min(live, configured);
                 return live || configured;
-            },
-
-            get maxTokensExceedsContext() {
-                const limit = this.backendContextLimit;
-                const value = Number(this.globalSettings.sampling?.max_tokens);
-                return !!(this.proxyMode && limit && value && value >= limit);
-            },
-
-            get recommendedMaxTokens() {
-                const limit = this.backendContextLimit;
-                return limit ? Math.floor(limit / 2) : null;
-            },
-
-            applyRecommendedMaxTokens() {
-                if (this.recommendedMaxTokens) {
-                    this.globalSettings.sampling.max_tokens = this.recommendedMaxTokens;
-                }
             },
 
             get backendCacheMetricsAvailable() {

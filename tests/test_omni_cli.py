@@ -31,6 +31,46 @@ def isolate_omni_local_state(monkeypatch, tmp_path):
     )
 
 
+def _final_serve_env(model):
+    """Reproduce the managed-serve env pipeline: baseline -> merge -> resolve."""
+    args = parse_args("--backend", "vllm", "--model", model)
+    spec = omni_cli.backend_spec("vllm")
+    merged = omni_cli.merged_sidecar_environment(
+        "vllm", args, env_file=None, compose_file=None
+    )
+    settings = spec.settings_from_env(merged)
+    return spec.environment(settings)
+
+
+def test_fresh_serve_auto_detects_gemma4_tool_parser():
+    # The reported bug: a fresh `omni serve --model <gemma-4>` must wire up the
+    # gemma4 tool parser, not inherit the default model's hermes parser, and
+    # must never write the literal "auto" sentinel into the env file.
+    env = _final_serve_env("google/gemma-4-26B-A4B-it")
+    assert env["VLLM_TOOL_CALL_PARSER"] == "gemma4"
+    assert env["VLLM_REASONING_PARSER"] == "gemma4"
+    assert env["VLLM_CHAT_TEMPLATE"].endswith("tool_chat_template_gemma4.jinja")
+
+
+def test_fresh_serve_unknown_model_leaves_parser_empty():
+    # An unrecognized family must not pass a bogus parser; the hardened launch
+    # guard then skips --enable-auto-tool-choice so vLLM still starts.
+    env = _final_serve_env("microsoft/phi-4")
+    assert env["VLLM_TOOL_CALL_PARSER"] == ""
+
+
+def test_max_output_tokens_flag_maps_to_env():
+    args = parse_args("--backend", "vllm", "--model", "m", "--max-output-tokens", "8192")
+    env = omni_cli.portable_cli_environment(args)
+    assert env["OMLX_SAMPLING_MAX_TOKENS"] == "8192"
+
+
+def test_max_output_tokens_omitted_is_auto():
+    args = parse_args("--backend", "vllm", "--model", "m")
+    env = omni_cli.portable_cli_environment(args)
+    assert "OMLX_SAMPLING_MAX_TOKENS" not in env
+
+
 def test_top_level_help_documents_serve_options(capsys):
     with pytest.raises(SystemExit) as excinfo:
         omni_cli.main(["--help"])

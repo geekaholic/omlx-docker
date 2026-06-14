@@ -17,11 +17,55 @@ from typing import Any
 from omlx.server_metrics import ServerMetrics
 
 from .backend import OpenAIBackend
+from .protocol_markers import MarkerStripper, strip_markers
 from .stats import record_request
 
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:24]}"
+
+
+def _flatten_content(content: Any) -> Any:
+    """Flatten Responses content parts to the Chat Completions shape.
+
+    Returns a plain string when the content is a single text part, otherwise a
+    list of `{"type": "text"|"image_url", ...}` parts (so VLMs keep images).
+    """
+    if not isinstance(content, list):
+        return content
+    cc_parts: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type", "")
+        if ptype in ("text", "input_text", "output_text"):
+            cc_parts.append({"type": "text", "text": part.get("text", "")})
+        elif ptype == "image_url":
+            cc_parts.append(part)
+        elif ptype == "refusal":
+            cc_parts.append({"type": "text", "text": part.get("refusal", "")})
+    if len(cc_parts) == 1 and cc_parts[0].get("type") == "text":
+        return cc_parts[0]["text"]
+    return cc_parts or ""
+
+
+def _stringify_output(output: Any) -> str:
+    """Coerce a function_call_output payload to a string tool-message content."""
+    if isinstance(output, str):
+        return output
+    if output is None:
+        return ""
+    if isinstance(output, list):
+        parts: list[str] = []
+        for part in output:
+            if isinstance(part, dict):
+                parts.append(part.get("text") or part.get("output") or "")
+            else:
+                parts.append(str(part))
+        return "".join(parts)
+    if isinstance(output, dict):
+        return output.get("text") or output.get("output") or json.dumps(output)
+    return str(output)
 
 
 def _input_to_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -34,34 +78,80 @@ def _input_to_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
     input_val = payload.get("input", [])
     if isinstance(input_val, str):
         messages.append({"role": "user", "content": input_val})
-    elif isinstance(input_val, list):
-        for item in input_val:
-            if not isinstance(item, dict):
-                continue
+        return messages
+    if not isinstance(input_val, list):
+        return messages
+
+    # Accumulate the model's tool calls so they can be grouped into one
+    # assistant message (and merged onto a preceding assistant text turn),
+    # mirroring omlx.api.responses_utils.convert_responses_input_to_messages.
+    pending_tool_calls: list[dict[str, Any]] = []
+
+    def flush_tool_calls() -> None:
+        if not pending_tool_calls:
+            return
+        if (
+            messages
+            and messages[-1].get("role") == "assistant"
+            and "tool_calls" not in messages[-1]
+        ):
+            messages[-1]["tool_calls"] = list(pending_tool_calls)
+        else:
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": list(pending_tool_calls),
+                }
+            )
+        pending_tool_calls.clear()
+
+    for item in input_val:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        if item_type is None and item.get("role") is not None:
+            item_type = "message"
+
+        if item_type == "function_call":
+            # Assistant tool call. Keep arguments a JSON *string* per the
+            # OpenAI chat-completions wire format; reuse the Responses call_id
+            # so the matching tool result correlates.
+            arguments = item.get("arguments", "{}")
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments)
+            messages_call_id = item.get("call_id") or item.get("id") or _new_id("call")
+            pending_tool_calls.append(
+                {
+                    "id": messages_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": item.get("name", ""),
+                        "arguments": arguments,
+                    },
+                }
+            )
+        elif item_type == "function_call_output":
+            # The tool result. Flush the assistant tool-call turn first so the
+            # tool message has a preceding tool_calls message to correlate to.
+            flush_tool_calls()
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": item.get("call_id", ""),
+                    "content": _stringify_output(item.get("output", "")),
+                }
+            )
+        elif item_type == "message":
+            flush_tool_calls()
             role = item.get("role", "user")
-            content = item.get("content", "")
-            if isinstance(content, list):
-                # Flatten content parts to the Chat Completions array format
-                cc_parts: list[dict[str, Any]] = []
-                for part in content:
-                    if not isinstance(part, dict):
-                        continue
-                    ptype = part.get("type", "")
-                    if ptype in ("text", "input_text", "output_text"):
-                        cc_parts.append({"type": "text", "text": part.get("text", "")})
-                    elif ptype == "image_url":
-                        cc_parts.append(part)
-                    elif ptype == "refusal":
-                        cc_parts.append(
-                            {"type": "text", "text": part.get("refusal", "")}
-                        )
-                # Use a plain string when the only content is a single text part
-                if len(cc_parts) == 1 and cc_parts[0].get("type") == "text":
-                    messages.append({"role": role, "content": cc_parts[0]["text"]})
-                else:
-                    messages.append({"role": role, "content": cc_parts or ""})
-            else:
-                messages.append({"role": role, "content": content})
+            messages.append(
+                {"role": role, "content": _flatten_content(item.get("content", ""))}
+            )
+        # Unknown item types (reasoning, item_reference, ...) are skipped so they
+        # don't become empty user messages that pollute the model's context.
+
+    flush_tool_calls()
     return messages
 
 
@@ -148,6 +238,9 @@ async def stream_responses_events(
     request_start = time.monotonic()
     first_chunk_at: float | None = None
     seen_model = ""
+    # Scrub stray Gemma-4 reasoning-channel markers that vLLM's parser leaves in
+    # content (empty/mid-stream channels); buffers across deltas.
+    stripper = MarkerStripper()
 
     def _base_resp(status: str, output: list[dict]) -> dict[str, Any]:
         return {
@@ -158,6 +251,53 @@ async def stream_responses_events(
             "model": model,
             "output": output,
         }
+
+    async def _emit_text(chunk: str) -> AsyncIterator[str]:
+        nonlocal text_item_opened, content_part_opened, accumulated_text
+        nonlocal text_out_idx, next_out_idx
+        if not chunk:
+            return
+        if not text_item_opened:
+            text_out_idx = next_out_idx
+            next_out_idx += 1
+            yield _sse(
+                "response.output_item.added",
+                {
+                    "type": "response.output_item.added",
+                    "output_index": text_out_idx,
+                    "item": {
+                        "id": text_item_id,
+                        "type": "message",
+                        "status": "in_progress",
+                        "role": "assistant",
+                        "content": [],
+                    },
+                },
+            )
+            text_item_opened = True
+        if not content_part_opened:
+            yield _sse(
+                "response.content_part.added",
+                {
+                    "type": "response.content_part.added",
+                    "item_id": text_item_id,
+                    "output_index": text_out_idx,
+                    "content_index": content_index,
+                    "part": {"type": "output_text", "text": ""},
+                },
+            )
+            content_part_opened = True
+        accumulated_text += chunk
+        yield _sse(
+            "response.output_text.delta",
+            {
+                "type": "response.output_text.delta",
+                "item_id": text_item_id,
+                "output_index": text_out_idx,
+                "content_index": content_index,
+                "delta": chunk,
+            },
+        )
 
     yield _sse(
         "response.created",
@@ -188,49 +328,10 @@ async def stream_responses_events(
                 finish_reason = choice.get("finish_reason")
 
                 # ── Text content ──────────────────────────────────────────────
-                text = delta.get("content")
+                text = stripper.feed(delta.get("content") or "")
                 if text:
-                    if not text_item_opened:
-                        text_out_idx = next_out_idx
-                        next_out_idx += 1
-                        yield _sse(
-                            "response.output_item.added",
-                            {
-                                "type": "response.output_item.added",
-                                "output_index": text_out_idx,
-                                "item": {
-                                    "id": text_item_id,
-                                    "type": "message",
-                                    "status": "in_progress",
-                                    "role": "assistant",
-                                    "content": [],
-                                },
-                            },
-                        )
-                        text_item_opened = True
-                    if not content_part_opened:
-                        yield _sse(
-                            "response.content_part.added",
-                            {
-                                "type": "response.content_part.added",
-                                "item_id": text_item_id,
-                                "output_index": text_out_idx,
-                                "content_index": content_index,
-                                "part": {"type": "output_text", "text": ""},
-                            },
-                        )
-                        content_part_opened = True
-                    accumulated_text += text
-                    yield _sse(
-                        "response.output_text.delta",
-                        {
-                            "type": "response.output_text.delta",
-                            "item_id": text_item_id,
-                            "output_index": text_out_idx,
-                            "content_index": content_index,
-                            "delta": text,
-                        },
-                    )
+                    async for ev in _emit_text(text):
+                        yield ev
 
                 # ── Tool calls ────────────────────────────────────────────────
                 for tc_delta in delta.get("tool_calls") or []:
@@ -284,6 +385,10 @@ async def stream_responses_events(
 
                 # ── Finish ────────────────────────────────────────────────────
                 if finish_reason:
+                    tail = stripper.flush()
+                    if tail:
+                        async for ev in _emit_text(tail):
+                            yield ev
                     if content_part_opened:
                         assert text_out_idx is not None
                         yield _sse(
@@ -425,7 +530,7 @@ def non_streaming_responses_response(
     for choice in cc_data.get("choices") or []:
         message = choice.get("message") or {}
         role = message.get("role", "assistant")
-        content_text = message.get("content") or ""
+        content_text = strip_markers(message.get("content") or "")
         if content_text:
             output.append(
                 {

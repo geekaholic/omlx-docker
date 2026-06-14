@@ -375,6 +375,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Model context length (vLLM --max-model-len, llama.cpp --ctx-size)",
     )
     serve.add_argument(
+        "--max-output-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Default per-request output cap. Omit to let the backend size it "
+            "automatically (caps to remaining context)."
+        ),
+    )
+    serve.add_argument(
         "--max-parallel",
         type=int,
         default=None,
@@ -443,8 +452,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Enable vLLM auto tool choice flags",
     )
-    serve.add_argument("--tool-call-parser", default=None, help="vLLM tool call parser")
+    serve.add_argument(
+        "--tool-call-parser",
+        default=None,
+        help=(
+            "vLLM tool call parser. 'auto' (default) detects it from the model "
+            "family; 'none' disables tool calling; or pass an explicit parser name."
+        ),
+    )
     serve.add_argument("--reasoning-parser", default=None, help="vLLM reasoning parser")
+    serve.add_argument(
+        "--chat-template",
+        default=None,
+        help="vLLM chat template (in-container file path or literal template)",
+    )
     serve.add_argument(
         "--dtype",
         choices=["auto", "bfloat16", "float", "float16", "float32", "half"],
@@ -911,6 +932,7 @@ def portable_cli_environment(args: argparse.Namespace) -> dict[str, str]:
         "model": "OMNI_MODEL",
         "served_model_name": "OMNI_SERVED_MODEL_NAME",
         "context_length": "OMNI_CONTEXT_LENGTH",
+        "max_output_tokens": "OMLX_SAMPLING_MAX_TOKENS",
         "max_parallel": "OMNI_MAX_PARALLEL",
         "port": "OMNI_BACKEND_PORT",
         "hf_endpoint": "OMNI_HF_ENDPOINT",
@@ -955,6 +977,7 @@ def vllm_cli_environment(args: argparse.Namespace) -> dict[str, str]:
         "default_chat_template_kwargs": "VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS",
         "tool_call_parser": "VLLM_TOOL_CALL_PARSER",
         "reasoning_parser": "VLLM_REASONING_PARSER",
+        "chat_template": "VLLM_CHAT_TEMPLATE",
         "dtype": "VLLM_DTYPE",
         "tokenizer": "VLLM_TOKENIZER",
         "tokenizer_mode": "VLLM_TOKENIZER_MODE",
@@ -1563,13 +1586,17 @@ def serve_command(args: argparse.Namespace) -> int:
             foreground=args.foreground,
             build=not args.no_build,
         )
+        # Write the env file from the resolved settings (not the raw merged env)
+        # so the file and the compose agree — e.g. an "auto" tool-call parser is
+        # baked to its model-specific value rather than reaching vLLM literally.
+        final_env = spec.environment(settings)
         if args.dry_run:
             print(compose_content)
             print(f"# Env file: {env_file}")
-            print(render_env_file(merged_env, spec.env_keys), end="")
+            print(render_env_file(final_env, spec.env_keys), end="")
         else:
             spec.write_compose_for_path(compose_file, settings)
-            write_env_file(env_file, merged_env, spec.env_keys)
+            write_env_file(env_file, final_env, spec.env_keys)
             save_serve_state(backend=backend, compose_file=compose_file, mode=mode)
             print(f"Wrote {compose_file}")
             print(f"Wrote {env_file}")

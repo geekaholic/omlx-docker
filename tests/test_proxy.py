@@ -891,8 +891,11 @@ async def test_admin_vllm_settings_save_writes_env_and_compose(monkeypatch, tmp_
     assert env["OMNI_HF_HOME"] == "/cache/admin"
     assert env["OMLX_SAMPLING_TOP_P"] == "0.77"
     assert env["OMLX_SAMPLING_TOP_K"] == "42"
-    assert env["VLLM_TOOL_CALL_PARSER"] == "existing-parser"
-    assert env["VLLM_REASONING_PARSER"] == "existing-reasoner"
+    # The tool-call / reasoning parser are per-model now: switching models resets
+    # them to "auto" and re-detects from the new model's family. "admin-model" is
+    # not a recognized family, so detection leaves tool calling off.
+    assert env["VLLM_TOOL_CALL_PARSER"] == ""
+    assert env["VLLM_REASONING_PARSER"] == ""
 
     content = compose_path.read_text(encoding="utf-8")
     assert 'OMLX_ENV_OUTPUT_PATH: "/compose-output/docker-compose.vllm.env"' in content
@@ -959,9 +962,52 @@ async def test_admin_model_switch_resets_model_specific_vllm_overrides(
     assert env["VLLM_ENABLE_CHUNKED_PREFILL"] == ""
     # Cross-model / hardware prefs are preserved.
     assert env["VLLM_ENFORCE_EAGER"] == "true"
-    assert env["VLLM_TOOL_CALL_PARSER"] == "existing-parser"
+    # The tool-call parser is per-model: it resets to "auto" and re-detects from
+    # the new model's family (unrecognized here, so tool calling stays off).
+    assert env["VLLM_TOOL_CALL_PARSER"] == ""
     # An explicit override in the same save wins over the reset.
     assert env["VLLM_KV_CACHE_DTYPE"] == "fp8_e5m2"
+
+
+@pytest.mark.asyncio
+async def test_admin_model_switch_auto_detects_tool_parser(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+    compose_path = tmp_path / "docker-compose.vllm.yml"
+    env_path = tmp_path / "docker-compose.vllm.env"
+    monkeypatch.setenv("OMLX_COMPOSE_OUTPUT_PATH", str(compose_path))
+    monkeypatch.setenv("OMLX_ENV_OUTPUT_PATH", str(env_path))
+
+    # Previous model auto-resolved to the Hermes parser.
+    write_vllm_env_file(
+        env_path,
+        vllm_environment(VllmComposeSettings(model="Qwen/Qwen3-8B")),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/admin/api/global-settings",
+            json={
+                "proxy_backend_url": "http://backend/v1",
+                "proxy_backend_type": "vllm",
+                "omni_model": "google/gemma-4-26B-A4B-it",
+            },
+        )
+
+    assert response.status_code == 200
+    env = load_vllm_env_file(env_path)
+    # Switching to Gemma 4 re-detects its native vLLM parser, reasoning parser,
+    # and tool chat template — tool calling works out of the box.
+    assert env["VLLM_ENABLE_AUTO_TOOL_CHOICE"] == "true"
+    assert env["VLLM_TOOL_CALL_PARSER"] == "gemma4"
+    assert env["VLLM_REASONING_PARSER"] == "gemma4"
+    assert env["VLLM_CHAT_TEMPLATE"].endswith("tool_chat_template_gemma4.jinja")
 
 
 @pytest.mark.asyncio

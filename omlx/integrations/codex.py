@@ -68,6 +68,15 @@ class CodexIntegration(Integration):
         )
         if self._is_reasoning(ctx):
             args.extend(["-c", 'model_reasoning_effort="high"'])
+        # Tell Codex the model's real limits. Without these, Codex has no
+        # metadata for a custom-provider model ("Model metadata not found"),
+        # so it skips auto-compaction and requests a fixed large output that,
+        # with a growing prompt, overflows the context window — vLLM then 400s
+        # and the response stream dies. Bare ints are parsed as TOML integers.
+        if ctx.context_window:
+            args.extend(["-c", f"model_context_window={int(ctx.context_window)}"])
+        if ctx.max_tokens:
+            args.extend(["-c", f"model_max_output_tokens={int(ctx.max_tokens)}"])
         args.extend(ctx.extra_args)
 
         os.execvpe("codex", args, env)
