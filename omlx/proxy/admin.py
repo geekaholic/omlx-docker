@@ -316,6 +316,10 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
         old_sidecar_util = float(
             getattr(_old_settings, "gpu_memory_utilization", 0.0) or 0.0
         )
+        # "Use with sidecar" asks for optimal defaults even when re-selecting the
+        # model that is already current (e.g. to re-apply the corrected util after
+        # a failed load), so the resync below fires on an unchanged model too.
+        force_optimal = bool(payload.get("reset_optimal"))
         # Pre-flight unified-memory guard: refuse a model/util change that is
         # predicted to exhaust memory and hard-lock the host (vLLM only).
         # Runs before any state mutation so a block leaves settings untouched.
@@ -380,7 +384,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
                 sidecar_updates["omni_served_model_name"] = derive_served_name(
                     new_model
                 )
-            if new_model and new_model != old_sidecar_model:
+            if new_model and (new_model != old_sidecar_model or force_optimal):
                 # Start the new model offline when it's already cached so a
                 # broken DNS sandbox / offline box can't crash startup; a switch
                 # to an uncached model stays online so it can download.
@@ -388,6 +392,15 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
                 sidecar_updates["omni_hf_offline"] = (
                     "true" if model_path is not None else "false"
                 )
+                # Clear model-specific vLLM knobs so the new model starts from a
+                # clean, model-appropriate baseline instead of inheriting the
+                # previous model's tuning (a quantization/dtype meant for another
+                # repo, or enable_chunked_prefill=false on a model that requires
+                # it). User-set values in this same save win; cross-model and
+                # GB10-required prefs (enforce_eager, tool/reasoning parser,
+                # generation config, image, max_parallel) are preserved.
+                if new_type == "vllm":
+                    _reset_model_specific_vllm_overrides(sidecar_updates)
                 # Resize gpu-memory-utilization for the new model unless the user
                 # changed it in this save — otherwise the previous model's util
                 # lingers and vLLM over-allocates KV (e.g. ~95 GiB for a 1.7B
@@ -947,6 +960,34 @@ def _extract_sidecar_compose_updates(
     ):
         updates["vllm_enable_chunked_prefill"] = payload["chunked_prefill"]
     return updates
+
+
+# vLLM knobs that depend on the specific model. On a model switch they are reset
+# to vLLM's auto defaults (empty -> let vLLM choose) so a value tuned for the
+# previous model can't break or pessimize the next one. Deliberately excludes
+# enforce_eager (GB10-required on some stacks), tool/reasoning parser, generation
+# config, chat-template kwargs, image, trust_remote_code, and max_parallel, which
+# are cross-model / hardware preferences rather than per-model tuning.
+_VLLM_MODEL_SPECIFIC_RESETS: dict[str, Any] = {
+    "vllm_dtype": "",
+    "vllm_quantization": "",
+    "vllm_kv_cache_dtype": "",
+    "vllm_tokenizer": "",
+    "vllm_tokenizer_mode": "",
+    "vllm_revision": "",
+    "vllm_load_format": "",
+    "vllm_max_num_batched_tokens": "",
+    "vllm_enable_chunked_prefill": "",
+    "vllm_enable_prefix_caching": "",
+    "vllm_cpu_offload_gb": 0.0,
+    "vllm_swap_space": 0.0,
+}
+
+
+def _reset_model_specific_vllm_overrides(sidecar_updates: dict[str, Any]) -> None:
+    """Seed model-specific vLLM knobs to defaults unless set in this same save."""
+    for key, default in _VLLM_MODEL_SPECIFIC_RESETS.items():
+        sidecar_updates.setdefault(key, default)
 
 
 def _floats_equal(a: Any, b: Any, tol: float = 1e-6) -> bool:

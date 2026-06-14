@@ -8,6 +8,7 @@ from pathlib import Path
 
 from omlx.proxy.memory_fit import (
     DEFAULT_UNKNOWN_UTIL,
+    auto_utilization,
     estimate_resident_bytes,
     evaluate_fit,
     recommended_utilization,
@@ -35,15 +36,62 @@ def _make_hf_cache_model(root: Path, repo_id: str, weight_bytes: int) -> Path:
     return snapshot
 
 
-def test_recommended_utilization_is_model_aware():
+def test_recommended_utilization_is_host_level():
     total = 122 * _GIB
     reserve = 16 * _GIB
-    # 4 GiB model -> high util; 80 GiB model -> very low; unknown -> fallback.
-    assert recommended_utilization(total, reserve, 4 * _GIB) > 0.80
-    assert recommended_utilization(total, reserve, 80 * _GIB) < 0.30
+    # The ceiling only reserves the host headroom; it is independent of the
+    # weight size. The load-time page-cache transient is reclaimable, so it is
+    # NOT subtracted from vLLM's steady-state budget (oversize models are caught
+    # by evaluate_fit, not by crushing the util). (122-16)/122 = 0.868 -> 0.86.
+    util = recommended_utilization(total, reserve, 50 * _GIB)
+    assert 0.85 <= util <= 0.87
+    # Same ceiling no matter how large the weights are.
+    assert recommended_utilization(total, reserve, 4 * _GIB) == util
+    # Unknown footprint -> conservative fallback.
     assert recommended_utilization(total, reserve, None) == DEFAULT_UNKNOWN_UTIL
     # Floored to 2 decimals and clamped.
-    assert recommended_utilization(total, reserve, 4 * _GIB) <= 0.92
+    assert util <= 0.92
+
+
+def test_large_model_auto_util_leaves_runtime_and_kv_headroom():
+    # Regression for gemma-4-26B on the DGX Spark: ~50 GiB weights on a ~121 GiB
+    # unified pool. The old safety ceiling forced util ~0.45, whose budget
+    # (~54 GiB) barely cleared the resident weights, so vLLM's ~8.6 GiB runtime
+    # peak (activations + CUDA context + multimodal encoder profiling) pushed the
+    # KV pool negative and the engine aborted with "No available memory for the
+    # cache blocks". The auto util must leave room for weights + runtime overhead
+    # + a usable KV pool.
+    total, reserve, weights = 121 * _GIB, 16 * _GIB, 50 * _GIB
+    vllm_runtime_peak = 8.6 * _GIB  # observed for this VLM at ctx 32768
+    util = auto_utilization(
+        total_bytes=total,
+        reserve_bytes=reserve,
+        weights_bytes=weights,
+        kv_per_token=393216,
+        context_tokens=32768,
+        parallel=2,
+    )
+    budget = util * total
+    assert budget - weights - vllm_runtime_peak >= 4 * _GIB
+
+
+def test_auto_utilization_floor_covers_runtime_overhead():
+    # A large model with a negligible workload (tiny context/parallel) has almost
+    # no KV demand, so the demand path alone could pick a util whose budget can't
+    # even hold the weights + vLLM's runtime overhead. A floor must guarantee a
+    # minimum viable budget so the engine still starts with positive KV.
+    total, reserve, weights = 121 * _GIB, 16 * _GIB, 50 * _GIB
+    vllm_runtime_peak = 8.6 * _GIB
+    util = auto_utilization(
+        total_bytes=total,
+        reserve_bytes=reserve,
+        weights_bytes=weights,
+        kv_per_token=1024,
+        context_tokens=256,
+        parallel=1,
+    )
+    budget = util * total
+    assert budget - weights - vllm_runtime_peak > 0
 
 
 def test_small_model_fits():
@@ -81,24 +129,20 @@ def test_high_util_blocks_on_reserve():
     assert result.recommended_util < 0.95
 
 
-def test_util_plus_transient_blocks():
-    # 40 GiB weights fit intrinsically (2*40+16=96<122) but a 0.80 budget
-    # (97.6 GiB) + 40 GiB transient + 16 GiB reserve overruns 122 GiB.
+def test_large_model_loads_when_transient_reclaimable():
+    # 40 GiB weights at 0.80 util: the page-cache "load transient" is reclaimable
+    # (clean file pages the kernel drops under pressure), not pinned memory. As
+    # long as the budget leaves the OS reserve (Rule A) and the load peak
+    # (~2*weights) fits intrinsically, the launch must be allowed, not blocked on
+    # a transient that never coexists with the full KV pool.
     result = evaluate_fit(
         total_bytes=122 * _GIB,
         util=0.80,
         reserve_bytes=16 * _GIB,
         weights_bytes=40 * _GIB,
     )
-    assert result.blocked
-    # The same model at the recommended util is OK.
-    ok = evaluate_fit(
-        total_bytes=122 * _GIB,
-        util=result.recommended_util,
-        reserve_bytes=16 * _GIB,
-        weights_bytes=40 * _GIB,
-    )
-    assert ok.level == "ok"
+    assert result.level == "ok"
+    assert not result.blocked
 
 
 def test_unknown_model_warns():

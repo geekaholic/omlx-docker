@@ -902,6 +902,129 @@ async def test_admin_vllm_settings_save_writes_env_and_compose(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
+async def test_admin_model_switch_resets_model_specific_vllm_overrides(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+    compose_path = tmp_path / "docker-compose.vllm.yml"
+    env_path = tmp_path / "docker-compose.vllm.env"
+    monkeypatch.setenv("OMLX_COMPOSE_OUTPUT_PATH", str(compose_path))
+    monkeypatch.setenv("OMLX_ENV_OUTPUT_PATH", str(env_path))
+
+    # Previous model left model-specific knobs tuned for it: a quantization /
+    # dtype / chunked-prefill setting that can break or mislabel the next model
+    # (the gemma-4 VLM, e.g., does not support disabling chunked prefill).
+    write_vllm_env_file(
+        env_path,
+        vllm_environment(
+            VllmComposeSettings(
+                model="example/previous-model",
+                served_model_name="previous-name",
+                dtype="float16",
+                quantization="awq",
+                kv_cache_dtype="fp8",
+                enable_chunked_prefill=False,
+                enforce_eager=True,  # GB10-required; must be preserved
+                tool_call_parser="existing-parser",
+            )
+        ),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/admin/api/global-settings",
+            json={
+                "proxy_backend_url": "http://backend/v1",
+                "proxy_backend_type": "vllm",
+                "omni_model": "example/next-model",
+                # a knob the user explicitly sets in THIS save must win over the
+                # reset-to-default.
+                "vllm_kv_cache_dtype": "fp8_e5m2",
+            },
+        )
+
+    assert response.status_code == 200
+    env = load_vllm_env_file(env_path)
+    assert env["OMNI_MODEL"] == "example/next-model"
+    # Model-specific knobs are cleared back to vLLM's auto defaults.
+    assert env["VLLM_DTYPE"] == ""
+    assert env["VLLM_QUANTIZATION"] == ""
+    assert env["VLLM_ENABLE_CHUNKED_PREFILL"] == ""
+    # Cross-model / hardware prefs are preserved.
+    assert env["VLLM_ENFORCE_EAGER"] == "true"
+    assert env["VLLM_TOOL_CALL_PARSER"] == "existing-parser"
+    # An explicit override in the same save wins over the reset.
+    assert env["VLLM_KV_CACHE_DTYPE"] == "fp8_e5m2"
+
+
+@pytest.mark.asyncio
+async def test_use_with_sidecar_reapplies_optimal_on_same_model(monkeypatch, tmp_path):
+    # After a failed load the proxy already considers the model "current", so
+    # re-clicking "Use with sidecar" sends the same model. The button asks for
+    # optimal defaults (reset_optimal), so stale per-model knobs must still be
+    # cleared even though the model id is unchanged.
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+    compose_path = tmp_path / "docker-compose.vllm.yml"
+    env_path = tmp_path / "docker-compose.vllm.env"
+    monkeypatch.setenv("OMLX_COMPOSE_OUTPUT_PATH", str(compose_path))
+    monkeypatch.setenv("OMLX_ENV_OUTPUT_PATH", str(env_path))
+
+    write_vllm_env_file(
+        env_path,
+        vllm_environment(
+            VllmComposeSettings(
+                model="example/stuck-model",
+                served_model_name="stuck",
+                dtype="float16",
+                enable_chunked_prefill=False,
+            )
+        ),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        # Plain save of the same model leaves per-model knobs untouched.
+        await client.post(
+            "/admin/api/global-settings",
+            json={
+                "proxy_backend_url": "http://backend/v1",
+                "proxy_backend_type": "vllm",
+                "omni_model": "example/stuck-model",
+            },
+        )
+        assert load_vllm_env_file(env_path)["VLLM_DTYPE"] == "float16"
+
+        # The button re-applies optimal defaults even for the same model.
+        response = await client.post(
+            "/admin/api/global-settings",
+            json={
+                "proxy_backend_url": "http://backend/v1",
+                "proxy_backend_type": "vllm",
+                "omni_model": "example/stuck-model",
+                "reset_optimal": True,
+            },
+        )
+
+    assert response.status_code == 200
+    env = load_vllm_env_file(env_path)
+    assert env["VLLM_DTYPE"] == ""
+    assert env["VLLM_ENABLE_CHUNKED_PREFILL"] == ""
+
+
+@pytest.mark.asyncio
 async def test_admin_llamacpp_settings_save_writes_env_and_compose(
     monkeypatch, tmp_path
 ):

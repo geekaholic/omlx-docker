@@ -39,8 +39,18 @@ DEFAULT_UNKNOWN_UTIL = 0.70
 # prefix caching / bursts, then take the lower of that and the safety ceiling.
 DEFAULT_KV_HEADROOM = 1.5
 
-# Fixed allowance for activations / CUDA workspace on top of weights + KV.
-ACTIVATION_HEADROOM_GB = 2.0
+# Allowance for vLLM's non-weight runtime peak on top of weights + KV: the CUDA
+# context, activations, and the profiling forward pass. This is much larger than
+# plain activations for multimodal models, whose vision encoder is profiled with
+# many image/video items (a Gemma-4 VLM at ctx 32768 peaked ~8.6 GiB above the
+# resident weights). Under-sizing it lets the chosen util's budget come out below
+# weights + overhead, leaving the KV pool negative.
+ACTIVATION_HEADROOM_GB = 8.0
+
+# Smallest KV pool worth launching with. The auto utilization is floored so its
+# budget always clears weights + runtime overhead + this much KV — otherwise
+# vLLM aborts with "No available memory for the cache blocks".
+MIN_KV_GB = 1.0
 
 _GIB = 1024**3
 
@@ -121,24 +131,34 @@ def guard_disabled() -> bool:
 def recommended_utilization(
     total_bytes: int, reserve_bytes: int, weights_bytes: int | None = None
 ) -> float:
-    """Largest safe gpu-memory-utilization for this host (and model).
+    """Largest safe gpu-memory-utilization for this host.
 
-    On unified memory vLLM fills ``util*total`` with weights + KV at steady
-    state, and during load it transiently holds the weight files in the page
-    cache *on top of* the resident copy. The safe condition is therefore
+    vLLM loads the weights *inside* its ``util*total`` budget (the pool also
+    holds activations and the KV cache), so the only hard ceiling is that the
+    pinned budget must leave the host reserve for the OS/Docker/proxy:
 
-        budget (util*total) + weights (load transient) + reserve <= total
+        budget (util*total) + reserve <= total   =>   util <= (total-reserve)/total
 
-    so the recommended utilization is ``(total - reserve - weights)/total``.
-    When the footprint is unknown we fall back to a fixed conservative value.
-    Floored to 2 decimals so the emitted value never rounds back up past the
-    safe limit.
+    Earlier this also subtracted the weights a second time to reserve room for
+    the load-time page-cache copy of the weight files. That copy is *reclaimable*
+    page cache, not pinned memory, and subtracting it double-counted the weights
+    (which already live in the budget) — for a model whose weights are a large
+    fraction of unified memory it dragged the ceiling *below* the budget vLLM
+    needs for weights + runtime overhead + KV, so the engine aborted with
+    "No available memory for the cache blocks". The genuine load-time peak
+    (~2x weights, resident + page cache) is guarded separately by
+    :func:`evaluate_fit` (the intrinsic ``2*weights + reserve <= total`` rule).
+
+    ``weights_bytes`` is now only used to distinguish a measurable model from an
+    uncached one: when the footprint is unknown we fall back to a fixed
+    conservative value. Floored to 2 decimals so the emitted value never rounds
+    back up past the safe limit.
     """
     if total_bytes <= 0:
         return DEFAULT_UNKNOWN_UTIL
     if weights_bytes is None or weights_bytes <= 0:
         return DEFAULT_UNKNOWN_UTIL
-    util = (total_bytes - reserve_bytes - weights_bytes) / total_bytes
+    util = (total_bytes - reserve_bytes) / total_bytes
     util = math.floor(util * 100) / 100
     return max(0.10, min(0.92, util))
 
@@ -230,12 +250,19 @@ def auto_utilization(
     parallel: int | None = None,
     headroom: float | None = None,
 ) -> float:
-    """Safe, demand-aware utilization: ``min(safety ceiling, demand)``.
+    """Safe, demand-aware utilization: ``min(safety ceiling, demand)``, floored.
 
     vLLM fills its whole budget with KV regardless of model size, so for small
     models we cap the budget to what the workload can use; large models hit the
     safety ceiling. Falls back to the safety ceiling when the KV geometry or the
     workload shape is unknown.
+
+    A floor then guarantees the chosen budget can still hold the weights plus
+    vLLM's runtime overhead plus a minimal KV pool (``MIN_KV_GB``): a large model
+    with a tiny workload has almost no KV demand, so ``demand`` alone could pick a
+    budget that can't even fit weights + overhead, and the engine would abort. The
+    floor is capped by the safety ceiling — if even that can't satisfy it the
+    model is genuinely too big and :func:`evaluate_fit` blocks it.
     """
     safety = recommended_utilization(total_bytes, reserve_bytes, weights_bytes)
     if (
@@ -254,9 +281,23 @@ def auto_utilization(
         parallel=parallel,
         headroom=headroom,
     )
-    if demand is None:
-        return safety
-    return min(safety, demand)
+    util = safety if demand is None else min(safety, demand)
+    return _apply_runtime_floor(util, total_bytes, weights_bytes, safety)
+
+
+def _apply_runtime_floor(
+    util: float, total_bytes: int, weights_bytes: int, safety: float
+) -> float:
+    """Raise ``util`` so its budget clears weights + runtime overhead + min KV.
+
+    Capped by the safety ceiling so the floor can never push the budget past the
+    host reserve. Returns ``util`` unchanged when the floor can't be computed.
+    """
+    if total_bytes <= 0 or weights_bytes <= 0:
+        return util
+    needed = weights_bytes + (ACTIVATION_HEADROOM_GB + MIN_KV_GB) * _GIB
+    floor = math.ceil(needed / total_bytes * 100) / 100
+    return max(util, min(safety, floor))
 
 
 def resolve_local_model_path(model_id: str, scan_dirs: list[Path | str]) -> Path | None:
@@ -306,15 +347,16 @@ def evaluate_fit(
 ) -> FitResult:
     """Decide whether a model fits under the configured vLLM budget.
 
-    On unified memory vLLM fills ``util*total`` at steady state, and loading
-    transiently needs the weights again in the page cache. The model is safe
-    only when ``budget + weights + reserve <= total``.
+    On unified memory vLLM pins ``util*total`` (weights + activations + KV) at
+    steady state. Loading transiently holds the weight *files* in the page cache
+    on top of the resident copy, but that page cache is reclaimable, so the only
+    pinned constraint at steady state is that the budget leaves the host reserve.
 
     Block rules:
       A — ``util*total`` alone already leaves less than the reserve for the OS.
-      B — even at minimal KV the budget + weight load-transient won't fit
-          (``2*weights + reserve > total``), or the requested util's budget
-          plus the weight transient overruns the reserve.
+      B — the load-time peak (~2x weights: resident copy + page cache, before the
+          KV pool is allocated) plus the reserve won't fit (``2*weights + reserve
+          > total``), so the model can't even finish loading safely.
     A missing ``weights_bytes`` (uncached model) downgrades B to a warning.
     ``recommended_util`` is demand-aware when the KV geometry + workload shape
     are supplied (so a small model recommends a small util, not the ceiling).
@@ -374,9 +416,10 @@ def evaluate_fit(
             model_size_known=False,
         )
 
-    # Rule B (intrinsic): the budget must hold the weights AND leave room for
-    # the weight load-transient + reserve. The minimum viable budget is the
-    # weights themselves, so 2*weights + reserve must fit in total.
+    # Rule B (intrinsic): the load-time peak holds the weights twice (the
+    # resident copy plus the page-cache copy of the files, before the KV pool is
+    # allocated), so 2*weights + reserve must fit in total or the model can't even
+    # finish loading without hard-locking the box.
     if 2 * weights_bytes + reserve_bytes > total_bytes:
         return FitResult(
             level="block",
@@ -386,25 +429,6 @@ def evaluate_fit(
                 f"with the {format_gib(reserve_bytes)} host reserve exceeds the "
                 f"{format_gib(total_bytes)} total. This model will hard-lock "
                 f"the machine — it is too large to serve here safely."
-            ),
-            total_bytes=total_bytes,
-            budget_bytes=budget,
-            weights_bytes=weights_bytes,
-            reserve_bytes=reserve_bytes,
-            recommended_util=rec_util,
-            model_size_known=True,
-        )
-
-    # Rule B (this util): budget + weight transient overruns the reserve.
-    if budget + weights_bytes + reserve_bytes > total_bytes:
-        return FitResult(
-            level="block",
-            reason=(
-                f"At utilization {util:.2f} the {format_gib(budget)} budget "
-                f"plus the ~{format_gib(weights_bytes)} weight load-transient "
-                f"and {format_gib(reserve_bytes)} host reserve exceed the "
-                f"{format_gib(total_bytes)} unified pool. Use "
-                f"{rec_util:.2f} or lower."
             ),
             total_bytes=total_bytes,
             budget_bytes=budget,

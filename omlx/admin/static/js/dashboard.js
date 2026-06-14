@@ -2657,6 +2657,10 @@
                     const payload = {
                         omni_model: model.repo_id,
                         omni_served_model_name: servedName,
+                        // Ask the server to (re)apply optimal per-model defaults
+                        // (auto util + clear the previous model's tuning) even
+                        // when re-selecting the model that is already current.
+                        reset_optimal: true,
                     };
                     // Cap the launch context length at the model's own
                     // limit — vLLM refuses to start when max-model-len

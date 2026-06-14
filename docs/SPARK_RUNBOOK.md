@@ -107,12 +107,21 @@ Notes from verification:
   KV on the unified pool, most of it unusable past `max_num_seqs`. Context
   length is not the lever (it only changes how many sequences fit in the
   fixed pool). `omni serve` now sizes the auto utilization to *demand* —
-  weights + (`max_parallel` × `context`) KV × ~1.5 headroom — capped by the
-  safety ceiling, so a small model uses ~15–20 GiB instead of ~100 GiB
-  (e.g. Qwen3-1.7B at ctx 40960 / parallel 2 → util ≈ 0.16). Large models
-  still hit the safety ceiling. Tune the headroom with `OMLX_KV_HEADROOM`
-  (default 1.5) or pin it with `--gpu-memory-utilization`; the admin model
-  switch resizes util the same way unless you set it yourself.
+  weights + (`max_parallel` × `context`) KV × ~1.5 headroom + a runtime-overhead
+  allowance — capped by the safety ceiling `(total − reserve)/total`, so a small
+  model uses ~15–20 GiB instead of ~100 GiB (e.g. Qwen3-1.7B at ctx 40960 /
+  parallel 2 → util ≈ 0.16). A large model gets a util whose budget clears its
+  weights **plus** vLLM's non-weight runtime peak (CUDA context + activations +,
+  for VLMs, the multimodal-encoder profiling) plus a minimal KV pool — earlier
+  the ceiling subtracted the weights a second time as a "load transient" and
+  forced the budget *below* that floor, so a ~26B model (e.g. a Gemma-4 VLM)
+  loaded at util ≈ 0.45 and vLLM aborted with "No available memory for the cache
+  blocks". The load-time double-weight peak is reclaimable page cache and is
+  guarded by the intrinsic `2*weights + reserve <= total` block instead. Tune the
+  headroom with `OMLX_KV_HEADROOM` (default 1.5) or pin it with
+  `--gpu-memory-utilization`; the admin model switch resizes util the same way
+  (and clears the previous model's per-model knobs — dtype, quantization,
+  chunked-prefill, …) unless you set them yourself.
 - 2026 vLLM images renamed the cache metrics
   (`vllm:prefix_cache_{hits,queries}_total`, `vllm:kv_cache_usage_perc`);
   the dashboard's candidate lists in `omlx/proxy/metrics.py` cover both
@@ -236,10 +245,15 @@ switch back.
   recover. `omni serve --backend vllm` now (a) sets a unified-memory-aware
   utilization derived from the model's on-disk size and an absolute host
   reserve, and (b) runs a pre-flight fit check that **refuses** a launch
-  predicted to exhaust memory (`Memory check [block]: …`). The safe
-  condition is `budget (util*total) + weights (load transient) + reserve
-  <= total`; a model whose weights need more than `(total - reserve)/2`
-  is too large to serve here at all. Override with `--force-memory` (CLI)
+  predicted to exhaust memory (`Memory check [block]: …`). The pinned pool is
+  `budget (util*total)`, which must leave the host reserve (`budget + reserve
+  <= total`, Rule A), and the load-time peak holds the weights twice (resident +
+  reclaimable page cache) before the KV pool exists, so `2*weights + reserve <=
+  total` (Rule B); a model whose weights need more than `(total - reserve)/2` is
+  too large to serve here at all. (The page-cache load transient is *not*
+  subtracted from the steady-state budget — doing so used to crush the util of
+  large models below what vLLM needs for weights + runtime overhead + KV.)
+  Override with `--force-memory` (CLI)
   or the "Launch anyway (unsafe)" dialog (admin UI). Tune the reserve with
   `OMLX_HOST_MEMORY_RESERVE_GB` (default 16); disable the guard entirely
   with `OMLX_SKIP_MEMORY_GUARD=1`. Note: a Docker `mem_limit` on the vLLM
