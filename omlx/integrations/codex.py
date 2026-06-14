@@ -4,24 +4,28 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
-import time
-from pathlib import Path
 
 from omlx.integrations.base import Integration, IntegrationContext
 from omlx.utils.install import get_cli_command_prefix
 
 
 class CodexIntegration(Integration):
-    """Codex integration that configures ~/.codex/config.toml for oMLX."""
+    """Codex integration that points Codex at oMLX for a single session.
 
-    CONFIG_PATH = Path.home() / ".codex" / "config.toml"
+    Rather than mutating the user's ``~/.codex/config.toml`` (which would
+    persist after the session and break later upstream ``codex`` runs that
+    expect ``OMLX_API_KEY``), this passes the whole oMLX provider via Codex's
+    ``-c key=value`` inline overrides. Codex layers these on top of the
+    existing config for that one run only, so the user's default provider,
+    model, and per-project trust levels are read and honored, and the override
+    evaporates when Codex exits.
+    """
 
     def __init__(self):
         super().__init__(
             name="codex",
             display_name="Codex",
-            type="config_file",
+            type="env_var",
             install_check="codex",
             install_hint="npm install -g @openai/codex",
         )
@@ -32,94 +36,38 @@ class CodexIntegration(Integration):
             f"launch codex --model {ctx.model or 'select-a-model'}"
         )
 
-    def configure(self, ctx: IntegrationContext) -> None:
-        config_path = self.CONFIG_PATH
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-
-        existing_content = ""
-        if config_path.exists():
-            # Create backup
-            timestamp = int(time.time())
-            backup = config_path.with_suffix(f".{timestamp}.bak")
-            try:
-                shutil.copy2(config_path, backup)
-                existing_content = config_path.read_text(encoding="utf-8")
-                print(f"Backup: {backup}")
-            except OSError as e:
-                print(f"Warning: could not create backup or read config: {e}")
-
-        # Parse existing config lines to preserve other settings
-        lines = existing_content.splitlines()
-        new_lines = []
-        in_any_section = False
-        in_omlx_section = False
-
-        # Keys to override at the top level
-        top_level_overrides = {
-            "model": f'"{ctx.model or "select-a-model"}"',
-            "model_provider": '"omlx"',
-        }
-
-        # If it is a reasoning model, add reasoning effort
-        is_reasoning = (
-            bool(ctx.reasoning)
-            if ctx.reasoning is not None
-            else bool(re.search(r"\b(thinking|o1|o3|r1)\b", ctx.model.lower()))
-        )
-        if is_reasoning:
-            top_level_overrides["model_reasoning_effort"] = '"high"'
-
-        # Keys managed by oMLX that should be removed when not applicable
-        managed_keys = {"model_reasoning_effort"} - set(top_level_overrides.keys())
-
-        seen_keys = set()
-
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("[") and stripped.endswith("]"):
-                in_any_section = True
-                in_omlx_section = stripped == "[model_providers.omlx]"
-
-            # Handle top-level keys
-            if not in_any_section and "=" in stripped:
-                key = stripped.split("=")[0].strip()
-                if key in top_level_overrides:
-                    new_lines.append(f"{key} = {top_level_overrides[key]}")
-                    seen_keys.add(key)
-                    continue
-                if key in managed_keys:
-                    continue
-
-            # Skip old oMLX section
-            if in_omlx_section:
-                continue
-
-            new_lines.append(line)
-
-        # Add missing top-level keys
-        for key, val in top_level_overrides.items():
-            if key not in seen_keys:
-                new_lines.insert(0, f"{key} = {val}")
-
-        # Append new oMLX provider section
-        new_lines.append("\n[model_providers.omlx]")
-        new_lines.append('name = "oMLX"')
-        new_lines.append(f'base_url = "{ctx.openai_base_url}"')
-        new_lines.append('env_key = "OMLX_API_KEY"')
-        new_lines.append('wire_api = "responses"')
-
-        config_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-        print(f"Config updated: {config_path}")
+    def _is_reasoning(self, ctx: IntegrationContext) -> bool:
+        if ctx.reasoning is not None:
+            return bool(ctx.reasoning)
+        return bool(re.search(r"\b(thinking|o1|o3|r1)\b", ctx.model.lower()))
 
     def launch(self, ctx: IntegrationContext) -> None:
-        self.configure(ctx)
-
         env = self._scrubbed_env()
         env["OMLX_API_KEY"] = ctx.auth_token
 
+        # Pass the oMLX provider as ephemeral `-c` overrides. String values are
+        # wrapped in literal double quotes so Codex's TOML override parser
+        # treats them as strings regardless of `:` / `/` content. No shell is
+        # involved (os.execvpe takes an argv list), so the quotes pass verbatim.
         args = ["codex"]
         if ctx.model:
             args.extend(["-m", ctx.model])
+        args.extend(
+            [
+                "-c",
+                "model_provider=omlx",
+                "-c",
+                'model_providers.omlx.name="oMLX"',
+                "-c",
+                f'model_providers.omlx.base_url="{ctx.openai_base_url}"',
+                "-c",
+                'model_providers.omlx.env_key="OMLX_API_KEY"',
+                "-c",
+                'model_providers.omlx.wire_api="responses"',
+            ]
+        )
+        if self._is_reasoning(ctx):
+            args.extend(["-c", 'model_reasoning_effort="high"'])
         args.extend(ctx.extra_args)
 
         os.execvpe("codex", args, env)
