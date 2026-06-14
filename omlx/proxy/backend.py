@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -12,9 +13,10 @@ import httpx
 
 from omlx.api.adapters.base import InternalResponse, StreamChunk
 from omlx.api.openai_models import FunctionCall, ToolCall
+from omlx.utils.tokenizer import is_gemma4_model
 
 from .config import ProxyConfig
-from .protocol_markers import strip_markers
+from .protocol_markers import recover_tool_calls, strip_markers
 
 
 class BackendError(RuntimeError):
@@ -184,7 +186,22 @@ def openai_response_to_internal(data: dict[str, Any]) -> InternalResponse:
     prompt_details = usage.get("prompt_tokens_details") or {}
 
     tool_calls = _coerce_tool_calls(message.get("tool_calls"))
-    text = strip_markers(message.get("content") or "")
+    raw_content = message.get("content") or ""
+    # Recover a tool call vLLM left in content (Gemma-4, when it didn't already
+    # produce a structured one); otherwise just strip protocol markers.
+    if not tool_calls and is_gemma4_model(str(data.get("model") or "")):
+        text, recovered = recover_tool_calls(raw_content)
+        if recovered:
+            tool_calls = [
+                ToolCall(
+                    id=f"call_{uuid.uuid4().hex[:24]}",
+                    type="function",
+                    function=FunctionCall(name=rc["name"], arguments=rc["arguments"]),
+                )
+                for rc in recovered
+            ]
+    else:
+        text = strip_markers(raw_content)
     reasoning = message.get("reasoning_content")
     if reasoning and not text:
         text = ""

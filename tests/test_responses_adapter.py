@@ -6,6 +6,7 @@ import json
 import pytest
 
 from omlx.proxy.responses_adapter import (
+    non_streaming_responses_response,
     responses_to_chat_body,
     stream_responses_events,
 )
@@ -196,3 +197,90 @@ def test_image_content_still_flattens():
     assert isinstance(parts, list)
     assert {"type": "text", "text": "what is this"} in parts
     assert any(p.get("type") == "image_url" for p in parts)
+
+
+def _function_call_items(events):
+    items = []
+    for ev in events:
+        for line in ev.splitlines():
+            if line.startswith("data:"):
+                try:
+                    data = json.loads(line[len("data:") :].strip())
+                except json.JSONDecodeError:
+                    continue
+                if data.get("type") == "response.output_item.done":
+                    item = data.get("item", {})
+                    if item.get("type") == "function_call":
+                        items.append(item)
+    return items
+
+
+@pytest.mark.asyncio
+async def test_stream_recovers_leaked_gemma4_tool_call():
+    # A brace-heavy heredoc tool call vLLM leaked into content (no <tool_call|>),
+    # split across deltas, on a gemma-4 model -> recovered as a function_call.
+    leaked = (
+        'call:exec_command{cmd:<|"|>cat <<EOF > a.js\n'
+        'class X { f() { return {}; } }\nEOF\n<|"|>}'
+    )
+    chunks = [
+        _cc_chunk(content="Sure.\n"),
+        _cc_chunk(content=leaked[:45]),
+        _cc_chunk(content=leaked[45:]),
+        _cc_chunk(finish="stop"),
+    ]
+    events = []
+    async for ev in stream_responses_events(
+        _FakeBackend(chunks), {"stream": True}, None, "r", "gemma-4-26B-A4B-it", 0
+    ):
+        events.append(ev)
+    calls = _function_call_items(events)
+    assert len(calls) == 1
+    assert calls[0]["name"] == "exec_command"
+    assert "class X {" in json.loads(calls[0]["arguments"])["cmd"]
+    assert "call:exec_command" not in _output_text(events)
+    assert _output_text(events).startswith("Sure.")
+
+
+@pytest.mark.asyncio
+async def test_stream_non_gemma_model_does_not_recover_call_text():
+    # The same text on a non-gemma model is left as content (no false recovery).
+    chunks = [_cc_chunk(content="run call:foo{a:1} now"), _cc_chunk(finish="stop")]
+    events = []
+    async for ev in stream_responses_events(
+        _FakeBackend(chunks), {"stream": True}, None, "r", "qwen3-8b", 0
+    ):
+        events.append(ev)
+    assert _function_call_items(events) == []
+    assert "call:foo{a:1}" in _output_text(events)
+
+
+def test_non_streaming_recovers_leaked_gemma4_tool_call():
+    cc = {
+        "model": "gemma-4-26B-A4B-it",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": 'ok call:exec_command{cmd:<|"|>echo {a:1}<|"|>}',
+                }
+            }
+        ],
+        "usage": {},
+    }
+    out = non_streaming_responses_response(cc, "r", 0)["output"]
+    fcs = [o for o in out if o["type"] == "function_call"]
+    assert len(fcs) == 1 and fcs[0]["name"] == "exec_command"
+    for m in (o for o in out if o["type"] == "message"):
+        for c in m["content"]:
+            assert "call:exec_command" not in c["text"]
+
+
+def test_non_streaming_non_gemma_keeps_call_text():
+    cc = {
+        "model": "qwen3",
+        "choices": [{"message": {"role": "assistant", "content": "see call:foo{a:1}"}}],
+        "usage": {},
+    }
+    out = non_streaming_responses_response(cc, "r", 0)["output"]
+    assert [o for o in out if o["type"] == "function_call"] == []

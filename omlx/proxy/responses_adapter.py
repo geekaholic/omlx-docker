@@ -15,9 +15,10 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from omlx.server_metrics import ServerMetrics
+from omlx.utils.tokenizer import is_gemma4_model
 
 from .backend import OpenAIBackend
-from .protocol_markers import MarkerStripper, strip_markers
+from .protocol_markers import Gemma4StreamProcessor, recover_tool_calls, strip_markers
 from .stats import record_request
 
 
@@ -238,9 +239,13 @@ async def stream_responses_events(
     request_start = time.monotonic()
     first_chunk_at: float | None = None
     seen_model = ""
-    # Scrub stray Gemma-4 reasoning-channel markers that vLLM's parser leaves in
-    # content (empty/mid-stream channels); buffers across deltas.
-    stripper = MarkerStripper()
+    # Scrub stray Gemma-4 reasoning-channel markers and reassemble tool calls
+    # that vLLM's parser leaked into content (brace-heavy / unterminated calls);
+    # buffers across deltas. Tool recovery is Gemma-4 only to avoid misfiring on
+    # other models' prose.
+    processor = Gemma4StreamProcessor(enable_tool_recovery=is_gemma4_model(model))
+    # Tool calls recovered from leaked content (function_call items emitted inline).
+    reassembled: list[dict[str, Any]] = []
 
     def _base_resp(status: str, output: list[dict]) -> dict[str, Any]:
         return {
@@ -299,6 +304,83 @@ async def stream_responses_events(
             },
         )
 
+    async def _emit_tool_call(tc: dict[str, str]) -> AsyncIterator[str]:
+        # A leaked tool call recovered from content: we have it whole, so emit a
+        # complete function_call item (added -> args delta -> args done -> done).
+        nonlocal next_out_idx
+        item_id = _new_id("item")
+        call_id = _new_id("call")
+        out_idx = next_out_idx
+        next_out_idx += 1
+        name = tc.get("name", "")
+        arguments = tc.get("arguments", "{}")
+        reassembled.append(
+            {
+                "item_id": item_id,
+                "call_id": call_id,
+                "name": name,
+                "arguments": arguments,
+                "output_index": out_idx,
+            }
+        )
+        yield _sse(
+            "response.output_item.added",
+            {
+                "type": "response.output_item.added",
+                "output_index": out_idx,
+                "item": {
+                    "id": item_id,
+                    "type": "function_call",
+                    "status": "in_progress",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": "",
+                },
+            },
+        )
+        yield _sse(
+            "response.function_call_arguments.delta",
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": item_id,
+                "output_index": out_idx,
+                "delta": arguments,
+            },
+        )
+        yield _sse(
+            "response.function_call_arguments.done",
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": item_id,
+                "output_index": out_idx,
+                "arguments": arguments,
+            },
+        )
+        yield _sse(
+            "response.output_item.done",
+            {
+                "type": "response.output_item.done",
+                "output_index": out_idx,
+                "item": {
+                    "id": item_id,
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": arguments,
+                },
+            },
+        )
+
+    async def _dispatch(events: list[tuple[str, Any]]) -> AsyncIterator[str]:
+        for kind, payload in events:
+            if kind == "text":
+                async for ev in _emit_text(payload):
+                    yield ev
+            else:  # "tool_call"
+                async for ev in _emit_tool_call(payload):
+                    yield ev
+
     yield _sse(
         "response.created",
         {"type": "response.created", "response": _base_resp("in_progress", [])},
@@ -327,11 +409,9 @@ async def stream_responses_events(
                 delta = choice.get("delta") or {}
                 finish_reason = choice.get("finish_reason")
 
-                # ── Text content ──────────────────────────────────────────────
-                text = stripper.feed(delta.get("content") or "")
-                if text:
-                    async for ev in _emit_text(text):
-                        yield ev
+                # ── Text content (+ recovered tool calls) ─────────────────────
+                async for ev in _dispatch(processor.feed(delta.get("content") or "")):
+                    yield ev
 
                 # ── Tool calls ────────────────────────────────────────────────
                 for tc_delta in delta.get("tool_calls") or []:
@@ -385,10 +465,8 @@ async def stream_responses_events(
 
                 # ── Finish ────────────────────────────────────────────────────
                 if finish_reason:
-                    tail = stripper.flush()
-                    if tail:
-                        async for ev in _emit_text(tail):
-                            yield ev
+                    async for ev in _dispatch(processor.flush()):
+                        yield ev
                     if content_part_opened:
                         assert text_out_idx is not None
                         yield _sse(
@@ -494,7 +572,10 @@ async def stream_responses_events(
                 "content": [{"type": "output_text", "text": accumulated_text}],
             }
         )
-    for tc in sorted(tc_state.values(), key=lambda t: t["output_index"]):
+    # Structured (vLLM-parsed) and reassembled (recovered-from-content) function
+    # calls, interleaved by output index.
+    fc_items = list(tc_state.values()) + reassembled
+    for tc in sorted(fc_items, key=lambda t: t["output_index"]):
         output.append(
             {
                 "id": tc["item_id"],
@@ -530,7 +611,14 @@ def non_streaming_responses_response(
     for choice in cc_data.get("choices") or []:
         message = choice.get("message") or {}
         role = message.get("role", "assistant")
-        content_text = strip_markers(message.get("content") or "")
+        structured = message.get("tool_calls") or []
+        raw_content = message.get("content") or ""
+        # Recover any tool call vLLM left in content (Gemma-4, when it didn't
+        # already produce a structured one); otherwise just strip markers.
+        if is_gemma4_model(model) and not structured:
+            content_text, recovered = recover_tool_calls(raw_content)
+        else:
+            content_text, recovered = strip_markers(raw_content), []
         if content_text:
             output.append(
                 {
@@ -541,7 +629,7 @@ def non_streaming_responses_response(
                     "content": [{"type": "output_text", "text": content_text}],
                 }
             )
-        for tc in message.get("tool_calls") or []:
+        for tc in structured:
             fn = tc.get("function") or {}
             output.append(
                 {
@@ -551,6 +639,17 @@ def non_streaming_responses_response(
                     "call_id": tc.get("id", ""),
                     "name": fn.get("name", ""),
                     "arguments": fn.get("arguments", ""),
+                }
+            )
+        for rc in recovered:
+            output.append(
+                {
+                    "id": _new_id("item"),
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": _new_id("call"),
+                    "name": rc["name"],
+                    "arguments": rc["arguments"],
                 }
             )
 
