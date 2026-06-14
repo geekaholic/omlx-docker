@@ -20,8 +20,20 @@ from .proxy import (  # noqa: F401  (registers backend specs)
     vllm_compose,
 )
 from .proxy.config import BACKEND_URL_DEFAULTS
+from .proxy.memory_fit import (
+    auto_utilization,
+    estimate_resident_bytes,
+    evaluate_fit,
+    format_gib,
+    guard_disabled,
+    host_reserve_bytes,
+    kv_bytes_per_token,
+    resolve_local_model_path,
+)
+from .proxy.metrics import host_memory_info
 from .proxy.sidecar_compose import (
     backend_spec,
+    derive_served_name,
     env_from_compose,
     known_env,
     load_env_file,
@@ -320,6 +332,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Print generated content and command without writing or launching",
+    )
+    serve.add_argument(
+        "--force-memory",
+        action="store_true",
+        help=(
+            "Launch even when the pre-flight memory check predicts the model "
+            "will not fit in unified memory (can hard-lock the host)"
+        ),
+    )
+    offline_group = serve.add_mutually_exclusive_group()
+    offline_group.add_argument(
+        "--offline",
+        dest="hf_offline",
+        action="store_true",
+        default=None,
+        help=(
+            "Run the backend with HF_HUB_OFFLINE so startup never touches the "
+            "network (default: auto-on when the model is already cached)"
+        ),
+    )
+    offline_group.add_argument(
+        "--online",
+        dest="hf_offline",
+        action="store_false",
+        help="Force the backend to allow Hugging Face network access at startup",
     )
 
     serve.add_argument(
@@ -891,6 +928,13 @@ def portable_cli_environment(args: argparse.Namespace) -> dict[str, str]:
         value = getattr(args, attr, None)
         if value is not None:
             values[key] = str(value)
+    # Changing --model without --served-model-name would otherwise keep the
+    # previous session's served name, mislabeling the new model. Track it.
+    if (
+        getattr(args, "model", None) is not None
+        and getattr(args, "served_model_name", None) is None
+    ):
+        values["OMNI_SERVED_MODEL_NAME"] = derive_served_name(args.model)
     if getattr(args, "hf_home", None) is not None:
         values["OMNI_HF_HOME"] = _host_path(args.hf_home)
     if getattr(args, "context_scaling", False):
@@ -1378,6 +1422,121 @@ def launch_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _positive_int_or_none(value: str | None) -> int | None:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _vllm_memory_preflight(
+    args: argparse.Namespace, merged_env: dict[str, str]
+) -> None:
+    """Set a unified-memory-aware util default and refuse oversized launches.
+
+    Mutates ``merged_env``'s ``VLLM_GPU_MEMORY_UTILIZATION`` when the user did
+    not set it explicitly, then runs the fit check. On a hard block it prints
+    the numbers and raises ``SystemExit`` — unless overridden, or running under
+    ``--dry-run``/``--generate-only`` (which only print the assessment).
+    """
+    host_total = int(host_memory_info().get("total_bytes") or 0)
+    reserve = host_reserve_bytes()
+
+    scan_dirs = [
+        merged_env.get("OMNI_HF_HOME", ""),
+        merged_env.get("OMLX_MODEL_SCAN_HOST_DIR", ""),
+    ]
+    model_path = resolve_local_model_path(merged_env.get("OMNI_MODEL", ""), scan_dirs)
+    weights = estimate_resident_bytes(model_path) if model_path is not None else None
+    kv_per_token = kv_bytes_per_token(model_path) if model_path is not None else None
+    context = _positive_int_or_none(merged_env.get("OMNI_CONTEXT_LENGTH"))
+    parallel = _positive_int_or_none(merged_env.get("OMNI_MAX_PARALLEL"))
+
+    explicit_util = getattr(args, "gpu_memory_utilization", None) is not None
+    if not explicit_util and host_total > 0:
+        safe = auto_utilization(
+            total_bytes=host_total,
+            reserve_bytes=reserve,
+            weights_bytes=weights,
+            kv_per_token=kv_per_token,
+            context_tokens=context,
+            parallel=parallel,
+        )
+        merged_env["VLLM_GPU_MEMORY_UTILIZATION"] = f"{safe:.2f}"
+        if kv_per_token and context and parallel:
+            print(
+                f"Using gpu-memory-utilization {safe:.2f}: sized KV cache for "
+                f"{parallel} x {context} tokens on {format_gib(host_total)} "
+                f"unified memory. Override with --gpu-memory-utilization."
+            )
+        else:
+            print(
+                f"Using gpu-memory-utilization {safe:.2f} for unified memory "
+                f"({format_gib(host_total)} total, {format_gib(reserve)} host "
+                f"reserve). Override with --gpu-memory-utilization."
+            )
+
+    try:
+        util = float(merged_env.get("VLLM_GPU_MEMORY_UTILIZATION", "0.80"))
+    except ValueError:
+        util = 0.80
+
+    result = evaluate_fit(
+        total_bytes=host_total,
+        util=util,
+        reserve_bytes=reserve,
+        weights_bytes=weights,
+        kv_bytes_per_token=kv_per_token,
+        context_tokens=context,
+        parallel=parallel,
+    )
+    print(f"Memory check [{result.level}]: {result.reason}")
+
+    if not result.blocked:
+        return
+
+    overridden = getattr(args, "force_memory", False) or guard_disabled()
+    advisory = args.dry_run or args.generate_only
+    if overridden or advisory:
+        if not advisory:
+            print("Overriding the memory guard (--force-memory) — this is unsafe.")
+        return
+
+    raise SystemExit(
+        "Refusing to launch: the model is predicted to exhaust unified memory "
+        "and hard-lock the host. Lower --context-length, pick a smaller model, "
+        f"set --gpu-memory-utilization at most {result.recommended_util:.2f}, "
+        "or pass --force-memory to override."
+    )
+
+
+def _apply_hf_offline(args: argparse.Namespace, merged_env: dict[str, str]) -> None:
+    """Set OMNI_HF_OFFLINE so a cached model starts without HF network access.
+
+    --offline/--online force the value; otherwise it auto-enables when the
+    model resolves to a locally-cached path, so a broken DNS sandbox or an
+    offline box can't crash startup for an already-downloaded model.
+    """
+    choice = getattr(args, "hf_offline", None)
+    if choice is None:
+        scan_dirs = [
+            merged_env.get("OMNI_HF_HOME", ""),
+            merged_env.get("OMLX_MODEL_SCAN_HOST_DIR", ""),
+        ]
+        cached = (
+            resolve_local_model_path(merged_env.get("OMNI_MODEL", ""), scan_dirs)
+            is not None
+        )
+        if cached:
+            print(
+                "Model is cached locally; starting the backend offline "
+                "(HF_HUB_OFFLINE=true). Pass --online to allow network access."
+            )
+        choice = cached
+    merged_env["OMNI_HF_OFFLINE"] = "true" if choice else "false"
+
+
 def serve_command(args: argparse.Namespace) -> int:
     state = load_serve_state()
     backend = resolve_serve_backend(args, state)
@@ -1393,6 +1552,9 @@ def serve_command(args: argparse.Namespace) -> int:
             env_file=env_file,
             compose_file=compose_file,
         )
+        if backend == "vllm":
+            _vllm_memory_preflight(args, merged_env)
+        _apply_hf_offline(args, merged_env)
         settings = spec.settings_from_env(merged_env)
         compose_content = spec.render_compose_for_path(compose_file, settings)
         command = compose_env_command(

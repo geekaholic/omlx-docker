@@ -774,5 +774,14 @@
   "js.error.delete_model_connection": "Не удалось удалить модель. Проверьте соединение с сервером.",
   "js.success.download_started": "Загрузка начата: {repo_id}",
   "js.success.settings_saved": "Настройки успешно сохранены",
-  "status.cache.peak_ctx_tokens": "Пик контекстных токенов"
+  "status.cache.peak_ctx_tokens": "Пик контекстных токенов",
+  "settings.memory_guard.title": "Модель слишком велика для памяти",
+  "settings.memory_guard.cancel": "Отмена",
+  "settings.memory_guard.launch_anyway": "Всё равно запустить (небезопасно)",
+  "settings.memory_guard.acknowledge": "Я понимаю, что это может привести к сбою хоста",
+  "settings.memory_guard.host_total": "Память хоста",
+  "settings.memory_guard.weights": "Веса модели",
+  "settings.memory_guard.budget": "Бюджет vLLM",
+  "settings.memory_guard.reserve": "Резерв хоста",
+  "settings.memory_guard.util_hint": "Рекомендуется для этой модели: {n}"
 }

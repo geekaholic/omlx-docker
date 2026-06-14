@@ -774,5 +774,14 @@
   "js.error.delete_model_connection": "モデルの削除に失敗しました。サーバー接続を確認してください。",
   "js.success.download_started": "ダウンロード開始: {repo_id}",
   "js.success.settings_saved": "設定が保存されました",
-  "status.cache.peak_ctx_tokens": "ピーク時コンテキストトークン"
+  "status.cache.peak_ctx_tokens": "ピーク時コンテキストトークン",
+  "settings.memory_guard.title": "モデルがメモリに対して大きすぎます",
+  "settings.memory_guard.cancel": "キャンセル",
+  "settings.memory_guard.launch_anyway": "それでも起動（非推奨）",
+  "settings.memory_guard.acknowledge": "ホストがクラッシュする可能性を理解しました",
+  "settings.memory_guard.host_total": "ホストメモリ",
+  "settings.memory_guard.weights": "モデルの重み",
+  "settings.memory_guard.budget": "vLLM 予算",
+  "settings.memory_guard.reserve": "ホスト予約",
+  "settings.memory_guard.util_hint": "このモデルの推奨値: {n}"
 }

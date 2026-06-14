@@ -774,5 +774,14 @@
   "js.error.delete_model_connection": "删除模型失败，请检查服务器连接。",
   "js.success.download_started": "已开始下载：{repo_id}",
   "js.success.settings_saved": "设置已成功保存",
-  "status.cache.peak_ctx_tokens": "峰值上下文 Token"
+  "status.cache.peak_ctx_tokens": "峰值上下文 Token",
+  "settings.memory_guard.title": "模型超出可用内存",
+  "settings.memory_guard.cancel": "取消",
+  "settings.memory_guard.launch_anyway": "仍然启动（不安全）",
+  "settings.memory_guard.acknowledge": "我了解这可能导致主机崩溃",
+  "settings.memory_guard.host_total": "主机内存",
+  "settings.memory_guard.weights": "模型权重",
+  "settings.memory_guard.budget": "vLLM 预算",
+  "settings.memory_guard.reserve": "主机预留",
+  "settings.memory_guard.util_hint": "此模型推荐值：{n}"
 }

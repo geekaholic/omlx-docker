@@ -563,7 +563,7 @@ def test_vllm_serve_preserves_existing_env_model_when_model_omitted(tmp_path):
     assert env["OMNI_CONTEXT_LENGTH"] == "16384"
 
 
-def test_vllm_serve_updates_only_supplied_model_flag(tmp_path):
+def test_vllm_serve_syncs_served_name_with_new_model(tmp_path):
     compose_file = tmp_path / "docker-compose.vllm.yml"
     env_file = compose_file.with_suffix(".env")
     existing = omni_cli.default_vllm_environment()
@@ -589,8 +589,36 @@ def test_vllm_serve_updates_only_supplied_model_flag(tmp_path):
     assert result == 0
     env = omni_cli.load_env_file(env_file)
     assert env["OMNI_MODEL"] == "example/new-model"
-    assert env["OMNI_SERVED_MODEL_NAME"] == "existing-name"
+    # Changing --model without --served-model-name re-derives the served name
+    # so the new model isn't mislabeled with the previous session's name.
+    assert env["OMNI_SERVED_MODEL_NAME"] == "new-model"
+    # Other unsupplied fields are still preserved.
     assert env["OMNI_CONTEXT_LENGTH"] == "16384"
+
+
+def test_vllm_serve_explicit_served_name_wins_over_derived(tmp_path):
+    compose_file = tmp_path / "docker-compose.vllm.yml"
+    env_file = compose_file.with_suffix(".env")
+
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "vllm",
+            "--model",
+            "example/new-model",
+            "--served-model-name",
+            "custom-name",
+            "--compose-file",
+            str(compose_file),
+            "--generate-only",
+            "--no-build",
+        ]
+    )
+
+    assert result == 0
+    env = omni_cli.load_env_file(env_file)
+    assert env["OMNI_SERVED_MODEL_NAME"] == "custom-name"
 
 
 def test_vllm_serve_seeds_env_from_existing_compose_when_env_missing(tmp_path):
@@ -1340,3 +1368,283 @@ def test_scan_models_absent_by_default():
     env = portable_cli_environment(args)
     assert "OMLX_MODEL_SCAN" not in env
     assert "OMLX_MODEL_SCAN_HOST_DIR" not in env
+
+
+_GIB = 1024**3
+
+
+def _make_cached_model(root, repo_id, weight_bytes):
+    """Minimal HF-cache entry with a sparse safetensors shard under root/hub."""
+    encoded = "models--" + repo_id.replace("/", "--")
+    commit = "deadbeef"
+    snapshot = root / "hub" / encoded / "snapshots" / commit
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text(json.dumps({"max_position_embeddings": 4096}))
+    with open(snapshot / "model.safetensors", "wb") as handle:
+        handle.truncate(weight_bytes)
+    refs = root / "hub" / encoded / "refs"
+    refs.mkdir(parents=True)
+    (refs / "main").write_text(commit)
+
+
+def test_force_memory_flag_parses():
+    args = parse_args("--backend", "vllm", "--force-memory")
+    assert args.force_memory is True
+    assert parse_args("--backend", "vllm").force_memory is False
+
+
+def test_serve_blocks_oversized_model(tmp_path, monkeypatch, capsys):
+    _make_cached_model(tmp_path, "org/huge", 80 * _GIB)
+    monkeypatch.setattr(
+        omni_cli, "host_memory_info", lambda *a, **k: {"total_bytes": 122 * _GIB}
+    )
+    args = omni_cli.build_parser().parse_args(
+        [
+            "serve",
+            "--backend",
+            "vllm",
+            "--model",
+            "org/huge",
+            "--hf-home",
+            str(tmp_path),
+            "--compose-file",
+            str(tmp_path / "docker-compose.vllm.yml"),
+            "--no-build",
+        ]
+    )
+    with pytest.raises(SystemExit):
+        omni_cli.serve_command(args)
+    assert "Memory check [block]" in capsys.readouterr().out
+    # The block fires before any compose file is written.
+    assert not (tmp_path / "docker-compose.vllm.yml").exists()
+
+
+def test_force_memory_overrides_block(tmp_path, monkeypatch):
+    _make_cached_model(tmp_path, "org/huge", 80 * _GIB)
+    monkeypatch.setattr(
+        omni_cli, "host_memory_info", lambda *a, **k: {"total_bytes": 122 * _GIB}
+    )
+    launched = {}
+
+    def _fake_run_compose(*a, **k):
+        launched["ran"] = True
+        return 0
+
+    monkeypatch.setattr(omni_cli, "run_compose", _fake_run_compose)
+    args = omni_cli.build_parser().parse_args(
+        [
+            "serve",
+            "--backend",
+            "vllm",
+            "--model",
+            "org/huge",
+            "--hf-home",
+            str(tmp_path),
+            "--compose-file",
+            str(tmp_path / "docker-compose.vllm.yml"),
+            "--no-build",
+            "--force-memory",
+        ]
+    )
+    assert omni_cli.serve_command(args) == 0
+    assert launched.get("ran") is True
+
+
+def test_serve_generate_only_does_not_block(tmp_path, monkeypatch, capsys):
+    _make_cached_model(tmp_path, "org/huge", 80 * _GIB)
+    monkeypatch.setattr(
+        omni_cli, "host_memory_info", lambda *a, **k: {"total_bytes": 122 * _GIB}
+    )
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "vllm",
+            "--model",
+            "org/huge",
+            "--hf-home",
+            str(tmp_path),
+            "--compose-file",
+            str(tmp_path / "docker-compose.vllm.yml"),
+            "--generate-only",
+            "--no-build",
+        ]
+    )
+    assert result == 0
+    assert "Memory check [block]" in capsys.readouterr().out
+
+
+def test_serve_auto_offline_when_model_cached(tmp_path):
+    _make_cached_model(tmp_path, "org/cached", 4 * _GIB)
+    compose_file = tmp_path / "docker-compose.vllm.yml"
+    env_file = compose_file.with_suffix(".env")
+
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "vllm",
+            "--model",
+            "org/cached",
+            "--hf-home",
+            str(tmp_path),
+            "--compose-file",
+            str(compose_file),
+            "--generate-only",
+            "--no-build",
+        ]
+    )
+    assert result == 0
+    assert omni_cli.load_env_file(env_file)["OMNI_HF_OFFLINE"] == "true"
+
+
+def test_serve_stays_online_when_model_not_cached(tmp_path):
+    compose_file = tmp_path / "docker-compose.vllm.yml"
+    env_file = compose_file.with_suffix(".env")
+
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "vllm",
+            "--model",
+            "org/not-cached",
+            "--hf-home",
+            str(tmp_path),
+            "--compose-file",
+            str(compose_file),
+            "--generate-only",
+            "--no-build",
+        ]
+    )
+    assert result == 0
+    assert omni_cli.load_env_file(env_file)["OMNI_HF_OFFLINE"] == "false"
+
+
+def test_serve_online_flag_overrides_cached_autodetect(tmp_path):
+    _make_cached_model(tmp_path, "org/cached", 4 * _GIB)
+    compose_file = tmp_path / "docker-compose.vllm.yml"
+    env_file = compose_file.with_suffix(".env")
+
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "vllm",
+            "--model",
+            "org/cached",
+            "--online",
+            "--hf-home",
+            str(tmp_path),
+            "--compose-file",
+            str(compose_file),
+            "--generate-only",
+            "--no-build",
+        ]
+    )
+    assert result == 0
+    assert omni_cli.load_env_file(env_file)["OMNI_HF_OFFLINE"] == "false"
+
+
+def test_serve_offline_flag_forces_offline_when_uncached(tmp_path):
+    compose_file = tmp_path / "docker-compose.vllm.yml"
+    env_file = compose_file.with_suffix(".env")
+
+    result = omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "vllm",
+            "--model",
+            "org/not-cached",
+            "--offline",
+            "--hf-home",
+            str(tmp_path),
+            "--compose-file",
+            str(compose_file),
+            "--generate-only",
+            "--no-build",
+        ]
+    )
+    assert result == 0
+    assert omni_cli.load_env_file(env_file)["OMNI_HF_OFFLINE"] == "true"
+
+
+def _qwen_config(snapshot):
+    import json as _json
+
+    (snapshot / "config.json").write_text(
+        _json.dumps(
+            {
+                "num_hidden_layers": 28,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "torch_dtype": "bfloat16",
+                "max_position_embeddings": 40960,
+            }
+        )
+    )
+
+
+def test_serve_auto_util_is_demand_sized_for_small_model(tmp_path):
+    _make_cached_model(tmp_path, "org/small", 4 * _GIB)
+    snap = next((tmp_path / "hub").glob("models--org--small/snapshots/*"))
+    _qwen_config(snap)
+    compose_file = tmp_path / "docker-compose.vllm.yml"
+    env_file = compose_file.with_suffix(".env")
+
+    def util_for(parallel):
+        omni_cli.main(
+            [
+                "serve",
+                "--backend",
+                "vllm",
+                "--model",
+                "org/small",
+                "--context-length",
+                "40960",
+                "--max-parallel",
+                str(parallel),
+                "--hf-home",
+                str(tmp_path),
+                "--compose-file",
+                str(compose_file),
+                "--generate-only",
+                "--no-build",
+            ]
+        )
+        return float(omni_cli.load_env_file(env_file)["VLLM_GPU_MEMORY_UTILIZATION"])
+
+    u2 = util_for(2)
+    u4 = util_for(4)
+    # Demand-sized: far below the safety ceiling (~0.83) and scales with parallel.
+    assert u2 < 0.40
+    assert u2 < u4
+
+
+def test_serve_explicit_util_overrides_demand_sizing(tmp_path):
+    _make_cached_model(tmp_path, "org/small", 4 * _GIB)
+    snap = next((tmp_path / "hub").glob("models--org--small/snapshots/*"))
+    _qwen_config(snap)
+    compose_file = tmp_path / "docker-compose.vllm.yml"
+    env_file = compose_file.with_suffix(".env")
+
+    omni_cli.main(
+        [
+            "serve",
+            "--backend",
+            "vllm",
+            "--model",
+            "org/small",
+            "--gpu-memory-utilization",
+            "0.5",
+            "--hf-home",
+            str(tmp_path),
+            "--compose-file",
+            str(compose_file),
+            "--generate-only",
+            "--no-build",
+        ]
+    )
+    assert omni_cli.load_env_file(env_file)["VLLM_GPU_MEMORY_UTILIZATION"] == "0.5"

@@ -69,10 +69,23 @@ omni serve --backend vllm \
 ```
 
 Generates `docker/docker-compose.vllm.yml` + `.env` and starts
-`vllm/vllm-openai:latest` plus the proxy. Useful env-file knobs
+`vllm/vllm-openai:latest` plus the proxy.
+
+`omni serve` flags are surgical — each updates only its own env key and
+everything else is preserved from the previous run. The one exception is
+the served name: changing `--model` without `--served-model-name`
+re-derives the API name from the new model (`Qwen/Qwen3-1.7B` →
+`Qwen3-1.7B`) so the new model isn't exposed under the previous session's
+name. Pass `--served-model-name` to set a custom alias (it is always kept).
+The admin Settings save and "Use with sidecar" behave the same way.
+
+Useful env-file knobs
 (editable in the admin UI under Settings → Backend, then Regenerate +
-Restart): `VLLM_GPU_MEMORY_UTILIZATION` (default 0.8 — on unified
-memory this is a share of system RAM), `VLLM_ENFORCE_EAGER=true`
+Restart): `VLLM_GPU_MEMORY_UTILIZATION` (on unified memory this is a
+share of *system RAM*; when you don't pass `--gpu-memory-utilization`,
+`omni serve` computes a safe value from the model size and host reserve
+instead of the discrete-GPU 0.8 default — see the troubleshooting entry
+on the memory guard), `VLLM_ENFORCE_EAGER=true`
 (faster startup, required on some GB10 stacks), `VLLM_TOOL_CALL_PARSER`,
 `VLLM_ENABLE_PREFIX_CACHING` (v1 engine default is on).
 
@@ -89,8 +102,17 @@ Notes from verification:
   reports `usage.prompt_tokens_details.cached_tokens` — without it the
   dashboard's cached-token stats stay at zero even though prefix caching
   works (the Prometheus hit counters still move).
-- vLLM preallocates its whole `gpu_memory_utilization` budget, so the
-  Active Models memory bar sits near the soft marker by design.
+- vLLM preallocates its whole `gpu_memory_utilization` budget as KV cache
+  **regardless of model size** — a 1.7B model at 0.8 util grabs ~95 GiB of
+  KV on the unified pool, most of it unusable past `max_num_seqs`. Context
+  length is not the lever (it only changes how many sequences fit in the
+  fixed pool). `omni serve` now sizes the auto utilization to *demand* —
+  weights + (`max_parallel` × `context`) KV × ~1.5 headroom — capped by the
+  safety ceiling, so a small model uses ~15–20 GiB instead of ~100 GiB
+  (e.g. Qwen3-1.7B at ctx 40960 / parallel 2 → util ≈ 0.16). Large models
+  still hit the safety ceiling. Tune the headroom with `OMLX_KV_HEADROOM`
+  (default 1.5) or pin it with `--gpu-memory-utilization`; the admin model
+  switch resizes util the same way unless you set it yourself.
 - 2026 vLLM images renamed the cache metrics
   (`vllm:prefix_cache_{hits,queries}_total`, `vllm:kv_cache_usage_perc`);
   the dashboard's candidate lists in `omlx/proxy/metrics.py` cover both
@@ -168,8 +190,20 @@ switch back.
   and `docker exec <ctr> cat /etc/resolv.conf` shows `127.0.0.53`):
   the container was created with a broken network sandbox — usually
   after a failed first `up` (e.g. port conflict with a still-running
-  other stack). Fix: `docker compose --env-file docker/docker-compose.vllm.env \
+  other stack). The healthy proxy container has `127.0.0.11` (Docker's
+  embedded DNS); the broken one copied the host's systemd-resolved stub
+  `127.0.0.53`, which isn't reachable from inside the container. Fix:
+  `docker compose --env-file docker/docker-compose.vllm.env \
   -f docker/docker-compose.vllm.yml up -d --force-recreate vllm`.
+  vLLM hits this only because it does a Hugging Face repo check at
+  startup *even for a cached model*. `omni serve` now starts the backend
+  with `HF_HUB_OFFLINE`/`TRANSFORMERS_OFFLINE` automatically when it
+  detects the model in the local cache (`OMNI_HF_OFFLINE=true` in the
+  generated env), so a broken DNS sandbox or an offline box no longer
+  crashes startup for an already-downloaded model. Override with
+  `--online` (force network) or `--offline` (force offline even when the
+  cache check can't confirm it); the admin model switch sets it the same
+  way (offline for cached, online for not-yet-downloaded models).
 - **Port 8000 already in use**: the other sidecar stack is still up;
   `omni stop --target both` first (compose treats the old service as an
   orphan, it will not stop it for you).
@@ -193,6 +227,27 @@ switch back.
 - **`nvidia-smi` memory shows `[N/A]`** on GB10: unified memory. Real
   ceiling is host MemTotal (`/proc/meminfo`); per-process GPU usage is
   still reported by `nvidia-smi --query-compute-apps=used_memory ...`.
+- **A large model hard-locks the box (needs a power cycle)**: vLLM's
+  `--gpu-memory-utilization` is a fraction of *total* "GPU" memory, and on
+  GB10 unified memory that is the whole ~122 GiB pool — at the discrete-GPU
+  default 0.8 vLLM targets ~97 GiB and, while loading tens of GB of weights
+  through the page cache, overshoots into the RAM the kernel needs. The
+  allocations are driver-pinned and unreclaimable, so the OOM killer can't
+  recover. `omni serve --backend vllm` now (a) sets a unified-memory-aware
+  utilization derived from the model's on-disk size and an absolute host
+  reserve, and (b) runs a pre-flight fit check that **refuses** a launch
+  predicted to exhaust memory (`Memory check [block]: …`). The safe
+  condition is `budget (util*total) + weights (load transient) + reserve
+  <= total`; a model whose weights need more than `(total - reserve)/2`
+  is too large to serve here at all. Override with `--force-memory` (CLI)
+  or the "Launch anyway (unsafe)" dialog (admin UI). Tune the reserve with
+  `OMLX_HOST_MEMORY_RESERVE_GB` (default 16); disable the guard entirely
+  with `OMLX_SKIP_MEMORY_GUARD=1`. Note: a Docker `mem_limit` on the vLLM
+  container is *not* a reliable backstop here — unified CUDA allocations do
+  not consistently count against the container cgroup — so the pre-flight
+  guard is the real protection. Examples that don't fit a 122 GiB Spark:
+  `openai/gpt-oss-120b` (~64 GiB weights), `nvidia/…-120B-…-NVFP4`
+  (~79 GiB).
 - **Stats persistence**: serving stats live in the `proxy-state` volume
   (`/data` in the proxy container) next to the proxy state file; they
   survive container restarts. "Clear All-Time" deletes the file.

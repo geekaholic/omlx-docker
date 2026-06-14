@@ -774,5 +774,14 @@
   "js.error.delete_model_connection": "모델 삭제에 실패했습니다. 서버 연결을 확인하세요.",
   "js.success.download_started": "다운로드 시작: {repo_id}",
   "js.success.settings_saved": "설정이 저장되었습니다",
-  "status.cache.peak_ctx_tokens": "최대 컨텍스트 토큰"
+  "status.cache.peak_ctx_tokens": "최대 컨텍스트 토큰",
+  "settings.memory_guard.title": "모델이 메모리에 비해 너무 큼",
+  "settings.memory_guard.cancel": "취소",
+  "settings.memory_guard.launch_anyway": "무시하고 실행(위험)",
+  "settings.memory_guard.acknowledge": "호스트가 다운될 수 있음을 이해합니다",
+  "settings.memory_guard.host_total": "호스트 메모리",
+  "settings.memory_guard.weights": "모델 가중치",
+  "settings.memory_guard.budget": "vLLM 예산",
+  "settings.memory_guard.reserve": "호스트 예약",
+  "settings.memory_guard.util_hint": "이 모델 권장값: {n}"
 }

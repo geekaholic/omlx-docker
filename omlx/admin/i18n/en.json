@@ -796,5 +796,14 @@
   "js.error.delete_model_failed": "Failed to delete model",
   "js.error.delete_model_connection": "Failed to delete model. Check server connection.",
   "js.success.download_started": "Download started: {repo_id}",
-  "js.success.settings_saved": "Settings saved successfully"
+  "js.success.settings_saved": "Settings saved successfully",
+  "settings.memory_guard.title": "Model too large for memory",
+  "settings.memory_guard.cancel": "Cancel",
+  "settings.memory_guard.launch_anyway": "Launch anyway (unsafe)",
+  "settings.memory_guard.acknowledge": "I understand this may crash the host",
+  "settings.memory_guard.host_total": "Host memory",
+  "settings.memory_guard.weights": "Model weights",
+  "settings.memory_guard.budget": "vLLM budget",
+  "settings.memory_guard.reserve": "Host reserve",
+  "settings.memory_guard.util_hint": "Recommended for this model: {n}"
 }

@@ -132,6 +132,56 @@ llama.cpp server, or any OpenAI-compatible endpoint (Ollama, for example).
   "Use with sidecar" switch through the existing settings + restart
   flows. Verified live: 12 HF repos listed on the vLLM stack, switch to
   Qwen/Qwen3-1.7B via API + restart worked end-to-end.
+- **Demand-aware gpu-memory-utilization**: vLLM preallocates its whole
+  `gpu_memory_utilization` budget as KV cache regardless of model size, so the
+  memory-guard auto-util (0.83 for a small cached model) made a 1.7B model grab
+  ~95 GiB of KV (~101 GiB total), most of it unusable past `max_num_seqs`; context
+  length is not the lever. `omni serve` (and the admin model switch) now size the
+  auto util to *demand* — `auto_utilization = min(safety ceiling, (weights +
+  kv_per_token × context × max_parallel × OMLX_KV_HEADROOM + activation)/total)` —
+  reading KV geometry from `config.json` (`kv_bytes_per_token` in
+  `omlx/proxy/memory_fit.py`). Qwen3-1.7B at ctx 40960 / parallel 2 now picks
+  util ≈ 0.16 (~19 GiB) instead of 101 GiB; large models still hit the safety
+  ceiling. `--gpu-memory-utilization` overrides; `FitResult.recommended_util` and
+  the Settings hint are demand-aware too.
+- **HF offline mode for cached models**: vLLM crash-looped with
+  `[Errno -3] Temporary failure in name resolution` because it does a
+  Hugging Face repo check at startup even for a cached model, and the
+  container had a broken DNS sandbox (`127.0.0.53` instead of Docker's
+  `127.0.0.11`). `omni serve` now sets `HF_HUB_OFFLINE`/`TRANSFORMERS_OFFLINE`
+  (via `OMNI_HF_OFFLINE`) automatically when the model resolves to the local
+  cache (reusing `resolve_local_model_path`), with `--offline`/`--online`
+  overrides; the admin model switch sets it the same way. Threaded through
+  `CommonSidecarSettings.hf_offline` / `OMNI_ENV_KEYS` and both sidecar compose
+  templates. So a broken DNS sandbox or an offline box no longer crashes
+  startup for an already-downloaded model.
+- **Served-name resync on model change**: `omni serve --model X` (and the
+  admin Settings save) used to keep the previous session's
+  `OMNI_SERVED_MODEL_NAME`, so a freshly-loaded model was exposed under the
+  old model's API name (e.g. Qwen3-1.7B served as `gpt-oss-120b`). Now the
+  served name is re-derived from the new model's tail
+  (`derive_served_name` in `omlx/proxy/sidecar_compose.py`) whenever the
+  model changes and `--served-model-name` / a custom name wasn't supplied;
+  an explicit/custom name is always preserved. Applied in both
+  `portable_cli_environment` (CLI) and `update_global_settings` (admin),
+  matching the existing "Use with sidecar" derivation.
+- **Unified-memory launch guard**: loading 120B-class models
+  (`openai/gpt-oss-120b` ~64 GiB, `nvidia/…-120B-…-NVFP4` ~79 GiB) on the
+  vLLM sidecar hard-locked the Spark and needed a power cycle. Root cause:
+  vLLM's discrete-GPU default `--gpu-memory-utilization 0.8` is a fraction
+  of *total* memory, which on GB10's ~122 GiB unified pool targets ~97 GiB
+  and, during the page-cache weight-load transient, overshoots into
+  driver-pinned (unreclaimable) RAM → kernel livelock. Fixed with
+  `omlx/proxy/memory_fit.py` (host-reserve-aware fit check; safe condition
+  `budget + weights + reserve <= total`), a model-aware utilization default
+  in `omni serve`, a CLI pre-flight that **refuses** oversized launches
+  (`--force-memory`/`OMLX_SKIP_MEMORY_GUARD` to override), an admin 409 +
+  "Launch anyway" dialog on the save/switch/restart paths, and a Settings
+  recommended-util hint. `OMLX_HOST_MEMORY_RESERVE_GB` tunes the reserve
+  (default 16). Verified on the Spark: both 120B models block in
+  `--dry-run` and refuse a real launch (exit 1, no compose written), small
+  models pass, `--force-memory` proceeds. The container `mem_limit` route
+  was rejected — unified CUDA allocations don't reliably hit the cgroup.
 - **max_tokens vs context window** (commit e6178c8): a Max Tokens
   sampling default >= the backend context made vLLM reject every chat
   request, and the Settings UI used to pre-fill Max Tokens with the

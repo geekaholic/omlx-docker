@@ -337,6 +337,9 @@
             localModels: { enabled: false, models: [], current_model: '', backend_type: '' },
             localModelsLoading: false,
             localModelSwitching: false,
+            // Unified-memory fit guard: populated when a launch/switch is
+            // refused (HTTP 409); the modal offers an override.
+            memoryBlock: { show: false, detail: '', info: null, acknowledge: false, retry: null },
             // Client-side stash of per-backend sidecar image edits; the
             // server profiles don't carry the image field.
             _sidecarImageByType: {},
@@ -908,7 +911,7 @@
                 }
             },
 
-            async saveGlobalSettings() {
+            async saveGlobalSettings(force = false) {
                 this.saving = true;
                 this.saveSuccess = false;
                 this.saveError = '';
@@ -1050,8 +1053,14 @@
                             ...(this.globalSettings.auth.api_key ? { api_key: this.globalSettings.auth.api_key } : {}),
                             skip_api_key_verification: this.globalSettings.auth.skip_api_key_verification,
                             idle_timeout_seconds: this.globalSettings.idle_timeout?.idle_timeout_seconds ?? null,
+                            ...(force ? { force_memory: true } : {}),
                         }),
                     });
+
+                    if (await this._handleMemoryBlock(response, () => this.saveGlobalSettings(true))) {
+                        this.saving = false;
+                        return;
+                    }
 
                     if (response.ok) {
                         const data = await response.json();
@@ -2615,8 +2624,33 @@
                 }
             },
 
-            async useLocalModel(model) {
-                if (this.localModelSwitching) return;
+            // If a response is a memory-fit block (409 + blocked), open the
+            // modal wired to retry the same action with the override. Returns
+            // true when it handled a block so the caller can stop.
+            async _handleMemoryBlock(response, retry) {
+                if (response.status !== 409) return false;
+                let data;
+                try { data = await response.clone().json(); } catch (e) { return false; }
+                if (!data || !data.blocked) return false;
+                this.memoryBlock = {
+                    show: true,
+                    detail: data.detail || '',
+                    info: data.memory || null,
+                    acknowledge: false,
+                    retry,
+                };
+                return true;
+            },
+
+            async memoryBlockOverride() {
+                if (!this.memoryBlock.acknowledge) return;
+                const retry = this.memoryBlock.retry;
+                this.memoryBlock = { show: false, detail: '', info: null, acknowledge: false, retry: null };
+                if (typeof retry === 'function') await retry();
+            },
+
+            async useLocalModel(model, force = false) {
+                if (this.localModelSwitching && !force) return;
                 this.localModelSwitching = true;
                 try {
                     const servedName = model.repo_id.split('/').pop();
@@ -2631,11 +2665,13 @@
                     if (model.context_length && (!currentCtx || model.context_length < currentCtx)) {
                         payload.omni_context_length = model.context_length;
                     }
+                    if (force) payload.force_memory = true;
                     const response = await fetch('/admin/api/global-settings', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(payload),
                     });
+                    if (await this._handleMemoryBlock(response, () => this.useLocalModel(model, true))) return;
                     if (!response.ok) return;
                     this.localModels.current_model = model.repo_id;
                     this.backendRestartNeeded = true;
@@ -2643,18 +2679,18 @@
                     // The env file is regenerated server-side; the switch
                     // takes effect when the sidecar restarts (confirm dialog
                     // inside restartBackendStart).
-                    await this.restartBackendStart();
+                    await this.restartBackendStart(force);
                 } finally {
                     this.localModelSwitching = false;
                 }
             },
 
-            async restartBackendStart() {
+            async restartBackendStart(force = false) {
                 if (this.restartBackend.status === 'restarting'
                     || this.restartBackend.status === 'waiting') {
                     return;
                 }
-                if (!window.confirm(window.t('settings.proxy.restart_backend_confirm'))) {
+                if (!force && !window.confirm(window.t('settings.proxy.restart_backend_confirm'))) {
                     return;
                 }
 
@@ -2665,7 +2701,11 @@
 
                 let response;
                 try {
-                    response = await fetch('/admin/api/sidecar/restart', { method: 'POST' });
+                    response = await fetch('/admin/api/sidecar/restart', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(force ? { force_memory: true } : {}),
+                    });
                 } catch (err) {
                     this.restartBackend = {
                         status: 'error',
@@ -2676,6 +2716,11 @@
 
                 if (response.status === 401) {
                     window.location.href = '/admin';
+                    return;
+                }
+
+                if (await this._handleMemoryBlock(response, () => this.restartBackendStart(true))) {
+                    this.restartBackend = { status: 'idle', message: '' };
                     return;
                 }
 

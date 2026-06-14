@@ -774,5 +774,14 @@
   "js.error.delete_model_connection": "Error al eliminar el modelo. Verifica la conexión con el servidor.",
   "js.success.download_started": "Descarga iniciada: {repo_id}",
   "js.success.settings_saved": "Configuración guardada correctamente",
-  "status.cache.peak_ctx_tokens": "Tokens de contexto pico"
+  "status.cache.peak_ctx_tokens": "Tokens de contexto pico",
+  "settings.memory_guard.title": "Modelo demasiado grande para la memoria",
+  "settings.memory_guard.cancel": "Cancelar",
+  "settings.memory_guard.launch_anyway": "Iniciar de todos modos (inseguro)",
+  "settings.memory_guard.acknowledge": "Entiendo que esto puede bloquear el host",
+  "settings.memory_guard.host_total": "Memoria del host",
+  "settings.memory_guard.weights": "Pesos del modelo",
+  "settings.memory_guard.budget": "Presupuesto de vLLM",
+  "settings.memory_guard.reserve": "Reserva del host",
+  "settings.memory_guard.util_hint": "Recomendado para este modelo: {n}"
 }

@@ -37,6 +37,10 @@ class CommonSidecarSettings:
     # Opt-in local model scan (omni serve --scan-models [--model-dir DIR]).
     scan_models: bool = False
     model_scan_host_dir: str = ""
+    # Run the backend with HF_HUB_OFFLINE so startup doesn't depend on the
+    # network when the model is already cached (set automatically by
+    # `omni serve` for cached models; override with --offline/--online).
+    hf_offline: bool = False
     # 0 = no default output cap injected; the backend applies its own
     # limit (vLLM caps to the remaining context when max_tokens is unset).
     sampling_max_tokens: int = 0
@@ -53,6 +57,7 @@ OMNI_ENV_KEYS = (
     "OMNI_MAX_PARALLEL",
     "OMNI_BACKEND_PORT",
     "OMNI_HF_HOME",
+    "OMNI_HF_OFFLINE",
     "OMNI_HF_ENDPOINT",
     "OMNI_HTTP_PROXY",
     "OMNI_HTTPS_PROXY",
@@ -117,6 +122,7 @@ def common_environment(settings: CommonSidecarSettings) -> dict[str, str]:
         "OMNI_MAX_PARALLEL": str(settings.max_parallel),
         "OMNI_BACKEND_PORT": str(settings.backend_port),
         "OMNI_HF_HOME": settings.hf_home,
+        "OMNI_HF_OFFLINE": _bool_str(settings.hf_offline),
         "OMNI_HF_ENDPOINT": settings.hf_endpoint,
         "OMNI_HTTP_PROXY": settings.http_proxy,
         "OMNI_HTTPS_PROXY": settings.https_proxy,
@@ -162,6 +168,7 @@ def common_settings_kwargs_from_env(
             values.get("OMNI_BACKEND_PORT"), defaults.backend_port
         ),
         "hf_home": values.get("OMNI_HF_HOME", defaults.hf_home),
+        "hf_offline": _bool_value(values.get("OMNI_HF_OFFLINE"), defaults.hf_offline),
         "hf_endpoint": values.get("OMNI_HF_ENDPOINT", defaults.hf_endpoint),
         "http_proxy": values.get("OMNI_HTTP_PROXY", defaults.http_proxy),
         "https_proxy": values.get("OMNI_HTTPS_PROXY", defaults.https_proxy),
@@ -229,6 +236,9 @@ def common_settings_kwargs_from_overrides(
         ),
         "hf_home": str(pick("omni_hf_home", defaults.hf_home)).strip()
         or defaults.hf_home,
+        "hf_offline": _bool(
+            pick("omni_hf_offline", defaults.hf_offline), defaults.hf_offline
+        ),
         "hf_endpoint": str(pick("huggingface_endpoint", defaults.hf_endpoint)).strip(),
         "http_proxy": str(pick("network_http_proxy", defaults.http_proxy)).strip(),
         "https_proxy": str(pick("network_https_proxy", defaults.https_proxy)).strip(),
@@ -492,6 +502,18 @@ def _bool_value(value: str | None, default: bool) -> bool:
     if value is None or value == "":
         return default
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def derive_served_name(model: str) -> str:
+    """API-visible name derived from a model id (tail after the last ``/``).
+
+    Matches the admin "Use with sidecar" derivation
+    (``repo_id.split('/').pop()``) so the CLI and UI agree, e.g.
+    ``Qwen/Qwen3-1.7B`` -> ``Qwen3-1.7B``. Falls back to the whole value
+    when there is no ``/``.
+    """
+    cleaned = model.strip()
+    return cleaned.rsplit("/", 1)[-1] or cleaned
 
 
 def _host_path(value: str) -> str:

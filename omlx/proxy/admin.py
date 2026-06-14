@@ -30,6 +30,16 @@ from .docker_control import (
     service_gpu_memory_bytes,
 )
 from .local_models import scan_dir, scan_enabled, scan_local_models
+from .memory_fit import (
+    FitResult,
+    auto_utilization,
+    estimate_resident_bytes,
+    evaluate_fit,
+    guard_disabled,
+    host_reserve_bytes,
+    kv_bytes_per_token,
+    resolve_local_model_path,
+)
 from .metrics import (
     backend_context_limit,
     collect_backend_metrics_cached,
@@ -37,6 +47,7 @@ from .metrics import (
 )
 from .sidecar_compose import (
     backend_spec,
+    derive_served_name,
     env_from_compose,
     load_env_file,
     render_env_file,
@@ -290,6 +301,32 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
         old_type = _proxy_backend_type(state)
         new_type = proxy_updates.get("proxy_backend_type", old_type)
         type_changed = new_type != old_type
+        # Captured before any mutation so the served-name/util resync below can
+        # tell whether the model is actually changing and whether the util was
+        # left at its previous (auto) value.
+        _old_settings = _sidecar_settings_from_files(state)
+        old_sidecar_model = _old_settings.model
+        old_sidecar_util = float(
+            getattr(_old_settings, "gpu_memory_utilization", 0.0) or 0.0
+        )
+        # Pre-flight unified-memory guard: refuse a model/util change that is
+        # predicted to exhaust memory and hard-lock the host (vLLM only).
+        # Runs before any state mutation so a block leaves settings untouched.
+        if (
+            not _force_memory(payload)
+            and new_type == "vllm"
+            and _sidecar_backend(state) == "vllm"
+        ):
+            guard_updates = _extract_sidecar_compose_updates(payload, "vllm")
+            if guard_updates.keys() & {
+                "omni_model",
+                "vllm_gpu_memory_utilization",
+                "omni_context_length",
+            }:
+                preview = _sidecar_settings_from_files(state, guard_updates)
+                fit = _evaluate_sidecar_memory_fit(preview)
+                if fit is not None and fit.blocked:
+                    return _memory_block_response(fit)
         if type_changed:
             _archive_backend_profile(state, old_type)
             state.global_overrides.update(_backend_profile_seed(state, new_type))
@@ -317,6 +354,59 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             if new_type in SIDECAR_BACKEND_TYPES
             else {}
         )
+        if "omni_model" in sidecar_updates:
+            # When the model changes, re-sync the served name unless the user
+            # set a custom one — otherwise the prior model's name lingers and
+            # mislabels the new model (matches the CLI / "Use with sidecar").
+            new_model = str(sidecar_updates["omni_model"]).strip()
+            incoming_served = str(
+                sidecar_updates.get("omni_served_model_name", "")
+            ).strip()
+            if (
+                new_model
+                and new_model != old_sidecar_model
+                and (
+                    not incoming_served
+                    or incoming_served == derive_served_name(old_sidecar_model)
+                )
+            ):
+                sidecar_updates["omni_served_model_name"] = derive_served_name(
+                    new_model
+                )
+            if new_model and new_model != old_sidecar_model:
+                # Start the new model offline when it's already cached so a
+                # broken DNS sandbox / offline box can't crash startup; a switch
+                # to an uncached model stays online so it can download.
+                model_path = resolve_local_model_path(new_model, _memory_scan_dirs())
+                sidecar_updates["omni_hf_offline"] = (
+                    "true" if model_path is not None else "false"
+                )
+                # Resize gpu-memory-utilization for the new model unless the user
+                # changed it in this save — otherwise the previous model's util
+                # lingers and vLLM over-allocates KV (e.g. ~95 GiB for a 1.7B
+                # model). Demand-aware: sized to weights + max_parallel x context.
+                if new_type == "vllm" and model_path is not None:
+                    incoming_util = sidecar_updates.get("vllm_gpu_memory_utilization")
+                    user_changed_util = incoming_util is not None and not _floats_equal(
+                        incoming_util, old_sidecar_util
+                    )
+                    if not user_changed_util:
+                        prospective = _sidecar_settings_from_files(
+                            state, sidecar_updates
+                        )
+                        util = auto_utilization(
+                            total_bytes=int(host_memory_info().get("total_bytes") or 0),
+                            reserve_bytes=host_reserve_bytes(),
+                            weights_bytes=estimate_resident_bytes(model_path),
+                            kv_per_token=kv_bytes_per_token(model_path),
+                            context_tokens=int(
+                                getattr(prospective, "context_length", 0) or 0
+                            )
+                            or None,
+                            parallel=int(getattr(prospective, "max_parallel", 0) or 0)
+                            or None,
+                        )
+                        sidecar_updates["vllm_gpu_memory_utilization"] = round(util, 2)
         if sidecar_updates:
             state.global_overrides.update(sidecar_updates)
         state.log("updated proxy admin settings")
@@ -564,7 +654,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
         )
 
     @router.post("/api/sidecar/restart")
-    async def restart_sidecar():
+    async def restart_sidecar(request: Request):
         backend_type = _proxy_backend_type(state)
         if backend_type not in SIDECAR_BACKEND_TYPES:
             return JSONResponse(
@@ -576,6 +666,16 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
                 },
                 status_code=409,
             )
+        try:
+            restart_payload = await request.json()
+        except Exception:
+            restart_payload = {}
+        # Refuse to (re)start a vLLM sidecar whose persisted model/util is
+        # predicted to exhaust unified memory, unless explicitly overridden.
+        if backend_type == "vllm" and not _force_memory(restart_payload):
+            fit = _evaluate_sidecar_memory_fit(_sidecar_settings_from_files(state))
+            if fit is not None and fit.blocked:
+                return _memory_block_response(fit)
         service = _sidecar_backend(state)
         try:
             container_id = await restart_compose_service(service)
@@ -807,6 +907,68 @@ def _extract_sidecar_compose_updates(
     return updates
 
 
+def _floats_equal(a: Any, b: Any, tol: float = 1e-6) -> bool:
+    try:
+        return abs(float(a) - float(b)) <= tol
+    except (TypeError, ValueError):
+        return False
+
+
+def _force_memory(payload: dict[str, Any] | None) -> bool:
+    if not payload:
+        return False
+    return bool(payload.get("force_memory")) or guard_disabled()
+
+
+def _memory_scan_dirs() -> list[Path | str]:
+    """Candidate roots for resolving a model's on-disk footprint.
+
+    The host caches are mounted read-only under ``/models-scan`` when
+    ``--scan-models`` is on; without that mount the proxy can't measure
+    weights and the guard degrades to a warning.
+    """
+    base = scan_dir()
+    return [base, base / "hf", base / "llamacpp"]
+
+
+def _evaluate_sidecar_memory_fit(settings: Any) -> FitResult | None:
+    """Run the vLLM unified-memory fit check for a prospective sidecar config.
+
+    Returns None for non-vLLM backends (the unified-memory ballooning is
+    vLLM-specific). The model footprint is resolved from the read-only scan
+    mount; when it can't be measured the result is a warning, not a block.
+    """
+    model = getattr(settings, "model", "") or ""
+    util = float(getattr(settings, "gpu_memory_utilization", 0.80) or 0.80)
+    total = int(host_memory_info().get("total_bytes") or 0)
+    reserve = host_reserve_bytes()
+    model_path = resolve_local_model_path(model, _memory_scan_dirs())
+    weights = estimate_resident_bytes(model_path) if model_path is not None else None
+    kv_per_token = kv_bytes_per_token(model_path) if model_path is not None else None
+    context = int(getattr(settings, "context_length", 0) or 0) or None
+    parallel = int(getattr(settings, "max_parallel", 0) or 0) or None
+    return evaluate_fit(
+        total_bytes=total,
+        util=util,
+        reserve_bytes=reserve,
+        weights_bytes=weights,
+        kv_bytes_per_token=kv_per_token,
+        context_tokens=context,
+        parallel=parallel,
+    )
+
+
+def _memory_block_response(fit: FitResult) -> JSONResponse:
+    return JSONResponse(
+        {
+            "detail": fit.reason,
+            "blocked": True,
+            "memory": fit.as_dict(),
+        },
+        status_code=409,
+    )
+
+
 def _sidecar_settings_payload(state: ProxyAdminState) -> dict[str, Any]:
     settings = _sidecar_settings_from_files(state)
     compose_path = _compose_output_path()
@@ -842,6 +1004,7 @@ _COMMON_UPDATE_ENV_MAP = {
     "omni_max_parallel": "OMNI_MAX_PARALLEL",
     "omni_backend_port": "OMNI_BACKEND_PORT",
     "omni_hf_home": "OMNI_HF_HOME",
+    "omni_hf_offline": "OMNI_HF_OFFLINE",
     "network_http_proxy": "OMNI_HTTP_PROXY",
     "network_https_proxy": "OMNI_HTTPS_PROXY",
     "network_no_proxy": "OMNI_NO_PROXY",
@@ -1217,6 +1380,7 @@ def _global_settings_payload(
 ) -> dict[str, Any]:
     overrides = state.global_overrides
     sidecar_settings = _sidecar_settings_from_files(state)
+    memory_fit = _evaluate_sidecar_memory_fit(sidecar_settings)
     return {
         "base_path": "",
         "server": {
@@ -1240,6 +1404,7 @@ def _global_settings_payload(
             "backend_url_locked": list(SIDECAR_BACKEND_TYPES),
             "backend_profiles": _backend_profiles_payload(state),
             "docker_socket_available": Path(docker_socket_path()).exists(),
+            "memory_fit": memory_fit.as_dict() if memory_fit is not None else None,
         },
         "model": {
             "model_dirs": [config.normalized_backend_url],

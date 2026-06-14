@@ -199,3 +199,33 @@ def test_proxy_service_carries_model_scan_env_and_mounts():
     llamacpp = render_llamacpp_compose(LlamacppComposeSettings())
     assert ":/models-scan/hf:ro" in llamacpp
     assert ":/models-scan/llamacpp:ro" in llamacpp
+
+
+def test_hf_offline_round_trips_through_env_and_overrides():
+    defaults = CommonSidecarSettings()
+    assert defaults.hf_offline is False
+    assert "OMNI_HF_OFFLINE" in OMNI_ENV_KEYS
+
+    from_env = common_settings_kwargs_from_env({"OMNI_HF_OFFLINE": "true"}, defaults)
+    assert from_env["hf_offline"] is True
+
+    from_overrides = common_settings_kwargs_from_overrides(
+        {"omni_hf_offline": True}, defaults
+    )
+    assert from_overrides["hf_offline"] is True
+
+
+def test_vllm_compose_renders_hf_offline_env():
+    text = render_vllm_compose(VllmComposeSettings(hf_offline=True))
+    assert 'HF_HUB_OFFLINE: "${OMNI_HF_OFFLINE:-false}"' in text
+    assert 'TRANSFORMERS_OFFLINE: "${OMNI_HF_OFFLINE:-false}"' in text
+    # The OMNI_HF_OFFLINE backend env reflects the setting and is unset before
+    # the server starts so it doesn't leak in alongside HF_HUB_OFFLINE.
+    assert 'OMNI_HF_OFFLINE: "${OMNI_HF_OFFLINE:-true}"' in text
+    assert "unset" in text and "OMNI_HF_OFFLINE" in text
+
+
+def test_llamacpp_compose_renders_hf_offline_env():
+    text = render_llamacpp_compose(LlamacppComposeSettings(hf_offline=True))
+    assert 'HF_HUB_OFFLINE: "${OMNI_HF_OFFLINE:-false}"' in text
+    assert 'TRANSFORMERS_OFFLINE: "${OMNI_HF_OFFLINE:-false}"' in text

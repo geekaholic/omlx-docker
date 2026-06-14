@@ -1420,3 +1420,228 @@ async def test_local_models_endpoint_scans_when_enabled(monkeypatch, tmp_path):
     assert data["models"][0]["backends"] == ["vllm"]
     assert len(cached["models"]) == 1
     assert len(refreshed["models"]) == 2
+
+
+def _make_cached_model_hub(root, repo_id, weight_bytes):
+    encoded = "models--" + repo_id.replace("/", "--")
+    commit = "feedface"
+    snapshot = root / "hub" / encoded / "snapshots" / commit
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text(json.dumps({"max_position_embeddings": 4096}))
+    with open(snapshot / "model.safetensors", "wb") as handle:
+        handle.truncate(weight_bytes)
+    refs = root / "hub" / encoded / "refs"
+    refs.mkdir(parents=True)
+    (refs / "main").write_text(commit)
+
+
+@pytest.mark.asyncio
+async def test_sidecar_restart_blocks_oversized_model(monkeypatch, tmp_path):
+    import omlx.proxy.admin as admin
+
+    state_path = tmp_path / "state.json"
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(state_path))
+    monkeypatch.setenv("OMLX_MODEL_SCAN_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        admin, "host_memory_info", lambda *a, **k: {"total_bytes": 122 * 1024**3}
+    )
+    _make_cached_model_hub(tmp_path, "org/huge", 80 * 1024**3)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": [{"id": "huge"}]})
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        # Saving a vLLM sidecar pointed at the oversized model is refused.
+        bad = {
+            "proxy_backend_type": "vllm",
+            "omni_model": "org/huge",
+            "omni_served_model_name": "huge",
+        }
+        blocked = await client.post("/admin/api/global-settings", json=bad)
+        assert blocked.status_code == 409
+        body = blocked.json()
+        assert body["blocked"] is True
+        assert body["memory"]["weights_bytes"] > 0
+
+        # The override persists it (so the dangerous config exists on disk).
+        forced = await client.post(
+            "/admin/api/global-settings", json={**bad, "force_memory": True}
+        )
+        assert forced.status_code == 200
+
+        # Restarting that persisted config is refused again...
+        restart_blocked = await client.post("/admin/api/sidecar/restart", json={})
+        assert restart_blocked.status_code == 409
+        assert restart_blocked.json()["blocked"] is True
+
+        # ...and the override gets past the guard (then fails only on Docker).
+        restart_forced = await client.post(
+            "/admin/api/sidecar/restart", json={"force_memory": True}
+        )
+        assert restart_forced.status_code != 409
+
+
+@pytest.mark.asyncio
+async def test_admin_resyncs_served_name_on_model_change(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(state_path))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        # Seed a vLLM sidecar with an auto-derived served name.
+        seed = await client.post(
+            "/admin/api/global-settings",
+            json={
+                "proxy_backend_type": "vllm",
+                "omni_model": "org/old-model",
+                "omni_served_model_name": "old-model",
+            },
+        )
+        assert seed.status_code == 200
+
+        # Changing the model while the form still carries the stale served
+        # name re-derives it from the new model.
+        changed = await client.post(
+            "/admin/api/global-settings",
+            json={
+                "proxy_backend_type": "vllm",
+                "omni_model": "org/new-model",
+                "omni_served_model_name": "old-model",
+            },
+        )
+        assert changed.status_code == 200
+        settings = (await client.get("/admin/api/global-settings")).json()
+        assert settings["proxy"]["sidecar"]["served_model_name"] == "new-model"
+
+        # A custom served name is preserved across a model change.
+        custom = await client.post(
+            "/admin/api/global-settings",
+            json={
+                "proxy_backend_type": "vllm",
+                "omni_model": "org/third-model",
+                "omni_served_model_name": "my-custom",
+            },
+        )
+        assert custom.status_code == 200
+        settings = (await client.get("/admin/api/global-settings")).json()
+        assert settings["proxy"]["sidecar"]["served_model_name"] == "my-custom"
+
+
+@pytest.mark.asyncio
+async def test_admin_sets_offline_for_cached_model_switch(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(state_path))
+    monkeypatch.setenv("OMLX_MODEL_SCAN_DIR", str(tmp_path))
+    _make_cached_model_hub(tmp_path, "org/cached", 4 * 1024**3)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        # Switch to a cached model -> offline enabled.
+        cached = await client.post(
+            "/admin/api/global-settings",
+            json={"proxy_backend_type": "vllm", "omni_model": "org/cached"},
+        )
+        assert cached.status_code == 200
+        settings = (await client.get("/admin/api/global-settings")).json()
+        assert settings["proxy"]["sidecar"]["hf_offline"] is True
+
+        # Switch to an uncached model -> back online so it can download.
+        uncached = await client.post(
+            "/admin/api/global-settings",
+            json={"proxy_backend_type": "vllm", "omni_model": "org/not-cached"},
+        )
+        assert uncached.status_code == 200
+        settings = (await client.get("/admin/api/global-settings")).json()
+        assert settings["proxy"]["sidecar"]["hf_offline"] is False
+
+
+def _make_cached_vllm_model(root, repo_id, weight_bytes):
+    """HF-cache entry under root/hub with a sparse shard + KV-geometry config."""
+    encoded = "models--" + repo_id.replace("/", "--")
+    commit = "cafef00d"
+    snapshot = root / "hub" / encoded / "snapshots" / commit
+    snapshot.mkdir(parents=True)
+    snapshot.joinpath("config.json").write_text(
+        json.dumps(
+            {
+                "num_hidden_layers": 28,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "torch_dtype": "bfloat16",
+                "max_position_embeddings": 40960,
+            }
+        )
+    )
+    with open(snapshot / "model.safetensors", "wb") as handle:
+        handle.truncate(weight_bytes)
+    refs = root / "hub" / encoded / "refs"
+    refs.mkdir(parents=True)
+    (refs / "main").write_text(commit)
+
+
+@pytest.mark.asyncio
+async def test_admin_resizes_util_on_model_switch(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(state_path))
+    monkeypatch.setenv("OMLX_MODEL_SCAN_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "omlx.proxy.admin.host_memory_info",
+        lambda *a, **k: {"total_bytes": 122 * 1024**3},
+    )
+    _make_cached_vllm_model(tmp_path, "org/small", 4 * 1024**3)
+    _make_cached_vllm_model(tmp_path, "org/other", 4 * 1024**3)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        # Switch to a small cached model without touching util -> demand-sized.
+        r = await client.post(
+            "/admin/api/global-settings",
+            json={
+                "proxy_backend_type": "vllm",
+                "omni_model": "org/small",
+                "omni_context_length": 40960,
+                "omni_max_parallel": 2,
+            },
+        )
+        assert r.status_code == 200
+        settings = (await client.get("/admin/api/global-settings")).json()
+        auto_util = settings["proxy"]["sidecar"]["gpu_memory_utilization"]
+        assert auto_util < 0.40  # not the ~0.83 safety ceiling
+
+        # Switch model while explicitly changing util -> the explicit value wins.
+        r = await client.post(
+            "/admin/api/global-settings",
+            json={
+                "proxy_backend_type": "vllm",
+                "omni_model": "org/other",
+                "omni_context_length": 40960,
+                "omni_max_parallel": 2,
+                "vllm_gpu_memory_utilization": 0.7,
+            },
+        )
+        assert r.status_code == 200
+        settings = (await client.get("/admin/api/global-settings")).json()
+        assert settings["proxy"]["sidecar"]["gpu_memory_utilization"] == 0.7

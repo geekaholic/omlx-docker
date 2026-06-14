@@ -774,5 +774,14 @@
   "js.error.delete_model_connection": "刪除模型失敗，請檢查伺服器連線。",
   "js.success.download_started": "已開始下載：{repo_id}",
   "js.success.settings_saved": "設定儲存成功",
-  "status.cache.peak_ctx_tokens": "峰值上下文 Token"
+  "status.cache.peak_ctx_tokens": "峰值上下文 Token",
+  "settings.memory_guard.title": "模型超出可用記憶體",
+  "settings.memory_guard.cancel": "取消",
+  "settings.memory_guard.launch_anyway": "仍要啟動（不安全）",
+  "settings.memory_guard.acknowledge": "我了解這可能導致主機當機",
+  "settings.memory_guard.host_total": "主機記憶體",
+  "settings.memory_guard.weights": "模型權重",
+  "settings.memory_guard.budget": "vLLM 預算",
+  "settings.memory_guard.reserve": "主機保留",
+  "settings.memory_guard.util_hint": "此模型建議值：{n}"
 }
