@@ -25,6 +25,7 @@ from .config import BACKEND_URL_DEFAULTS, SIDECAR_BACKEND_TYPES, ProxyConfig
 from .docker_control import (
     DockerControlError,
     DockerUnavailableError,
+    container_logs,
     docker_socket_path,
     restart_compose_service,
     service_gpu_memory_bytes,
@@ -58,6 +59,12 @@ ADMIN_DIR = Path(__file__).resolve().parents[1] / "admin"
 TEMPLATES_DIR = ADMIN_DIR / "templates"
 STATIC_DIR = ADMIN_DIR / "static"
 I18N_DIR = ADMIN_DIR / "i18n"
+
+# Compose service name of the proxy container itself (see docker-compose.*.yml).
+PROXY_SERVICE = os.getenv("OMLX_PROXY_SERVICE", "omlx-proxy").strip() or "omlx-proxy"
+# Suffix marking a log source backed by a live container (vs. the in-memory
+# proxy buffer). Doubles as the selector value round-tripped via ?file=.
+_CONTAINER_SUFFIX = " (container)"
 
 
 @dataclass
@@ -566,13 +573,48 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             "message": "Remote backend cache controls are not managed by proxy mode",
         }
 
+    def _log_sources() -> list[str]:
+        # The in-memory proxy buffer is always available; real container logs
+        # only when the Docker socket is mounted into this container.
+        sources = ["server.log"]
+        if Path(docker_socket_path()).exists():
+            sources.append(f"{PROXY_SERVICE}{_CONTAINER_SUFFIX}")
+            sources.append(f"{_sidecar_backend(state)}{_CONTAINER_SUFFIX}")
+        return sources
+
     @router.get("/api/logs")
     async def logs(lines: int = 200, file: str = "server.log"):
+        available = _log_sources()
+        if file.endswith(_CONTAINER_SUFFIX):
+            service = file[: -len(_CONTAINER_SUFFIX)]
+            try:
+                content = await container_logs(
+                    service, tail=max(1, min(lines, 10000)), timestamps=True
+                )
+            except DockerUnavailableError as exc:
+                return JSONResponse(
+                    {
+                        "detail": (
+                            f"{exc} Mount /var/run/docker.sock into the proxy "
+                            "container to view container logs."
+                        )
+                    },
+                    status_code=501,
+                )
+            except DockerControlError as exc:
+                return JSONResponse({"detail": str(exc)}, status_code=502)
+            total = content.count("\n") + 1 if content else 0
+            return {
+                "logs": content,
+                "total_lines": total,
+                "available_files": available,
+                "file": file,
+            }
         content = "\n".join(state.logs[-max(1, min(lines, 1000)) :])
         return {
             "logs": content,
             "total_lines": len(state.logs),
-            "available_files": ["server.log"],
+            "available_files": available,
             "file": file,
         }
 

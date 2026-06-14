@@ -9,6 +9,7 @@ from omlx.proxy import docker_control
 from omlx.proxy.docker_control import (
     DockerControlError,
     DockerUnavailableError,
+    container_logs,
     exec_in_service,
     restart_compose_service,
     service_gpu_memory_bytes,
@@ -197,3 +198,77 @@ async def test_service_gpu_memory_bytes_none_without_container():
         value = await service_gpu_memory_bytes("vllm", client=client)
 
     assert value is None
+
+
+@pytest.mark.asyncio
+async def test_container_logs_returns_demuxed_stdout_and_stderr():
+    requests = []
+    frames = (
+        _mux_frame(1, b"loading model\n")
+        + _mux_frame(2, b"WARNING: slow disk\n")
+        + _mux_frame(1, b"ready\n")
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/containers/json":
+            return httpx.Response(
+                200,
+                json=[
+                    {"Id": "abc123", "Labels": {"com.docker.compose.service": "vllm"}}
+                ],
+            )
+        if request.url.path == "/containers/abc123/logs":
+            params = request.url.params
+            assert params["stdout"] == "1"
+            assert params["stderr"] == "1"
+            assert params["tail"] == "50"
+            assert params["timestamps"] == "1"
+            return httpx.Response(200, content=frames)
+        return httpx.Response(404)
+
+    async with _client(handler) as client:
+        output = await container_logs("vllm", tail=50, client=client)
+
+    # Unlike exec, container logs keep both stdout and stderr frames.
+    assert output == "loading model\nWARNING: slow disk\nready\n"
+    assert requests[-1].url.path == "/containers/abc123/logs"
+
+
+@pytest.mark.asyncio
+async def test_container_logs_errors_on_logs_failure():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/containers/json":
+            return httpx.Response(
+                200,
+                json=[
+                    {"Id": "abc123", "Labels": {"com.docker.compose.service": "vllm"}}
+                ],
+            )
+        if request.url.path == "/containers/abc123/logs":
+            return httpx.Response(500, text="daemon error")
+        return httpx.Response(404)
+
+    async with _client(handler) as client:
+        with pytest.raises(DockerControlError, match="failed with status 500"):
+            await container_logs("vllm", client=client)
+
+
+@pytest.mark.asyncio
+async def test_container_logs_errors_when_no_container():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/containers/json":
+            return httpx.Response(200, json=[])
+        return httpx.Response(404)
+
+    async with _client(handler) as client:
+        with pytest.raises(DockerControlError, match="No container found"):
+            await container_logs("vllm", client=client)
+
+
+@pytest.mark.asyncio
+async def test_container_logs_requires_socket(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_DOCKER_SOCK", str(tmp_path / "missing.sock"))
+
+    with pytest.raises(DockerUnavailableError, match="not available"):
+        await container_logs("vllm")

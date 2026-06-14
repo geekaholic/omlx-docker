@@ -370,6 +370,88 @@ def _app_with_mock_backend(handler):
     return create_app(config=config, backend=backend)
 
 
+async def _ok_models_handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json={"object": "list", "data": []})
+
+
+@pytest.mark.asyncio
+async def test_proxy_logs_default_returns_in_memory_buffer(monkeypatch, tmp_path):
+    # No Docker socket: only the in-memory proxy buffer is advertised.
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setenv("OMLX_DOCKER_SOCK", str(tmp_path / "missing.sock"))
+    app = _app_with_mock_backend(_ok_models_handler)
+    app.state.proxy_admin_state.log("hello world")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/admin/api/logs")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "hello world" in data["logs"]
+    assert data["available_files"] == ["server.log"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_logs_advertises_and_serves_container_sources(
+    monkeypatch, tmp_path
+):
+    from omlx.proxy import admin as proxy_admin
+
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+    sock = tmp_path / "docker.sock"
+    sock.touch()  # make docker_socket_path() report present
+    monkeypatch.setenv("OMLX_DOCKER_SOCK", str(sock))
+
+    async def fake_container_logs(service, *, tail=200, timestamps=True, client=None):
+        return f"=== {service} tail={tail} ===\nstarting up\n"
+
+    monkeypatch.setattr(proxy_admin, "container_logs", fake_container_logs)
+
+    app = _app_with_mock_backend(_ok_models_handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        available = (await client.get("/admin/api/logs")).json()["available_files"]
+        response = await client.get(
+            "/admin/api/logs",
+            params={"file": "omlx-proxy (container)", "lines": 25},
+        )
+
+    assert available == [
+        "server.log",
+        "omlx-proxy (container)",
+        "vllm (container)",
+    ]
+    data = response.json()
+    assert data["file"] == "omlx-proxy (container)"
+    assert "=== omlx-proxy tail=25 ===" in data["logs"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_logs_container_source_without_socket_returns_501(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setenv("OMLX_DOCKER_SOCK", str(tmp_path / "missing.sock"))
+    app = _app_with_mock_backend(_ok_models_handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            "/admin/api/logs", params={"file": "vllm (container)"}
+        )
+
+    assert response.status_code == 501
+    assert "docker.sock" in response.json()["detail"]
+
+
 @pytest.mark.asyncio
 async def test_proxy_applies_saved_sampling_defaults_to_openai_passthrough(
     monkeypatch, tmp_path
