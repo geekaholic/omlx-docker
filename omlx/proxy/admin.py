@@ -56,6 +56,7 @@ from .sidecar_compose import (
     render_env_file,
     write_env_file,
 )
+from .vllm_compose import should_enable_chunked_prefill
 
 ADMIN_DIR = Path(__file__).resolve().parents[1] / "admin"
 TEMPLATES_DIR = ADMIN_DIR / "templates"
@@ -367,6 +368,9 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             if new_type in SIDECAR_BACKEND_TYPES
             else {}
         )
+        user_changed_chunked_prefill = (
+            "vllm_enable_chunked_prefill" in sidecar_updates
+        )
         if "omni_model" in sidecar_updates:
             # When the model changes, re-sync the served name unless the user
             # set a custom one — otherwise the prior model's name lingers and
@@ -426,6 +430,11 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
                     )
                     if auto_ctx:
                         sidecar_updates["omni_context_length"] = auto_ctx
+                        if (
+                            should_enable_chunked_prefill(auto_ctx)
+                            and not user_changed_chunked_prefill
+                        ):
+                            sidecar_updates["vllm_enable_chunked_prefill"] = True
 
                 # Resize gpu-memory-utilization for the new model unless the user
                 # changed it in this save — otherwise the previous model's util

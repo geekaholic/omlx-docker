@@ -114,6 +114,12 @@ def test_stop_requires_target():
         parser.parse_args(["stop"])
 
 
+def test_optimize_flag_selects_vllm_backend():
+    args = parse_args("--optimize")
+    assert args.optimize is True
+    assert omni_cli.resolve_serve_backend(args, {}) == "vllm"
+
+
 def test_default_control_compose_file_prefers_generated_vllm(monkeypatch, tmp_path):
     proxy_compose = tmp_path / "docker-compose.proxy.yml"
     vllm_compose = tmp_path / "docker-compose.vllm.yml"
@@ -1322,6 +1328,70 @@ def test_launch_command_calls_integration_launch(monkeypatch):
     assert ctx.host == "localhost"
 
 
+def test_launch_command_passes_served_window(monkeypatch):
+    """The served context window from /v1/models reaches the IntegrationContext.
+
+    Without this, Codex has no metadata for the custom provider and falls back to
+    a ~256K window, overflowing vLLM's smaller served window mid-session.
+    """
+    import io
+    import json as _json
+
+    health_bytes = b'{"status":"healthy"}'
+    models_bytes = _json.dumps(
+        {
+            "data": [
+                {
+                    "id": "test-model",
+                    "model_type": "llm",
+                    "max_context_window": 65536,
+                    "max_tokens": 4096,
+                }
+            ]
+        }
+    ).encode()
+    responses = [io.BytesIO(health_bytes), io.BytesIO(models_bytes)]
+
+    class FakeCtxManager:
+        def __init__(self, data):
+            self._data = data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self):
+            return self._data.read()
+
+    call_count = [0]
+
+    def fake_open(req, timeout):
+        idx = call_count[0]
+        call_count[0] += 1
+        return FakeCtxManager(responses[idx])
+
+    monkeypatch.setattr(omni_cli.urllib.request, "urlopen", fake_open)
+
+    launched = []
+    from omlx.integrations import get_integration
+
+    real_integration = get_integration("codex")
+    monkeypatch.setattr(real_integration, "is_installed", lambda: True)
+    monkeypatch.setattr(real_integration, "launch", lambda ctx: launched.append(ctx))
+
+    result = omni_cli.launch_command(
+        parse_launch("codex", "--port", "8080", "--model", "test-model")
+    )
+
+    assert result == 0
+    ctx = launched[0]
+    assert ctx.context_window == 65536
+    assert ctx.max_tokens == 4096
+    assert ctx.model_type == "llm"
+
+
 def test_launch_command_uses_env_port(monkeypatch):
     monkeypatch.setenv("OMLX_PROXY_PORT", "9191")
 
@@ -1746,6 +1816,168 @@ def test_serve_preflight_auto_sizes_context(tmp_path, monkeypatch):
     }
     omni_cli._vllm_memory_preflight(args, merged)
     assert merged["OMNI_CONTEXT_LENGTH"] == "16384"  # auto, native-bounded
+
+
+def test_serve_preflight_context_is_resource_based(tmp_path, monkeypatch):
+    import argparse
+
+    _make_fake_cached_model(
+        tmp_path,
+        "org/m",
+        native=262144,
+        layers=48,
+        kv_heads=16,
+        head_dim=256,
+        weight_bytes=8 * 1024**3,
+    )
+    monkeypatch.setenv("OMLX_HOST_MEMORY_RESERVE_GB", "8")
+    monkeypatch.setattr(
+        omni_cli,
+        "host_memory_info",
+        lambda: {"total_bytes": 48 * 1024**3, "available_bytes": 48 * 1024**3},
+    )
+    args = argparse.Namespace(
+        context_length=None,
+        gpu_memory_utilization=None,
+        dry_run=False,
+        generate_only=True,
+        force_memory=False,
+        enable_chunked_prefill=None,
+    )
+    merged = {
+        "OMNI_MODEL": "org/m",
+        "OMNI_HF_HOME": str(tmp_path),
+        "OMNI_MAX_PARALLEL": "2",
+        "OMNI_CONTEXT_LENGTH": "65536",
+    }
+    omni_cli._vllm_memory_preflight(args, merged)
+    assert int(merged["OMNI_CONTEXT_LENGTH"]) < 65536
+    assert int(merged["OMNI_CONTEXT_LENGTH"]) % 4096 == 0
+
+
+def test_serve_preflight_enables_chunked_prefill_for_long_auto_context(
+    tmp_path, monkeypatch
+):
+    import argparse
+
+    _make_fake_cached_model(tmp_path, "org/m", native=262144)
+    monkeypatch.setattr(
+        omni_cli,
+        "host_memory_info",
+        lambda: {"total_bytes": 200 * 1024**3, "available_bytes": 200 * 1024**3},
+    )
+    args = argparse.Namespace(
+        context_length=None,
+        gpu_memory_utilization=None,
+        dry_run=False,
+        generate_only=True,
+        force_memory=False,
+        enable_chunked_prefill=None,
+    )
+    merged = {
+        "OMNI_MODEL": "org/m",
+        "OMNI_HF_HOME": str(tmp_path),
+        "OMNI_MAX_PARALLEL": "2",
+        "OMNI_CONTEXT_LENGTH": "8192",
+        "VLLM_ENABLE_CHUNKED_PREFILL": "false",
+    }
+    omni_cli._vllm_memory_preflight(args, merged)
+    assert merged["OMNI_CONTEXT_LENGTH"] == "262144"
+    assert merged["VLLM_ENABLE_CHUNKED_PREFILL"] == "true"
+
+
+def test_serve_preflight_respects_explicit_chunked_prefill(tmp_path, monkeypatch):
+    import argparse
+
+    _make_fake_cached_model(tmp_path, "org/m", native=262144)
+    monkeypatch.setattr(
+        omni_cli,
+        "host_memory_info",
+        lambda: {"total_bytes": 200 * 1024**3, "available_bytes": 200 * 1024**3},
+    )
+    args = argparse.Namespace(
+        context_length=None,
+        gpu_memory_utilization=None,
+        dry_run=False,
+        generate_only=True,
+        force_memory=False,
+        enable_chunked_prefill=False,
+    )
+    merged = {
+        "OMNI_MODEL": "org/m",
+        "OMNI_HF_HOME": str(tmp_path),
+        "OMNI_MAX_PARALLEL": "2",
+        "OMNI_CONTEXT_LENGTH": "8192",
+        "VLLM_ENABLE_CHUNKED_PREFILL": "false",
+    }
+    omni_cli._vllm_memory_preflight(args, merged)
+    assert merged["OMNI_CONTEXT_LENGTH"] == "262144"
+    assert merged["VLLM_ENABLE_CHUNKED_PREFILL"] == "false"
+
+
+def test_vllm_optimize_resets_stale_model_specific_env():
+    import argparse
+
+    args = argparse.Namespace(
+        optimize=True,
+        model=None,
+        served_model_name=None,
+        context_length=None,
+        max_output_tokens=None,
+        max_parallel=None,
+        port=None,
+        hf_endpoint=None,
+        http_proxy=None,
+        https_proxy=None,
+        no_proxy=None,
+        ca_bundle=None,
+        proxy_port=None,
+        api_key=None,
+        backend_api_key=None,
+        target_context_size=None,
+        sse_keepalive_mode=None,
+        hf_home=None,
+        context_scaling=False,
+        scan_models=False,
+        model_dir=None,
+        vllm_image=None,
+        gpu_memory_utilization=None,
+        generation_config=None,
+        default_chat_template_kwargs=None,
+        tool_call_parser=None,
+        reasoning_parser=None,
+        chat_template=None,
+        dtype=None,
+        tokenizer=None,
+        tokenizer_mode=None,
+        revision=None,
+        load_format=None,
+        quantization=None,
+        download_dir=None,
+        max_num_batched_tokens=None,
+        kv_cache_dtype=None,
+        cpu_offload_gb=None,
+        swap_space=None,
+        tensor_parallel_size=None,
+        pipeline_parallel_size=None,
+        uvicorn_log_level=None,
+        extra_args_json=None,
+        trust_remote_code=None,
+        enforce_eager=None,
+        enable_auto_tool_choice=None,
+        enable_chunked_prefill=None,
+        enable_prefix_caching=None,
+        disable_log_stats=None,
+    )
+    merged = {
+        "VLLM_DTYPE": "float16",
+        "VLLM_TOOL_CALL_PARSER": "hermes",
+        "VLLM_ENABLE_CHUNKED_PREFILL": "false",
+    }
+    omni_cli._apply_vllm_optimize(args, merged)
+    assert merged["VLLM_DTYPE"] == ""
+    assert merged["VLLM_TOOL_CALL_PARSER"] == "auto"
+    assert merged["VLLM_ENABLE_CHUNKED_PREFILL"] == ""
 
 
 def test_serve_preflight_respects_explicit_context(tmp_path, monkeypatch):

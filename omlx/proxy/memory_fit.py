@@ -209,11 +209,33 @@ def _nested_get(config: dict, key: str) -> object:
     return None
 
 
+def _growing_layer_count(config: dict, total_layers: int) -> int:
+    """How many layers' KV actually grows with context length.
+
+    Sliding-window models (e.g. Gemma-4: ``layer_types`` is 25 ``sliding_attention``
+    + 5 ``full_attention``) only grow KV on their full-attention layers; the sliding
+    layers are capped at ``sliding_window`` tokens, so their KV is ~constant and
+    negligible for context sizing. Counting all 30 layers there overstates per-token
+    KV ~6x and starves the auto-context. Returns the full-attention count when the
+    config advertises a genuine sliding/full mix, else ``total_layers``.
+    """
+    layer_types = _nested_get(config, "layer_types")
+    sliding_window = _nested_get(config, "sliding_window")
+    if not isinstance(layer_types, (list, tuple)) or not sliding_window:
+        return total_layers
+    full = sum(1 for t in layer_types if isinstance(t, str) and "full" in t.lower())
+    sliding = sum(1 for t in layer_types if isinstance(t, str) and "slid" in t.lower())
+    # Trust the split only when it's a real mix (some sliding *and* some full).
+    return full if full and sliding else total_layers
+
+
 def kv_bytes_per_token(model_path: Path) -> int | None:
     """Bytes of KV cache one token occupies: 2 * layers * kv_heads * head_dim * dtype.
 
     Reads the model's ``config.json`` (incl. nested ``text_config``); returns None
     when it can't be parsed so callers fall back to the safety-ceiling utilization.
+    For sliding-window models only the full-attention layers count (see
+    :func:`_growing_layer_count`) — the sliding layers' KV doesn't grow with context.
     """
     try:
         import json
@@ -234,6 +256,7 @@ def kv_bytes_per_token(model_path: Path) -> int | None:
     if not layers or not kv_heads or not head_dim:
         return None
 
+    layers = _growing_layer_count(config, int(layers))
     dtype_bytes = _dtype_bytes(_nested_get(config, "torch_dtype"))
     return int(2 * layers * kv_heads * head_dim * dtype_bytes)
 

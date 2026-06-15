@@ -113,9 +113,14 @@ class MarkerStripper:
 # A leaked Gemma-4 tool call (the `<|tool_call>` special token is usually gone
 # from decoded content). Group 1 is `call:name{` so we can find the args brace.
 _TOOLCALL_START_RE = re.compile(r"(?:<\|tool_call>\s*)?(\bcall:[\w.:-]+\s*\{)")
+# Name + opening brace, used to split a recovered span into name / args object.
+_CALL_NAME_RE = re.compile(r"\bcall:([\w.:-]+)\s*\{")
 # A partial tool-call start at the buffer tail (no `{` yet) to hold across deltas.
 _TOOLCALL_PARTIAL_RE = re.compile(r"(?:<\|tool_call>\s*)?\bcall:[\w.:-]*\Z")
 _CALL_KEYWORD = "call:"
+# Gemma-4 string-value delimiter; its content is opaque (braces, colons, commas).
+_STRING_DELIM = '<|"|>'
+_STRING_DELIM_LEN = len(_STRING_DELIM)
 
 
 def _is_word_char(c: str) -> bool:
@@ -143,43 +148,170 @@ def _partial_toolcall_cut(buf: str) -> int:
 
 
 def _match_braces(s: str, open_idx: int) -> int | None:
-    """Index just past the `}` balancing the `{` at ``open_idx``, or None if the
-    buffer doesn't yet contain a balancing `}`. Counts every brace, matching
-    omlx's balanced-brace parser — so braces inside the JS payload are handled."""
+    """Index just past the `}` closing the args object opened at ``open_idx``.
+
+    ``<|"|>``-aware: Gemma-4 string values are wrapped in ``<|"|>…<|"|>`` and may
+    contain *unbalanced* braces (a patch, a code snippet). We toggle an in-string
+    flag on each ``<|"|>`` and count braces only outside strings, so the real
+    args-closing `}` is found regardless of braces in the value. Returns None when
+    the buffer doesn't yet contain that closing `}` (incomplete / still streaming).
+    """
     depth = 0
-    for i in range(open_idx, len(s)):
-        c = s[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
+    in_string = False
+    i = open_idx
+    n = len(s)
+    while i < n:
+        if s.startswith(_STRING_DELIM, i):
+            in_string = not in_string
+            i += _STRING_DELIM_LEN
+            continue
+        if not in_string:
+            c = s[i]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+        i += 1
     return None
 
 
-def parse_leaked_tool_calls(call_text: str) -> list[dict[str, str]]:
-    """Parse a leaked ``call:name{...}`` span into OpenAI tool-call dicts.
+def _coerce_gemma4_bare_value(raw: str) -> Any:
+    value = raw.strip()
+    if value == "":
+        return ""
+    low = value.lower()
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    if low == "null":
+        return None
+    try:
+        return json.loads(value)
+    except (ValueError, TypeError):
+        return value
 
-    Reuses omlx's balanced-brace fallback parser, which handles `}` inside the
-    arguments and needs no trailing marker. ``arguments`` is returned as a JSON
-    string (OpenAI wire format). Returns [] when nothing parses.
+
+def _parse_gemma4_args_stdlib(args_str: str) -> dict[str, Any]:
+    """Small stdlib parser for Gemma-4 ``{key:<|"|>value<|"|>}`` args.
+
+    The full fallback in :mod:`omlx.api.tool_calling` uses the third-party
+    ``regex`` package. The proxy environment may not have it, so this covers the
+    streamed recovery cases here without introducing that dependency.
+    """
+    text = args_str.strip()
+    if not (text.startswith("{") and text.endswith("}")):
+        raise ValueError("Gemma-4 args must be wrapped in braces")
+    out: dict[str, Any] = {}
+    i = 1
+    end = len(text) - 1
+    while i < end:
+        while i < end and (text[i].isspace() or text[i] == ","):
+            i += 1
+        if i >= end:
+            break
+
+        key_start = i
+        while i < end and text[i] != ":":
+            i += 1
+        if i >= end:
+            raise ValueError("Gemma-4 arg key missing ':'")
+        key = text[key_start:i].strip()
+        if not key:
+            raise ValueError("Gemma-4 arg key is empty")
+        i += 1
+
+        while i < end and text[i].isspace():
+            i += 1
+        if text.startswith(_STRING_DELIM, i):
+            i += _STRING_DELIM_LEN
+            value_start = i
+            value_end = text.find(_STRING_DELIM, i)
+            if value_end == -1 or value_end > end:
+                raise ValueError("Unterminated Gemma-4 string arg")
+            out[key] = text[value_start:value_end]
+            i = value_end + _STRING_DELIM_LEN
+            continue
+
+        value_start = i
+        depth = 0
+        in_json_string = False
+        escape = False
+        while i < end:
+            c = text[i]
+            if in_json_string:
+                if escape:
+                    escape = False
+                elif c == "\\":
+                    escape = True
+                elif c == '"':
+                    in_json_string = False
+            elif c == '"':
+                in_json_string = True
+            elif c in "[{":
+                depth += 1
+            elif c in "]}":
+                depth -= 1
+            elif c == "," and depth == 0:
+                break
+            i += 1
+        out[key] = _coerce_gemma4_bare_value(text[value_start:i])
+    return out
+
+
+def _parse_gemma4_args(args_str: str) -> Any:
+    """Parse a Gemma-4 ``{...}`` args object to a Python value, or None on failure.
+
+    ``args_str`` already has the correct (``<|"|>``-aware) closing brace. omlx's
+    ``_gemma4_args_to_json_robust`` extracts ``<|"|>…<|"|>`` string content into
+    placeholders *before* touching braces, so it copes with patches/code whose
+    values contain braces, colons and commas — the cases the brace-balanced outer
+    regex of ``_parse_gemma4_tool_call_fallback`` chokes on.
     """
     try:
-        from omlx.api.tool_calling import _parse_gemma4_tool_call_fallback
+        return json.loads(args_str)
+    except (ValueError, TypeError):
+        pass
+    try:
+        from omlx.api.tool_calling import _gemma4_args_to_json_robust
 
-        parsed = _parse_gemma4_tool_call_fallback(call_text)
+        return _gemma4_args_to_json_robust(args_str)
     except Exception:
-        return []
-    items = parsed if isinstance(parsed, list) else [parsed]
+        pass
+    try:
+        return _parse_gemma4_args_stdlib(args_str)
+    except Exception:
+        return None
+
+
+
+def parse_leaked_tool_calls(call_text: str) -> list[dict[str, str]]:
+    """Parse leaked ``call:name{...}`` span(s) into OpenAI tool-call dicts.
+
+    Locates each ``call:name{`` and finds the matching `}` with the
+    ``<|"|>``-aware :func:`_match_braces`, so values containing braces (apply_patch
+    diffs, code) don't break end-detection. ``arguments`` is returned as a JSON
+    string (OpenAI wire format). Returns [] when nothing parses.
+    """
     out: list[dict[str, str]] = []
-    for item in items:
-        if not isinstance(item, dict) or not item.get("name"):
-            continue
-        args = item.get("arguments", {})
-        if not isinstance(args, str):
-            args = json.dumps(args, ensure_ascii=False)
-        out.append({"name": str(item["name"]), "arguments": args})
+    pos = 0
+    n = len(call_text)
+    while pos < n:
+        m = _CALL_NAME_RE.search(call_text, pos)
+        if m is None:
+            break
+        open_idx = call_text.index("{", m.end() - 1)
+        end = _match_braces(call_text, open_idx)
+        if end is None:
+            break
+        args = _parse_gemma4_args(call_text[open_idx:end])
+        if args is not None:
+            if not isinstance(args, str):
+                args = json.dumps(args, ensure_ascii=False)
+            out.append({"name": m.group(1), "arguments": args})
+        pos = end
     return out
 
 
@@ -188,8 +320,9 @@ class Gemma4StreamProcessor:
 
     Strips reasoning-channel markers AND reassembles tool calls that vLLM's
     parser leaked into the content channel (it needs a clean ``<tool_call|>``
-    terminator and truncates brace-heavy arguments; this recovers them via
-    omlx's balanced-brace parser).
+    terminator and truncates brace-heavy arguments; this recovers them via the
+    ``<|"|>``-aware :func:`parse_leaked_tool_calls`, so apply_patch/code values
+    containing braces survive).
 
     ``feed`` / ``flush`` return a list of events:
       * ``("text", str)`` — clean text to forward.

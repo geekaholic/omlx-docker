@@ -145,6 +145,23 @@ to vLLM at `http://vllm:8000/v1` inside the compose network and publishes oMNI
 on port `8080`. The compose file bind-mounts the host Hugging Face cache at
 `${HOME}/.cache/huggingface`, so already downloaded models are reused.
 
+For vLLM sidecars, `omni serve` auto-sizes context and
+`gpu-memory-utilization` from the selected model and host memory when those
+flags are omitted and the model is available locally. The context calculation
+uses model weights, KV-cache geometry, the host reserve, and the current
+`OMNI_MAX_PARALLEL`; there is no fixed long-context default. To refresh a stale
+env file for the currently selected model, run:
+
+```bash
+omni serve --backend vllm --optimize
+```
+
+`--optimize` clears model-specific vLLM overrides such as dtype, quantization,
+tool parser, scheduler token budget, and chunked-prefill before recomputing the
+resource-based context/utilization profile. Explicit flags in the same command
+still win. Long computed contexts automatically enable chunked prefill unless
+you pass `--no-enable-chunked-prefill`.
+
 Restart the vLLM container after changing vLLM launch settings; proxy backend
 settings and proxy sampling defaults apply live in the running proxy.
 
@@ -191,7 +208,7 @@ sidecar backend is selected:
 |---|---:|---|
 | `OMNI_MODEL` | per backend | Model id/path (vLLM: HF id or container path; llama.cpp: GGUF repo `owner/repo[:quant]` or `.gguf` path) |
 | `OMNI_SERVED_MODEL_NAME` | `qwen` | API-visible model name |
-| `OMNI_CONTEXT_LENGTH` | `8192` | Context length (vLLM `--max-model-len`, llama.cpp `--ctx-size`) |
+| `OMNI_CONTEXT_LENGTH` | `8192` | Context length (vLLM `--max-model-len`, llama.cpp `--ctx-size`); vLLM auto-sizes this from local model + host memory when omitted |
 | `OMNI_MAX_PARALLEL` | `4` | Max concurrent sequences (vLLM `--max-num-seqs`, llama.cpp `--parallel`) |
 | `OMNI_BACKEND_PORT` | `8000` | Host port published for the backend container |
 | `OMNI_HF_HOME` | `${HOME}/.cache/huggingface` | Host Hugging Face cache to mount into the backend |
@@ -205,12 +222,12 @@ vLLM-specific settings:
 | Variable | Default | Purpose |
 |---|---:|---|
 | `VLLM_IMAGE` | `vllm/vllm-openai:latest` | vLLM container image |
-| `VLLM_GPU_MEMORY_UTILIZATION` | `0.80` | vLLM GPU memory fraction |
+| `VLLM_GPU_MEMORY_UTILIZATION` | `0.80` | vLLM GPU memory fraction; vLLM sidecar auto-sizes this on unified-memory hosts when omitted |
 | `VLLM_GENERATION_CONFIG` | `vllm` | Use vLLM defaults instead of model `generation_config.json` |
 | `VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS` | `{"enable_thinking":false}` | Disables Qwen thinking output in chat templates |
 | `VLLM_TRUST_REMOTE_CODE` | `true` | Add `--trust-remote-code` |
-| `VLLM_ENABLE_AUTO_TOOL_CHOICE` | `false` | Add vLLM auto tool-choice flags when enabled |
-| `VLLM_TOOL_CALL_PARSER` | `hermes` | vLLM auto tool-choice parser |
+| `VLLM_ENABLE_AUTO_TOOL_CHOICE` | `true` | Add vLLM auto tool-choice flags when a parser is available |
+| `VLLM_TOOL_CALL_PARSER` | `auto` | vLLM tool-choice parser; `auto` detects from the model family |
 | `VLLM_REASONING_PARSER` | empty | vLLM reasoning parser |
 | `VLLM_DTYPE` | empty | Optional `--dtype` override |
 | `VLLM_TOKENIZER` | empty | Optional tokenizer id/path |

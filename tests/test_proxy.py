@@ -1071,6 +1071,69 @@ async def test_use_with_sidecar_reapplies_optimal_on_same_model(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
+async def test_use_with_sidecar_enables_chunked_prefill_for_computed_long_context(
+    monkeypatch, tmp_path
+):
+    import omlx.proxy.admin as admin
+
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setenv("OMLX_MODEL_SCAN_DIR", str(tmp_path))
+    compose_path = tmp_path / "docker-compose.vllm.yml"
+    env_path = tmp_path / "docker-compose.vllm.env"
+    monkeypatch.setenv("OMLX_COMPOSE_OUTPUT_PATH", str(compose_path))
+    monkeypatch.setenv("OMLX_ENV_OUTPUT_PATH", str(env_path))
+    monkeypatch.setattr(
+        admin,
+        "host_memory_info",
+        lambda *a, **k: {"total_bytes": 200 * 1024**3},
+    )
+    _make_cached_model_hub(
+        tmp_path,
+        "org/long",
+        1 * 1024**3,
+        native=262144,
+        layers=4,
+        kv_heads=2,
+        head_dim=64,
+    )
+
+    write_vllm_env_file(
+        env_path,
+        vllm_environment(
+            VllmComposeSettings(
+                model="org/long",
+                served_model_name="long",
+                enable_chunked_prefill=False,
+            )
+        ),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    app = _app_with_mock_backend(handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/admin/api/global-settings",
+            json={
+                "proxy_backend_url": "http://backend/v1",
+                "proxy_backend_type": "vllm",
+                "omni_model": "org/long",
+                "reset_optimal": True,
+            },
+        )
+
+    assert response.status_code == 200
+    env = load_vllm_env_file(env_path)
+    assert env["OMNI_CONTEXT_LENGTH"] == "262144"
+    assert env["OMNI_MAX_PARALLEL"] == "2"
+    assert env["VLLM_ENABLE_CHUNKED_PREFILL"] == "true"
+
+
+@pytest.mark.asyncio
 async def test_admin_llamacpp_settings_save_writes_env_and_compose(
     monkeypatch, tmp_path
 ):
@@ -1673,17 +1736,38 @@ async def test_local_models_endpoint_scans_when_enabled(monkeypatch, tmp_path):
     assert len(refreshed["models"]) == 2
 
 
-def _make_cached_model_hub(root, repo_id, weight_bytes):
+def _make_cached_model_hub(
+    root,
+    repo_id,
+    weight_bytes,
+    *,
+    native=4096,
+    layers=None,
+    kv_heads=None,
+    head_dim=None,
+):
     encoded = "models--" + repo_id.replace("/", "--")
     commit = "feedface"
     snapshot = root / "hub" / encoded / "snapshots" / commit
     snapshot.mkdir(parents=True)
-    (snapshot / "config.json").write_text(json.dumps({"max_position_embeddings": 4096}))
+    config = {"max_position_embeddings": native}
+    if layers and kv_heads and head_dim:
+        config.update(
+            {
+                "num_hidden_layers": layers,
+                "num_attention_heads": kv_heads,
+                "num_key_value_heads": kv_heads,
+                "head_dim": head_dim,
+                "torch_dtype": "bfloat16",
+            }
+        )
+    (snapshot / "config.json").write_text(json.dumps(config))
     with open(snapshot / "model.safetensors", "wb") as handle:
         handle.truncate(weight_bytes)
     refs = root / "hub" / encoded / "refs"
     refs.mkdir(parents=True)
     (refs / "main").write_text(commit)
+    return snapshot
 
 
 @pytest.mark.asyncio

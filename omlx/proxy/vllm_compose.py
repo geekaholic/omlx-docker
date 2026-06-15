@@ -124,6 +124,63 @@ VLLM_SPECIFIC_KEYS = (
 
 VLLM_ENV_KEYS = OMNI_ENV_KEYS + VLLM_SPECIFIC_KEYS + OMLX_PROXY_SIDECAR_KEYS
 
+# vLLM options that are specific to the selected model and should be cleared
+# when applying an "optimal" profile for a different/current model. Kept at the
+# env layer so CLI and admin share the same reset policy.
+VLLM_MODEL_SPECIFIC_ENV_RESET_DEFAULTS: dict[str, str] = {
+    "VLLM_TOOL_CALL_PARSER": "auto",
+    "VLLM_REASONING_PARSER": "",
+    "VLLM_CHAT_TEMPLATE": "",
+    "VLLM_DTYPE": "",
+    "VLLM_TOKENIZER": "",
+    "VLLM_TOKENIZER_MODE": "",
+    "VLLM_REVISION": "",
+    "VLLM_LOAD_FORMAT": "",
+    "VLLM_QUANTIZATION": "",
+    "VLLM_MAX_NUM_BATCHED_TOKENS": "",
+    "VLLM_ENABLE_CHUNKED_PREFILL": "",
+    "VLLM_ENABLE_PREFIX_CACHING": "",
+    "VLLM_KV_CACHE_DTYPE": "",
+    "VLLM_CPU_OFFLOAD_GB": "",
+    "VLLM_SWAP_SPACE": "",
+}
+
+LONG_CONTEXT_CHUNKED_PREFILL_THRESHOLD = 32768
+
+
+def reset_model_specific_vllm_env(
+    values: dict[str, str],
+    *,
+    explicit_keys: set[str] | frozenset[str] = frozenset(),
+) -> None:
+    """Clear model-specific vLLM env unless the current request set it."""
+    for key, default in VLLM_MODEL_SPECIFIC_ENV_RESET_DEFAULTS.items():
+        if key not in explicit_keys:
+            values[key] = default
+
+
+def should_enable_chunked_prefill(context_tokens: int | None) -> bool:
+    return (
+        context_tokens is not None
+        and context_tokens > LONG_CONTEXT_CHUNKED_PREFILL_THRESHOLD
+    )
+
+
+def maybe_enable_chunked_prefill_for_context(
+    values: dict[str, str],
+    context_tokens: int | None,
+    *,
+    explicit_keys: set[str] | frozenset[str] = frozenset(),
+) -> bool:
+    """Enable chunked prefill for long computed contexts unless user-set."""
+    if (
+        should_enable_chunked_prefill(context_tokens)
+        and "VLLM_ENABLE_CHUNKED_PREFILL" not in explicit_keys
+    ):
+        values["VLLM_ENABLE_CHUNKED_PREFILL"] = "true"
+        return True
+    return False
+
 
 def settings_from_overrides(overrides: dict[str, Any]) -> VllmComposeSettings:
     defaults = VllmComposeSettings()

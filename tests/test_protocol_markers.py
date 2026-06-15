@@ -162,6 +162,42 @@ def test_processor_drops_truncated_unbalanced_call_on_flush():
     assert "call:exec_command" not in _texts(events)
 
 
+_APPLY_PATCH_CALL = (
+    'call:apply_patch{command:<|"|>*** Begin Patch\n'
+    "@@ .start-menu {\n"
+    "+  transition: transform cubic-bezier(0.4, 0, 0.2, 1);\n"
+    "+}\n"
+    "+if (x) { y(); {\n"  # deliberately unbalanced braces inside the value
+    '*** End Patch<|"|>}'
+)
+
+
+def test_processor_recovers_apply_patch_with_braces_in_value():
+    # apply_patch values are diffs/code: they contain braces (balanced *and*
+    # unbalanced), colons and commas. The <|"|>-aware recovery must take the value
+    # verbatim and not let those characters break end-detection or parsing.
+    p = Gemma4StreamProcessor()
+    events = p.feed(_APPLY_PATCH_CALL) + p.flush()
+    calls = _tool_calls(events)
+    assert len(calls) == 1 and calls[0]["name"] == "apply_patch"
+    command = json.loads(calls[0]["arguments"])["command"]
+    assert "*** Begin Patch" in command and "*** End Patch" in command
+    assert "if (x) { y(); {" in command  # unbalanced braces preserved verbatim
+    assert "cubic-bezier(0.4, 0, 0.2, 1)" in command
+    assert "call:apply_patch" not in _texts(events)
+
+
+def test_processor_recovers_apply_patch_streamed_char_by_char():
+    p = Gemma4StreamProcessor()
+    events = []
+    for ch in _APPLY_PATCH_CALL:
+        events += p.feed(ch)
+    events += p.flush()
+    calls = _tool_calls(events)
+    assert len(calls) == 1 and calls[0]["name"] == "apply_patch"
+    assert "call:apply_patch" not in _texts(events)
+
+
 def test_processor_recovery_disabled_passes_call_as_text():
     # Non-Gemma models: behave like marker stripping only.
     p = Gemma4StreamProcessor(enable_tool_recovery=False)

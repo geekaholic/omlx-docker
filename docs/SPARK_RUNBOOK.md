@@ -65,7 +65,7 @@ What to expect on the dashboard:
 omni serve --backend vllm \
   --model google/gemma-4-26B-A4B-it \
   --served-model-name gemma-4-26b-A4B \
-  --context-length 65535 --max-parallel 4
+  --max-parallel 4
 ```
 
 Generates `docker/docker-compose.vllm.yml` + `.env` and starts
@@ -79,15 +79,34 @@ re-derives the API name from the new model (`Qwen/Qwen3-1.7B` →
 name. Pass `--served-model-name` to set a custom alias (it is always kept).
 The admin Settings save and "Use with sidecar" behave the same way.
 
+When `--context-length` is omitted, vLLM sidecar launches compute
+`OMNI_CONTEXT_LENGTH` from the selected model and the machine's resources:
+host memory, host reserve, local weight size, KV-cache geometry, model native
+context, and current `OMNI_MAX_PARALLEL`. Do not use a fixed blanket context
+for Spark or smaller hosts. If a generated env file has stale model-specific
+settings from a previous run, refresh it with:
+
+```bash
+omni serve --backend vllm --optimize
+```
+
+`--optimize` preserves `OMNI_MAX_PARALLEL`, clears stale model-specific vLLM
+knobs, recomputes context/utilization from the current model and host, and turns
+on chunked prefill for long computed contexts unless you explicitly pass
+`--no-enable-chunked-prefill`.
+
 Useful env-file knobs
 (editable in the admin UI under Settings → Backend, then Regenerate +
-Restart): `VLLM_GPU_MEMORY_UTILIZATION` (on unified memory this is a
+Restart): `OMNI_CONTEXT_LENGTH` (normally computed from resources when omitted;
+pin it only when you need an exact served window),
+`VLLM_GPU_MEMORY_UTILIZATION` (on unified memory this is a
 share of *system RAM*; when you don't pass `--gpu-memory-utilization`,
 `omni serve` computes a safe value from the model size and host reserve
 instead of the discrete-GPU 0.8 default — see the troubleshooting entry
 on the memory guard), `VLLM_ENFORCE_EAGER=true`
 (faster startup, required on some GB10 stacks), `VLLM_TOOL_CALL_PARSER`,
-`VLLM_ENABLE_PREFIX_CACHING` (v1 engine default is on).
+`VLLM_ENABLE_CHUNKED_PREFILL` (auto-enabled for long computed contexts unless
+set explicitly), `VLLM_ENABLE_PREFIX_CACHING` (v1 engine default is on).
 
 A 26B model takes a few minutes to load from a warm HF cache. Verify:
 
@@ -121,7 +140,9 @@ Notes from verification:
   headroom with `OMLX_KV_HEADROOM` (default 1.5) or pin it with
   `--gpu-memory-utilization`; the admin model switch resizes util the same way
   (and clears the previous model's per-model knobs — dtype, quantization,
-  chunked-prefill, …) unless you set them yourself.
+  chunked-prefill, …) unless you set them yourself. `omni serve --optimize`
+  applies the same cleanup/recompute path to the currently selected model
+  without changing `OMNI_MAX_PARALLEL`.
 - 2026 vLLM images renamed the cache metrics
   (`vllm:prefix_cache_{hits,queries}_total`, `vllm:kv_cache_usage_perc`);
   the dashboard's candidate lists in `omlx/proxy/metrics.py` cover both

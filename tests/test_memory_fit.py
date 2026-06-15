@@ -209,6 +209,77 @@ def test_kv_bytes_per_token_missing_config_returns_none(tmp_path):
     assert kv_bytes_per_token(tmp_path) is None
 
 
+def test_kv_bytes_per_token_sliding_window_counts_only_full_layers(tmp_path):
+    from omlx.proxy.memory_fit import kv_bytes_per_token
+
+    snap = _make_hf_cache_model(tmp_path, "org/gemma4", 1 * _GIB)
+    # Gemma-4 geometry: 30 layers, but only 5 full-attention layers grow with
+    # context (the other 25 are window-capped sliding-attention). KV per token
+    # must be sized off the 5 full layers, not all 30.
+    _write_config(
+        snap,
+        num_hidden_layers=30,
+        num_attention_heads=16,
+        num_key_value_heads=8,
+        head_dim=256,
+        torch_dtype="bfloat16",
+        sliding_window=1024,
+        layer_types=["sliding_attention"] * 25 + ["full_attention"] * 5,
+        max_position_embeddings=262144,
+    )
+    assert kv_bytes_per_token(snap) == 2 * 5 * 8 * 256 * 2  # 40960, not 245760
+
+
+def test_kv_bytes_per_token_all_full_layers_counts_every_layer(tmp_path):
+    from omlx.proxy.memory_fit import kv_bytes_per_token
+
+    snap = _make_hf_cache_model(tmp_path, "org/dense", 1 * _GIB)
+    # No sliding layers (or no sliding_window) -> every layer grows with context.
+    _write_config(
+        snap,
+        num_hidden_layers=8,
+        num_attention_heads=16,
+        num_key_value_heads=8,
+        head_dim=256,
+        torch_dtype="bfloat16",
+        layer_types=["full_attention"] * 8,
+        max_position_embeddings=8192,
+    )
+    assert kv_bytes_per_token(snap) == 2 * 8 * 8 * 256 * 2
+
+
+def test_sliding_window_unlocks_native_context_for_gemma4(tmp_path):
+    """End-to-end: sliding-aware KV lets the auto-context reach the native window.
+
+    Counting all 30 layers (240KB/token) starves the context to ~64K; counting
+    only the 5 full layers (40KB/token) fits the model's native 256K on a 121GB
+    unified-memory host, which is what Codex should then be told.
+    """
+    from omlx.proxy.memory_fit import kv_bytes_per_token, recommended_context_length
+
+    snap = _make_hf_cache_model(tmp_path, "org/gemma4", 1 * _GIB)
+    _write_config(
+        snap,
+        num_hidden_layers=30,
+        num_attention_heads=16,
+        num_key_value_heads=8,
+        head_dim=256,
+        torch_dtype="bfloat16",
+        sliding_window=1024,
+        layer_types=["sliding_attention"] * 25 + ["full_attention"] * 5,
+        max_position_embeddings=262144,
+    )
+    ctx = recommended_context_length(
+        total_bytes=121 * _GIB,
+        reserve_bytes=16 * _GIB,
+        weights_bytes=52 * _GIB,
+        kv_per_token=kv_bytes_per_token(snap),
+        parallel=2,
+        native_max=262144,
+    )
+    assert ctx == 262144
+
+
 def test_demand_utilization_scales_with_workload():
     from omlx.proxy.memory_fit import demand_utilization
 

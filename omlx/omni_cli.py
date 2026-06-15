@@ -44,6 +44,8 @@ from .proxy.sidecar_compose import (
 )
 from .proxy.vllm_compose import (
     VllmComposeSettings,
+    maybe_enable_chunked_prefill_for_context,
+    reset_model_specific_vllm_env,
     vllm_settings_from_env,
 )
 from .proxy.vllm_compose import (
@@ -103,6 +105,7 @@ VLLM_SPECIFIC_ARG_ATTRS = (
     "enable_auto_tool_choice",
     "tool_call_parser",
     "reasoning_parser",
+    "chat_template",
     "dtype",
     "tokenizer",
     "tokenizer_mode",
@@ -341,6 +344,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Launch even when the pre-flight memory check predicts the model "
             "will not fit in unified memory (can hard-lock the host)"
+        ),
+    )
+    serve.add_argument(
+        "--optimize",
+        action="store_true",
+        help=(
+            "Rewrite vLLM model-specific settings from the selected model and "
+            "current host resources before serving"
         ),
     )
     offline_group = serve.add_mutually_exclusive_group()
@@ -1070,6 +1081,8 @@ def resolve_serve_backend(
 ) -> str:
     if args.backend:
         return args.backend
+    if getattr(args, "optimize", False):
+        return "vllm"
     if has_llamacpp_specific_args(args):
         return "llamacpp"
     if has_vllm_specific_args(args):
@@ -1403,18 +1416,26 @@ def launch_command(args: argparse.Namespace) -> int:
     if not model and claude_has_tier_models:
         model = sonnet_model or opus_model or haiku_model or ""
 
+    # Fetch the model list once: ids feed the picker, and each entry carries the
+    # served window (`max_context_window` == the backend's max_model_len) so we can
+    # tell the launched tool the real limits.
+    models_meta: dict[str, dict] = {}
+    try:
+        req = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        for m in data.get("data", []):
+            if isinstance(m, dict) and m.get("id"):
+                models_meta[m["id"]] = m
+    except (urllib.error.URLError, OSError, KeyError, ValueError):
+        pass
+
     if not model:
-        try:
-            req = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read())
-            models = [
-                m["id"]
-                for m in data.get("data", [])
-                if m.get("model_type") in ("llm", "vlm", None)
-            ]
-        except (urllib.error.URLError, OSError, KeyError, ValueError):
-            models = []
+        models = [
+            m_id
+            for m_id, m in models_meta.items()
+            if m.get("model_type") in ("llm", "vlm", None)
+        ]
 
         if not models:
             print("No models available. Load a model in the backend first.")
@@ -1433,6 +1454,10 @@ def launch_command(args: argparse.Namespace) -> int:
         print(f"Install: {integration.install_hint}")
         sys.exit(1)
 
+    # Pass the served limits so the tool sizes requests to the real window.
+    # Without `context_window`, Codex falls back to a ~256K default and overflows
+    # vLLM's smaller served window mid-session (the stream then 400s and dies).
+    model_info = models_meta.get(model, {})
     ctx = IntegrationContext(
         host=host,
         port=port,
@@ -1441,6 +1466,10 @@ def launch_command(args: argparse.Namespace) -> int:
         opus_model=opus_model if tool_name == "claude" else None,
         sonnet_model=sonnet_model if tool_name == "claude" else None,
         haiku_model=haiku_model if tool_name == "claude" else None,
+        context_window=model_info.get("max_context_window"),
+        max_tokens=model_info.get("max_tokens"),
+        model_type=model_info.get("model_type"),
+        reasoning=model_info.get("enable_thinking"),
     )
     print(f"Launching {integration.display_name} with model {model}...")
     integration.launch(ctx)
@@ -1455,8 +1484,47 @@ def _positive_int_or_none(value: str | None) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _explicit_vllm_env_keys(args: argparse.Namespace) -> set[str]:
+    mappings = {
+        "gpu_memory_utilization": "VLLM_GPU_MEMORY_UTILIZATION",
+        "tool_call_parser": "VLLM_TOOL_CALL_PARSER",
+        "reasoning_parser": "VLLM_REASONING_PARSER",
+        "chat_template": "VLLM_CHAT_TEMPLATE",
+        "dtype": "VLLM_DTYPE",
+        "tokenizer": "VLLM_TOKENIZER",
+        "tokenizer_mode": "VLLM_TOKENIZER_MODE",
+        "revision": "VLLM_REVISION",
+        "load_format": "VLLM_LOAD_FORMAT",
+        "quantization": "VLLM_QUANTIZATION",
+        "max_num_batched_tokens": "VLLM_MAX_NUM_BATCHED_TOKENS",
+        "kv_cache_dtype": "VLLM_KV_CACHE_DTYPE",
+        "cpu_offload_gb": "VLLM_CPU_OFFLOAD_GB",
+        "swap_space": "VLLM_SWAP_SPACE",
+        "enable_chunked_prefill": "VLLM_ENABLE_CHUNKED_PREFILL",
+        "enable_prefix_caching": "VLLM_ENABLE_PREFIX_CACHING",
+    }
+    return {
+        key
+        for attr, key in mappings.items()
+        if getattr(args, attr, None) is not None
+    }
+
+
+def _apply_vllm_optimize(
+    args: argparse.Namespace,
+    merged_env: dict[str, str],
+) -> set[str]:
+    explicit_keys = _explicit_vllm_env_keys(args)
+    if getattr(args, "optimize", False):
+        reset_model_specific_vllm_env(merged_env, explicit_keys=explicit_keys)
+    return explicit_keys
+
+
 def _vllm_memory_preflight(
-    args: argparse.Namespace, merged_env: dict[str, str]
+    args: argparse.Namespace,
+    merged_env: dict[str, str],
+    *,
+    explicit_env_keys: set[str] | None = None,
 ) -> None:
     """Set a unified-memory-aware util default and refuse oversized launches.
 
@@ -1465,6 +1533,9 @@ def _vllm_memory_preflight(
     the numbers and raises ``SystemExit`` — unless overridden, or running under
     ``--dry-run``/``--generate-only`` (which only print the assessment).
     """
+    if explicit_env_keys is None:
+        explicit_env_keys = _explicit_vllm_env_keys(args)
+
     host_total = int(host_memory_info().get("total_bytes") or 0)
     reserve = host_reserve_bytes()
 
@@ -1499,6 +1570,16 @@ def _vllm_memory_preflight(
                 f"{format_gib(host_total)} unified memory for {parallel} concurrent "
                 f"seqs; model native max {native_max}). Override with --context-length."
             )
+
+    if maybe_enable_chunked_prefill_for_context(
+        merged_env,
+        context,
+        explicit_keys=explicit_env_keys,
+    ):
+        print(
+            "Using chunked prefill for long context. Override with "
+            "--no-enable-chunked-prefill."
+        )
 
     explicit_util = getattr(args, "gpu_memory_utilization", None) is not None
     if not explicit_util and host_total > 0:
@@ -1587,6 +1668,8 @@ def _apply_hf_offline(args: argparse.Namespace, merged_env: dict[str, str]) -> N
 def serve_command(args: argparse.Namespace) -> int:
     state = load_serve_state()
     backend = resolve_serve_backend(args, state)
+    if getattr(args, "optimize", False) and backend != "vllm":
+        raise SystemExit("--optimize currently applies only to --backend vllm")
     mode = resolve_serve_mode(args, backend, state)
     compose_file = compose_file_for_serve_backend(args, backend, state, mode)
 
@@ -1600,7 +1683,12 @@ def serve_command(args: argparse.Namespace) -> int:
             compose_file=compose_file,
         )
         if backend == "vllm":
-            _vllm_memory_preflight(args, merged_env)
+            explicit_keys = _apply_vllm_optimize(args, merged_env)
+            _vllm_memory_preflight(
+                args,
+                merged_env,
+                explicit_env_keys=explicit_keys,
+            )
         _apply_hf_offline(args, merged_env)
         settings = spec.settings_from_env(merged_env)
         compose_content = spec.render_compose_for_path(compose_file, settings)
