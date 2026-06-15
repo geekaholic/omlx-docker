@@ -64,10 +64,10 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 | settings.network.ca_bundle@both | Network → CA Bundle | POST value; GET settings | persisted | both | pass | Phase 2: flat key network_ca_bundle round-trips |
 | settings.memory.guard_tier@both | Memory → guard tier | POST `memory.memory_guard_tier`; GET settings | persisted; invalid tier rejected/normalized | both | blocked | proxy-mode inert: hardcoded 'balanced' in GET payload (admin.py:1542); native_memory_guard capability off — display stub, can't round-trip |
 | settings.mcp.config_path@both | MCP → config path | POST `mcp.config_path`; GET settings | persisted | both | blocked | proxy-mode inert: hardcoded '' in GET payload (admin.py:1564) — display stub, can't round-trip |
-| settings.auth.api_key@both | Auth → API key | POST `auth.api_key`; GET settings | persisted; subsequent calls require Bearer | both | untested | |
-| settings.auth.subkeys@both | Auth → sub-keys create/delete | createSubKey then deleteSubKey via endpoints | sub-key list updates accordingly | both | untested | |
-| settings.integrations.markitdown@both | Integrations → MarkItDown engine | POST `integrations.markitdown_pdf_processing_engine`; GET | persisted | both | untested | |
-| settings.server.disable_log_stats@both | Settings → Disable log stats | POST toggle; GET settings | persisted | both | untested | |
+| settings.auth.api_key@both | Auth → API key | POST `auth.api_key`; GET settings | persisted; subsequent calls require Bearer | both | blocked | safety: setting the proxy's own api_key risks locking the admin API mid-loop; also not clearly settable via global-settings in proxy mode — supervised/test-server only |
+| settings.auth.subkeys@both | Auth → sub-keys create/delete | createSubKey then deleteSubKey via endpoints | sub-key list updates accordingly | both | blocked | not wired in proxy mode: auth.sub_keys hardcoded [] (admin.py:1591), no sub-key endpoints in proxy admin router |
+| settings.integrations.markitdown@both | Integrations → MarkItDown engine | POST `integrations.markitdown_pdf_processing_engine`; GET | persisted | both | blocked | proxy-mode inert: not in GET payload (integrations section hardcoded), POST 200 but ignored — UX gap IF the control is visible in proxy Settings (visibility check deferred) |
+| settings.server.disable_log_stats@both | Settings → Disable log stats | POST toggle; GET settings | persisted | both | blocked | proxy-mode inert: not in GET payload (server section fixed keys), POST 200 but ignored |
 
 ## Status / Serving Stats
 
