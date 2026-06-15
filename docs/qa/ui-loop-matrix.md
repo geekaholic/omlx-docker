@@ -78,7 +78,7 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 | status.stats.clear@vllm | Status → Clear (session) | POST `/admin/api/stats/clear`; GET session | session counters zero; all-time untouched | vllm | pass | Phase 1: clear → 200, session stats returned |
 | status.stats.clear_alltime@vllm | Status → Clear all-time | POST `/admin/api/stats/clear-alltime`; GET alltime | all-time counters zero | vllm | untested | |
 | status.stats.per_model_filter@vllm | Status → per-model filter | GET stats filtered by served model | counters attributed to that model | vllm | untested | |
-| status.cache.prefix@vllm | Status → Backend KV/Prefix Cache | send repeated prompt; GET `/admin/api/proxy/metrics` | prefix-cache hit rate rises; KV usage shown | vllm | untested | |
+| status.cache.prefix@vllm | Status → Backend KV/Prefix Cache | send repeated prompt; GET `/admin/api/proxy/metrics` | prefix-cache hit rate rises; KV usage shown | vllm | pass | Phase 2: repeated prompt -> prefix hits 128->832, queries 311->1226 (read >5s apart to outlast metrics TTL) |
 | status.metrics.prometheus@vllm | Status → Backend Metrics samples | GET `/admin/api/proxy/metrics`; `vllm_metric_families` | expected vllm families present | vllm | pass | Phase 2: backend_kind=prometheus; summary has prefix_cache_* + gpu_cache_usage; metric_count>0 |
 | status.active_models.memory_bar@vllm | Status → Active Models memory bar | GET `/admin/api/proxy/status` | per-process GPU memory + soft limit shown | vllm | untested | |
 | status.api_endpoints@both | Status → API Endpoints panel | GET `/admin/api/server-info` | host/port/aliases/cli_prefix "omni" present | both | pass | Phase 2: host/port/aliases via server-info; cli_prefix='omni' via /stats (refine: not in server-info) |
@@ -91,8 +91,8 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 |----|----------------|----------|----------|---------|--------|--------------|
 | models.local_scan@vllm | Models → local-model scan | GET `/admin/api/proxy/local-models` | lists HF-cache/GGUF repos when `--scan-models` on (else empty) | vllm | untested | |
 | logs.stream@both | Logs → container log stream | GET `/admin/api/logs` | streams/returns recent container log lines | both | untested | |
-| chat.stream@vllm | Chat → streamed completion | POST chat via UI path with stream | tokens stream; usage shown | vllm | untested | |
-| chat.nonstream@vllm | Chat → non-streamed completion | POST chat without stream | full completion + usage | vllm | untested | |
+| chat.stream@vllm | Chat → streamed completion | POST chat via UI path with stream | tokens stream; usage shown | vllm | pass | Phase 2: streamed 14 chunks, content + include_usage trailing chunk |
+| chat.nonstream@vllm | Chat → non-streamed completion | POST chat without stream | full completion + usage | vllm | pass | Phase 2: /v1/chat/completions 200, content+usage (Qwen3-1.7B) |
 | render.dashboard@both | Dashboard page render | `smoke_page('/admin/dashboard')` | zero console/page errors | both | fixed | was: page error `Cannot read properties of null (reading 'owner_hash')`; fixed in `2e80418` (optional chaining on bench `:href`); re-smoke green |
 | render.chat@both | Chat page render | `smoke_page('/admin/chat')` | zero console/page errors | both | pass | Phase 2: smoke_page('/admin/chat') zero console/page errors |
 
@@ -100,7 +100,7 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 
 | id | area / control | exercise | expected | backend | status | notes/commit |
 |----|----------------|----------|----------|---------|--------|--------------|
-| integration.launch_claude@vllm | `omni launch claude` e2e | `run_claude_ping('http://localhost:8080','omlx','<served>')` | claude returns a completion via the backend | vllm | untested | |
+| integration.launch_claude@vllm | `omni launch claude` e2e | `run_claude_ping('http://localhost:8080','omlx','<served>')` | claude returns a completion via the backend | vllm | blocked | FINDING: claude -p 400s — client max_tokens(32000)+input(8961) > ctx(40960). /v1/messages forwards client max_tokens (app.py:374); context guard only caps proxy-injected default (app.py:540-549), so the context-400 retry can't help. Needs decision: integration set CLAUDE_CODE_MAX_OUTPUT_TOKENS from ctx.context_window, or proxy cap client max_tokens on context-400 retry. Probe's claude_env also omits the real launch's context wiring. |
 
 ## Proxy-mode "hidden capability" checks
 
