@@ -22,7 +22,7 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 | settings.proxy.backend_type@router | Settings → Backend Type | POST `/admin/api/global-settings` `{"proxy":{"backend_type":"openai-compatible"}}`; GET config | `proxy.backend_type` persists; sidecar launch settings hidden (router mode); live-applied | router | untested | |
 | settings.proxy.backend_url@router | Settings → Backend URL | POST `proxy.backend_url`; GET `/admin/api/proxy/config` | url persisted + live-applied; `backend_url` reflects it | router | untested | |
 | settings.proxy.backend_api_key@router | Settings → Backend API Key | POST `proxy.backend_api_key`; GET config | `backend_api_key_set` flips true; value not echoed back | router | untested | |
-| settings.backend.health@both | Settings → Backend health badge | GET `/admin/api/proxy/status` | health reflects reachable backend | both | untested | |
+| settings.backend.health@both | Settings → Backend health badge | GET `/admin/api/proxy/status` | health reflects reachable backend | both | pass | Phase 2: backend_reachable=True, no error |
 
 ## Settings → Sampling defaults
 
@@ -67,15 +67,15 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 
 | id | area / control | exercise | expected | backend | status | notes/commit |
 |----|----------------|----------|----------|---------|--------|--------------|
-| status.stats.session_scope@vllm | Status → session scope | GET `/admin/api/stats?scope=session` | returns session counters | vllm | untested | |
-| status.stats.alltime_scope@vllm | Status → all-time scope | GET `/admin/api/stats?scope=all` (or alltime) | returns persisted all-time counters | vllm | untested | |
+| status.stats.session_scope@vllm | Status → session scope | GET `/admin/api/stats?scope=session` | returns session counters | vllm | pass | Phase 2: scope=session HTTP 200 |
+| status.stats.alltime_scope@vllm | Status → all-time scope | GET `/admin/api/stats?scope=all` (or alltime) | returns persisted all-time counters | vllm | pass | Phase 2: scope=all & scope=alltime both 200 |
 | status.stats.clear@vllm | Status → Clear (session) | POST `/admin/api/stats/clear`; GET session | session counters zero; all-time untouched | vllm | pass | Phase 1: clear → 200, session stats returned |
 | status.stats.clear_alltime@vllm | Status → Clear all-time | POST `/admin/api/stats/clear-alltime`; GET alltime | all-time counters zero | vllm | untested | |
 | status.stats.per_model_filter@vllm | Status → per-model filter | GET stats filtered by served model | counters attributed to that model | vllm | untested | |
 | status.cache.prefix@vllm | Status → Backend KV/Prefix Cache | send repeated prompt; GET `/admin/api/proxy/metrics` | prefix-cache hit rate rises; KV usage shown | vllm | untested | |
-| status.metrics.prometheus@vllm | Status → Backend Metrics samples | GET `/admin/api/proxy/metrics`; `vllm_metric_families` | expected vllm families present | vllm | untested | |
+| status.metrics.prometheus@vllm | Status → Backend Metrics samples | GET `/admin/api/proxy/metrics`; `vllm_metric_families` | expected vllm families present | vllm | pass | Phase 2: backend_kind=prometheus; summary has prefix_cache_* + gpu_cache_usage; metric_count>0 |
 | status.active_models.memory_bar@vllm | Status → Active Models memory bar | GET `/admin/api/proxy/status` | per-process GPU memory + soft limit shown | vllm | untested | |
-| status.api_endpoints@both | Status → API Endpoints panel | GET `/admin/api/server-info` | host/port/aliases/cli_prefix "omni" present | both | untested | |
+| status.api_endpoints@both | Status → API Endpoints panel | GET `/admin/api/server-info` | host/port/aliases/cli_prefix "omni" present | both | pass | Phase 2: host/port/aliases via server-info; cli_prefix='omni' via /stats (refine: not in server-info) |
 | status.cache.router_note@router | Status → cache panel (router) | GET metrics in router mode | "not exposed" note path for Ollama | router | untested | |
 | status.active_models.ollama@router | Status → Active Models (router) | GET status with Ollama backend | `/api/ps` sizes + TTL shown | router | untested | |
 
@@ -105,8 +105,8 @@ These verify the proxy-mode UI cleanup (capabilities reported off in
 
 | id | area / control | exercise | expected | backend | status | notes/commit |
 |----|----------------|----------|----------|---------|--------|--------------|
-| hidden.model_load_unload@both | load/unload hidden | GET status capabilities | `model_load_unload=false`; load/unload controls hidden | both | untested | |
-| hidden.benchmarks@both | benchmark tab hidden | GET status capabilities | `benchmarks=false`; bench tab hidden | both | untested | |
-| hidden.cache_controls@both | MLX cache controls hidden | GET status capabilities | `cache_controls=false`; MLX cache controls hidden | both | untested | |
-| hidden.downloaders@both | HF/MS downloader hidden | GET status capabilities | `hf_downloader=false`, `modelscope_downloader=false` | both | untested | |
-| hidden.quant_upload@both | quantizer/uploader hidden | GET status capabilities | `quantizer=false`, `uploader=false` | both | untested | |
+| hidden.model_load_unload@both | load/unload hidden | GET status capabilities | `model_load_unload=false`; load/unload controls hidden | both | pass | Phase 2: model_load_unload=false |
+| hidden.benchmarks@both | benchmark tab hidden | GET status capabilities | `benchmarks=false`; bench tab hidden | both | pass | Phase 2: benchmarks=false |
+| hidden.cache_controls@both | MLX cache controls hidden | GET status capabilities | `cache_controls=false`; MLX cache controls hidden | both | pass | Phase 2: cache_controls=false |
+| hidden.downloaders@both | HF/MS downloader hidden | GET status capabilities | `hf_downloader=false`, `modelscope_downloader=false` | both | pass | Phase 2: hf_downloader=false, modelscope_downloader=false |
+| hidden.quant_upload@both | quantizer/uploader hidden | GET status capabilities | `quantizer=false`, `uploader=false` | both | pass | Phase 2: quantizer=false, uploader=false |
