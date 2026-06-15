@@ -45,10 +45,10 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 
 | id | area / control | exercise | expected | backend | status | notes/commit |
 |----|----------------|----------|----------|---------|--------|--------------|
-| settings.vllm.gpu_mem_util@vllm | vLLM Advanced → gpu-memory-utilization | POST util; GET `/admin/api/proxy/sidecar-compose` | demand-aware util in generated compose; "restart required" hint shown | vllm | untested | |
-| settings.vllm.enforce_eager@vllm | vLLM Advanced → Enforce eager | POST toggle; regenerate compose | `--enforce-eager` present/absent in compose accordingly | vllm | untested | |
-| settings.vllm.trust_remote_code@vllm | vLLM Advanced → Trust remote code | POST toggle; regenerate compose | `--trust-remote-code` present/absent in compose | vllm | untested | |
-| settings.vllm.dtype@vllm | vLLM Advanced → dtype (half/float) | POST dtype; regenerate compose | `--dtype` reflects choice in compose | vllm | untested | |
+| settings.vllm.gpu_mem_util@vllm | vLLM Advanced → gpu-memory-utilization | POST util; GET `/admin/api/proxy/sidecar-compose` | demand-aware util in generated compose; "restart required" hint shown | vllm | pass | Phase 2: vllm_gpu_memory_utilization 0.30 applied (no guard block), restored 0.21 |
+| settings.vllm.enforce_eager@vllm | vLLM Advanced → Enforce eager | POST toggle; regenerate compose | `--enforce-eager` present/absent in compose accordingly | vllm | pass | Phase 2: vllm_enforce_eager toggles enforce_eager in sidecar settings (snapshot-restored) |
+| settings.vllm.trust_remote_code@vllm | vLLM Advanced → Trust remote code | POST toggle; regenerate compose | `--trust-remote-code` present/absent in compose | vllm | pass | Phase 2: vllm_trust_remote_code toggles trust_remote_code |
+| settings.vllm.dtype@vllm | vLLM Advanced → dtype (half/float) | POST dtype; regenerate compose | `--dtype` reflects choice in compose | vllm | pass | Phase 2: vllm_dtype -> dtype='half' in compose, restored '' |
 | settings.vllm.model_switch_small@vllm | Models → Use with sidecar (small) | `assert_heavy_op_allowed('Qwen/Qwen3-1.7B')`; switch + restart | served name re-derived from new model; `/v1/models` lists it; chat works | vllm | untested | |
 | settings.vllm.model_switch_large@vllm | Settings → large-model launch guard | regenerate compose / dry-run for `openai/gpt-oss-120b` | memory guard 409 + "Launch anyway"; no real launch; `assert_heavy_op_allowed` refuses | vllm | pass | Phase 1: `assert_heavy_op_allowed` refusal verified; 409 "Launch anyway" dialog deferred to Phase 2 |
 | settings.vllm.served_name_resync@vllm | Settings → served name on model change | switch model without custom name; GET config | `OMNI_SERVED_MODEL_NAME` re-derived from new model tail | vllm | untested | |
@@ -94,7 +94,7 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 | chat.stream@vllm | Chat → streamed completion | POST chat via UI path with stream | tokens stream; usage shown | vllm | untested | |
 | chat.nonstream@vllm | Chat → non-streamed completion | POST chat without stream | full completion + usage | vllm | untested | |
 | render.dashboard@both | Dashboard page render | `smoke_page('/admin/dashboard')` | zero console/page errors | both | fixed | was: page error `Cannot read properties of null (reading 'owner_hash')`; fixed in `2e80418` (optional chaining on bench `:href`); re-smoke green |
-| render.chat@both | Chat page render | `smoke_page('/admin/chat')` | zero console/page errors | both | untested | |
+| render.chat@both | Chat page render | `smoke_page('/admin/chat')` | zero console/page errors | both | pass | Phase 2: smoke_page('/admin/chat') zero console/page errors |
 
 ## Integrations
 
