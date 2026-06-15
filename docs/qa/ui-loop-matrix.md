@@ -12,6 +12,12 @@ Helpers (in `tests/ui_loop/`): `AdminClient` (live admin API), `smoke_page`
 (`backend_assert`), `run_claude_ping` (`launch_claude_e2e`),
 `assert_heavy_op_allowed` (`safety`).
 
+
+**POST contract:** `/admin/api/global-settings` accepts only FLAT keys
+(`sampling_temperature`, `network_http_proxy`, `vllm_dtype`, …) — the GET payload
+nests display values but is NOT symmetric. Use `flat_settings_key()`. `memory`
+and `mcp` sections are hardcoded in the GET payload (proxy-mode display stubs).
+
 Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough),
 `both`.
 
@@ -29,11 +35,11 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 | id | area / control | exercise | expected | backend | status | notes/commit |
 |----|----------------|----------|----------|---------|--------|--------------|
 | settings.sampling.max_tokens.guard@vllm | Sampling → Max Tokens vs context | POST `sampling.max_tokens` ≥ ctx; send a chat | request retried without cap on ctx-length 400; inline warning; "Use recommended (ctx/2)" offered | vllm | untested | |
-| settings.sampling.temperature@both | Sampling → Temperature | POST `sampling.temperature`=0.3; GET settings; send chat omitting temp | persisted; injected into forwarded request | both | untested | |
-| settings.sampling.top_p@both | Sampling → top_p | POST `sampling.top_p`; GET settings | persisted + injected | both | untested | |
-| settings.sampling.top_k@both | Sampling → top_k | POST `sampling.top_k`; GET settings | persisted + injected | both | untested | |
-| settings.sampling.repetition_penalty@both | Sampling → repetition_penalty | POST value; GET settings | persisted + injected | both | untested | |
-| settings.sampling.max_context_window@vllm | Sampling → Max Context Window | POST value; GET settings | persisted; used for context probe | vllm | untested | |
+| settings.sampling.temperature@both | Sampling → Temperature | POST `sampling.temperature`=0.3; GET settings; send chat omitting temp | persisted; injected into forwarded request | both | pass | Phase 2: flat key sampling_temperature round-trips |
+| settings.sampling.top_p@both | Sampling → top_p | POST `sampling.top_p`; GET settings | persisted + injected | both | pass | Phase 2: flat key sampling_top_p round-trips |
+| settings.sampling.top_k@both | Sampling → top_k | POST `sampling.top_k`; GET settings | persisted + injected | both | pass | Phase 2: flat key sampling_top_k round-trips |
+| settings.sampling.repetition_penalty@both | Sampling → repetition_penalty | POST value; GET settings | persisted + injected | both | pass | Phase 2: flat key sampling_repetition_penalty round-trips |
+| settings.sampling.max_context_window@vllm | Sampling → Max Context Window | POST value; GET settings | persisted; used for context probe | vllm | blocked | deferred: POST can't unset the override to restore original None; also rewrites omni_context_length — verify on a test-server fixture, not in-place unattended |
 
 ## Settings → vLLM launch (sidecar; restart required)
 
@@ -52,12 +58,12 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 
 | id | area / control | exercise | expected | backend | status | notes/commit |
 |----|----------------|----------|----------|---------|--------|--------------|
-| settings.network.http_proxy@both | Network → HTTP Proxy | POST `network.http_proxy`; GET settings | persisted | both | untested | |
-| settings.network.https_proxy@both | Network → HTTPS Proxy | POST value; GET settings | persisted | both | untested | |
-| settings.network.no_proxy@both | Network → No Proxy | POST value; GET settings | persisted | both | untested | |
-| settings.network.ca_bundle@both | Network → CA Bundle | POST value; GET settings | persisted | both | untested | |
-| settings.memory.guard_tier@both | Memory → guard tier | POST `memory.memory_guard_tier`; GET settings | persisted; invalid tier rejected/normalized | both | untested | |
-| settings.mcp.config_path@both | MCP → config path | POST `mcp.config_path`; GET settings | persisted | both | untested | |
+| settings.network.http_proxy@both | Network → HTTP Proxy | POST `network.http_proxy`; GET settings | persisted | both | pass | Phase 2: flat key network_http_proxy round-trips (snapshot-restored) |
+| settings.network.https_proxy@both | Network → HTTPS Proxy | POST value; GET settings | persisted | both | pass | Phase 2: flat key network_https_proxy round-trips |
+| settings.network.no_proxy@both | Network → No Proxy | POST value; GET settings | persisted | both | pass | Phase 2: flat key network_no_proxy round-trips |
+| settings.network.ca_bundle@both | Network → CA Bundle | POST value; GET settings | persisted | both | pass | Phase 2: flat key network_ca_bundle round-trips |
+| settings.memory.guard_tier@both | Memory → guard tier | POST `memory.memory_guard_tier`; GET settings | persisted; invalid tier rejected/normalized | both | blocked | proxy-mode inert: hardcoded 'balanced' in GET payload (admin.py:1542); native_memory_guard capability off — display stub, can't round-trip |
+| settings.mcp.config_path@both | MCP → config path | POST `mcp.config_path`; GET settings | persisted | both | blocked | proxy-mode inert: hardcoded '' in GET payload (admin.py:1564) — display stub, can't round-trip |
 | settings.auth.api_key@both | Auth → API key | POST `auth.api_key`; GET settings | persisted; subsequent calls require Bearer | both | untested | |
 | settings.auth.subkeys@both | Auth → sub-keys create/delete | createSubKey then deleteSubKey via endpoints | sub-key list updates accordingly | both | untested | |
 | settings.integrations.markitdown@both | Integrations → MarkItDown engine | POST `integrations.markitdown_pdf_processing_engine`; GET | persisted | both | untested | |
