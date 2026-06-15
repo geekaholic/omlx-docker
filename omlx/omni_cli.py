@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ._version import __version__
+from .model_discovery import _read_model_context_length
 from .proxy import (  # noqa: F401  (registers backend specs)
     llamacpp_compose,
     vllm_compose,
@@ -28,6 +29,7 @@ from .proxy.memory_fit import (
     guard_disabled,
     host_reserve_bytes,
     kv_bytes_per_token,
+    recommended_context_length,
     resolve_local_model_path,
 )
 from .proxy.metrics import host_memory_info
@@ -1475,6 +1477,28 @@ def _vllm_memory_preflight(
     kv_per_token = kv_bytes_per_token(model_path) if model_path is not None else None
     context = _positive_int_or_none(merged_env.get("OMNI_CONTEXT_LENGTH"))
     parallel = _positive_int_or_none(merged_env.get("OMNI_MAX_PARALLEL"))
+
+    # Auto-size the context window from the model + host when the user didn't set
+    # it explicitly: the largest that safely fits, bounded by the native window.
+    explicit_context = getattr(args, "context_length", None) is not None
+    if not explicit_context and host_total > 0 and model_path is not None:
+        native_max = _read_model_context_length(model_path)
+        auto_ctx = recommended_context_length(
+            total_bytes=host_total,
+            reserve_bytes=reserve,
+            weights_bytes=weights,
+            kv_per_token=kv_per_token,
+            parallel=parallel,
+            native_max=native_max,
+        )
+        if auto_ctx:
+            merged_env["OMNI_CONTEXT_LENGTH"] = str(auto_ctx)
+            context = auto_ctx
+            print(
+                f"Using context length {auto_ctx} (auto: largest that fits "
+                f"{format_gib(host_total)} unified memory for {parallel} concurrent "
+                f"seqs; model native max {native_max}). Override with --context-length."
+            )
 
     explicit_util = getattr(args, "gpu_memory_utilization", None) is not None
     if not explicit_util and host_total > 0:

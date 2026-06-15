@@ -52,6 +52,14 @@ ACTIVATION_HEADROOM_GB = 8.0
 # vLLM aborts with "No available memory for the cache blocks".
 MIN_KV_GB = 1.0
 
+# Upper bound on the auto-computed context window (env ``OMLX_MAX_AUTO_CONTEXT``).
+# Memory usually binds well below this; the cap just avoids pathological prefill
+# latency when a model declares a huge native window (e.g. 1M tokens).
+MAX_AUTO_CONTEXT_CAP = 262144
+
+# Auto context is floored to a multiple of this (clean vLLM block sizing).
+_CONTEXT_GRANULARITY = 4096
+
 _GIB = 1024**3
 
 
@@ -185,11 +193,27 @@ def _dtype_bytes(torch_dtype: object) -> int:
     return 2  # bfloat16 / float16 / half (default)
 
 
+def _nested_get(config: dict, key: str) -> object:
+    """Read ``key`` from config.json, falling back to the multimodal text config.
+
+    Multimodal models (e.g. Gemma-4 VLMs) keep the language-model geometry under
+    ``text_config`` / ``language_config``, so a top-level-only read misses it and
+    KV sizing silently degrades to the safety ceiling.
+    """
+    if key in config:
+        return config[key]
+    for nest in ("text_config", "language_config"):
+        sub = config.get(nest)
+        if isinstance(sub, dict) and key in sub:
+            return sub[key]
+    return None
+
+
 def kv_bytes_per_token(model_path: Path) -> int | None:
     """Bytes of KV cache one token occupies: 2 * layers * kv_heads * head_dim * dtype.
 
-    Reads the model's ``config.json``; returns None when it can't be parsed so
-    callers fall back to the safety-ceiling utilization.
+    Reads the model's ``config.json`` (incl. nested ``text_config``); returns None
+    when it can't be parsed so callers fall back to the safety-ceiling utilization.
     """
     try:
         import json
@@ -200,16 +224,17 @@ def kv_bytes_per_token(model_path: Path) -> int | None:
     except (OSError, ValueError):
         return None
 
-    layers = config.get("num_hidden_layers") or config.get("n_layers")
-    heads = config.get("num_attention_heads") or config.get("n_heads")
-    kv_heads = config.get("num_key_value_heads") or heads
-    head_dim = config.get("head_dim")
-    if not head_dim and config.get("hidden_size") and heads:
-        head_dim = config["hidden_size"] // heads
+    layers = _nested_get(config, "num_hidden_layers") or _nested_get(config, "n_layers")
+    heads = _nested_get(config, "num_attention_heads") or _nested_get(config, "n_heads")
+    kv_heads = _nested_get(config, "num_key_value_heads") or heads
+    head_dim = _nested_get(config, "head_dim")
+    hidden = _nested_get(config, "hidden_size")
+    if not head_dim and hidden and heads:
+        head_dim = hidden // heads
     if not layers or not kv_heads or not head_dim:
         return None
 
-    dtype_bytes = _dtype_bytes(config.get("torch_dtype"))
+    dtype_bytes = _dtype_bytes(_nested_get(config, "torch_dtype"))
     return int(2 * layers * kv_heads * head_dim * dtype_bytes)
 
 
@@ -238,6 +263,63 @@ def demand_utilization(
     demand = (weights_bytes + kv_pool + activation) / total_bytes
     demand = math.ceil(demand * 100) / 100
     return max(0.05, min(0.92, demand))
+
+
+def max_auto_context() -> int:
+    """Cap for the auto-computed context (``OMLX_MAX_AUTO_CONTEXT`` override)."""
+    raw = os.getenv("OMLX_MAX_AUTO_CONTEXT", "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            pass
+    return MAX_AUTO_CONTEXT_CAP
+
+
+def recommended_context_length(
+    *,
+    total_bytes: int,
+    reserve_bytes: int,
+    weights_bytes: int | None,
+    kv_per_token: int | None,
+    parallel: int | None,
+    native_max: int | None,
+    headroom: float | None = None,
+) -> int | None:
+    """Largest context that fits memory, bounded by the model's native window.
+
+    The inverse of :func:`demand_utilization`: size the context so weights + the
+    KV it can use (``context * parallel`` tokens, with the same headroom slack) +
+    the activation allowance just fit the host budget, then clamp to the model's
+    native max and the global cap. Floored to a clean block multiple. Returns
+    None when the geometry/weights/native window are unknown — the caller then
+    keeps its existing (conservative) context and recomputes once the model is
+    cached.
+    """
+    if (
+        not total_bytes
+        or not weights_bytes
+        or not kv_per_token
+        or not parallel
+        or not native_max
+    ):
+        return None
+    if total_bytes <= 0 or kv_per_token <= 0 or parallel <= 0 or native_max <= 0:
+        return None
+    mult = kv_headroom() if headroom is None else headroom
+    kv_budget = (
+        (total_bytes - reserve_bytes)
+        - weights_bytes
+        - int(ACTIVATION_HEADROOM_GB * _GIB)
+    )
+    if kv_budget <= 0:
+        return None
+    max_fit = int(kv_budget / (kv_per_token * parallel * mult))
+    context = min(int(native_max), max_fit, max_auto_context())
+    floored = (context // _CONTEXT_GRANULARITY) * _CONTEXT_GRANULARITY
+    return floored or context
 
 
 def auto_utilization(

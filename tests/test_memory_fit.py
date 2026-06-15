@@ -248,3 +248,87 @@ def test_auto_utilization_is_min_of_safety_and_demand():
         )
         == safety
     )
+
+
+def test_kv_bytes_per_token_reads_nested_text_config(tmp_path):
+    # Multimodal models (Gemma-4 VLM) keep the LM geometry under text_config.
+    from omlx.proxy.memory_fit import kv_bytes_per_token
+
+    snap = _make_hf_cache_model(tmp_path, "org/vlm", 1 * _GIB)
+    _write_config(
+        snap,
+        model_type="gemma4",
+        text_config={
+            "num_hidden_layers": 30,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 8,
+            "head_dim": 256,
+            "torch_dtype": "bfloat16",
+        },
+    )
+    assert kv_bytes_per_token(snap) == 2 * 30 * 8 * 256 * 2  # 245760
+
+
+def test_recommended_context_length_bounded_by_native():
+    from omlx.proxy.memory_fit import recommended_context_length
+
+    # Plenty of memory, small native window -> native bounds the result.
+    ctx = recommended_context_length(
+        total_bytes=200 * _GIB,
+        reserve_bytes=16 * _GIB,
+        weights_bytes=10 * _GIB,
+        kv_per_token=100_000,
+        parallel=1,
+        native_max=8192,
+        headroom=1.0,
+    )
+    assert ctx == 8192
+
+
+def test_recommended_context_length_scales_inversely_with_parallel():
+    from omlx.proxy.memory_fit import recommended_context_length
+
+    kw = dict(
+        total_bytes=120 * _GIB,
+        reserve_bytes=16 * _GIB,
+        weights_bytes=50 * _GIB,
+        kv_per_token=240 * 1024,
+        native_max=262144,
+        headroom=1.5,
+    )
+    c1 = recommended_context_length(parallel=1, **kw)
+    c2 = recommended_context_length(parallel=2, **kw)
+    assert c1 and c2 and c1 > c2
+    assert c1 % 4096 == 0 and c2 % 4096 == 0
+
+
+def test_recommended_context_length_honors_cap():
+    from omlx.proxy.memory_fit import MAX_AUTO_CONTEXT_CAP, recommended_context_length
+
+    capped = recommended_context_length(
+        total_bytes=10_000 * _GIB,
+        reserve_bytes=16 * _GIB,
+        weights_bytes=10 * _GIB,
+        kv_per_token=1024,
+        parallel=1,
+        native_max=10**9,
+        headroom=1.0,
+    )
+    assert capped == MAX_AUTO_CONTEXT_CAP
+
+
+def test_recommended_context_length_none_when_unknown_or_too_big():
+    from omlx.proxy.memory_fit import recommended_context_length
+
+    base = dict(
+        total_bytes=120 * _GIB,
+        reserve_bytes=16 * _GIB,
+        weights_bytes=50 * _GIB,
+        kv_per_token=240 * 1024,
+        parallel=2,
+        native_max=262144,
+    )
+    assert recommended_context_length(**{**base, "kv_per_token": None}) is None
+    assert recommended_context_length(**{**base, "native_max": None}) is None
+    # Weights exceed the budget -> no KV room -> None (caller keeps fallback).
+    assert recommended_context_length(**{**base, "weights_bytes": 200 * _GIB}) is None

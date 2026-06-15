@@ -60,7 +60,9 @@ def test_fresh_serve_unknown_model_leaves_parser_empty():
 
 
 def test_max_output_tokens_flag_maps_to_env():
-    args = parse_args("--backend", "vllm", "--model", "m", "--max-output-tokens", "8192")
+    args = parse_args(
+        "--backend", "vllm", "--model", "m", "--max-output-tokens", "8192"
+    )
     env = omni_cli.portable_cli_environment(args)
     assert env["OMLX_SAMPLING_MAX_TOKENS"] == "8192"
 
@@ -1688,3 +1690,85 @@ def test_serve_explicit_util_overrides_demand_sizing(tmp_path):
         ]
     )
     assert omni_cli.load_env_file(env_file)["VLLM_GPU_MEMORY_UTILIZATION"] == "0.5"
+
+
+def _make_fake_cached_model(
+    cache_root, repo_id, *, native, layers=4, kv_heads=2, head_dim=64, weight_bytes=1024
+):
+    import json as _json
+
+    encoded = "models--" + repo_id.replace("/", "--")
+    commit = "deadbeef"
+    snap = cache_root / "hub" / encoded / "snapshots" / commit
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text(
+        _json.dumps(
+            {
+                "num_hidden_layers": layers,
+                "num_attention_heads": kv_heads,
+                "num_key_value_heads": kv_heads,
+                "head_dim": head_dim,
+                "torch_dtype": "bfloat16",
+                "max_position_embeddings": native,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with open(snap / "model.safetensors", "wb") as fh:
+        fh.truncate(weight_bytes)
+    refs = cache_root / "hub" / encoded / "refs"
+    refs.mkdir(parents=True)
+    (refs / "main").write_text(commit, encoding="utf-8")
+
+
+def test_serve_preflight_auto_sizes_context(tmp_path, monkeypatch):
+    import argparse
+
+    _make_fake_cached_model(tmp_path, "org/m", native=16384)
+    # Big host so the native window (not memory) bounds the result -> deterministic.
+    monkeypatch.setattr(
+        omni_cli,
+        "host_memory_info",
+        lambda: {"total_bytes": 200 * 1024**3, "available_bytes": 200 * 1024**3},
+    )
+    args = argparse.Namespace(
+        context_length=None,
+        gpu_memory_utilization=None,
+        dry_run=False,
+        generate_only=True,
+        force_memory=False,
+    )
+    merged = {
+        "OMNI_MODEL": "org/m",
+        "OMNI_HF_HOME": str(tmp_path),
+        "OMNI_MAX_PARALLEL": "2",
+        "OMNI_CONTEXT_LENGTH": "8192",
+    }
+    omni_cli._vllm_memory_preflight(args, merged)
+    assert merged["OMNI_CONTEXT_LENGTH"] == "16384"  # auto, native-bounded
+
+
+def test_serve_preflight_respects_explicit_context(tmp_path, monkeypatch):
+    import argparse
+
+    _make_fake_cached_model(tmp_path, "org/m", native=16384)
+    monkeypatch.setattr(
+        omni_cli,
+        "host_memory_info",
+        lambda: {"total_bytes": 200 * 1024**3, "available_bytes": 200 * 1024**3},
+    )
+    args = argparse.Namespace(
+        context_length=4096,
+        gpu_memory_utilization=None,
+        dry_run=False,
+        generate_only=True,
+        force_memory=False,
+    )
+    merged = {
+        "OMNI_MODEL": "org/m",
+        "OMNI_HF_HOME": str(tmp_path),
+        "OMNI_MAX_PARALLEL": "2",
+        "OMNI_CONTEXT_LENGTH": "4096",
+    }
+    omni_cli._vllm_memory_preflight(args, merged)
+    assert merged["OMNI_CONTEXT_LENGTH"] == "4096"  # explicit wins

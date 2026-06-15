@@ -9,16 +9,17 @@ import os
 import re
 import time
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from omlx._version import __version__
+from omlx.model_discovery import _read_model_context_length
 
 from .backend import OpenAIBackend
 from .config import BACKEND_URL_DEFAULTS, SIDECAR_BACKEND_TYPES, ProxyConfig
@@ -39,6 +40,7 @@ from .memory_fit import (
     guard_disabled,
     host_reserve_bytes,
     kv_bytes_per_token,
+    recommended_context_length,
     resolve_local_model_path,
 )
 from .metrics import (
@@ -82,7 +84,7 @@ class ProxyAdminState:
         self.logs = self.logs[-1000:]
 
     @classmethod
-    def load(cls, path: Path | None) -> "ProxyAdminState":
+    def load(cls, path: Path | None) -> ProxyAdminState:
         state = cls(state_path=path)
         if path is None or not path.exists():
             return state
@@ -401,6 +403,30 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
                 # generation config, image, max_parallel) are preserved.
                 if new_type == "vllm":
                     _reset_model_specific_vllm_overrides(sidecar_updates)
+                # Auto-size the context window for the new model unless the user
+                # set it in this save: the largest that safely fits, bounded by
+                # the model's native window. Runs before the util resize so the
+                # util is sized for the new context.
+                if (
+                    new_type == "vllm"
+                    and model_path is not None
+                    and "omni_context_length" not in sidecar_updates
+                ):
+                    ctx_prospective = _sidecar_settings_from_files(
+                        state, sidecar_updates
+                    )
+                    auto_ctx = recommended_context_length(
+                        total_bytes=int(host_memory_info().get("total_bytes") or 0),
+                        reserve_bytes=host_reserve_bytes(),
+                        weights_bytes=estimate_resident_bytes(model_path),
+                        kv_per_token=kv_bytes_per_token(model_path),
+                        parallel=int(getattr(ctx_prospective, "max_parallel", 0) or 0)
+                        or None,
+                        native_max=_read_model_context_length(model_path),
+                    )
+                    if auto_ctx:
+                        sidecar_updates["omni_context_length"] = auto_ctx
+
                 # Resize gpu-memory-utilization for the new model unless the user
                 # changed it in this save — otherwise the previous model's util
                 # lingers and vLLM over-allocates KV (e.g. ~95 GiB for a 1.7B
@@ -1627,10 +1653,10 @@ def _ttl_remaining_seconds(expires_at: Any) -> float | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     if parsed.year <= 1:  # Ollama's zero-value for "not expiring"
         return None
-    return max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+    return max(0.0, (parsed - datetime.now(UTC)).total_seconds())
 
 
 def _model_row(model_id: str, **overrides: Any) -> dict[str, Any]:

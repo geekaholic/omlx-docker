@@ -20,7 +20,10 @@ class CommonSidecarSettings:
     model: str = ""
     served_model_name: str = "qwen"
     context_length: int = 8192
-    max_parallel: int = 4
+    # Default to 2 concurrent sequences: a single coding agent rarely needs more,
+    # and a low concurrency lets the auto-computed context window be much larger
+    # (KV budget is split across max_parallel). Raise it for multi-user serving.
+    max_parallel: int = 2
     backend_port: int = 8000
     hf_home: str = "${HOME}/.cache/huggingface"
     hf_endpoint: str = ""
