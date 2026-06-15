@@ -76,11 +76,11 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 | status.stats.session_scope@vllm | Status → session scope | GET `/admin/api/stats?scope=session` | returns session counters | vllm | pass | Phase 2: scope=session HTTP 200 |
 | status.stats.alltime_scope@vllm | Status → all-time scope | GET `/admin/api/stats?scope=all` (or alltime) | returns persisted all-time counters | vllm | pass | Phase 2: scope=all & scope=alltime both 200 |
 | status.stats.clear@vllm | Status → Clear (session) | POST `/admin/api/stats/clear`; GET session | session counters zero; all-time untouched | vllm | pass | Phase 1: clear → 200, session stats returned |
-| status.stats.clear_alltime@vllm | Status → Clear all-time | POST `/admin/api/stats/clear-alltime`; GET alltime | all-time counters zero | vllm | untested | |
-| status.stats.per_model_filter@vllm | Status → per-model filter | GET stats filtered by served model | counters attributed to that model | vllm | untested | |
+| status.stats.clear_alltime@vllm | Status → Clear all-time | POST `/admin/api/stats/clear-alltime`; GET alltime | all-time counters zero | vllm | blocked | safety: irreversibly wipes persisted all-time accounting with no API to restore — verify on a throwaway proxy-state, not in an unattended run |
+| status.stats.per_model_filter@vllm | Status → per-model filter | GET stats filtered by served model | counters attributed to that model | vllm | pass | Phase 2: model= filter discriminates (served 11 reqs/1259 tok/67.9% cache vs bogus 0) |
 | status.cache.prefix@vllm | Status → Backend KV/Prefix Cache | send repeated prompt; GET `/admin/api/proxy/metrics` | prefix-cache hit rate rises; KV usage shown | vllm | pass | Phase 2: repeated prompt -> prefix hits 128->832, queries 311->1226 (read >5s apart to outlast metrics TTL) |
 | status.metrics.prometheus@vllm | Status → Backend Metrics samples | GET `/admin/api/proxy/metrics`; `vllm_metric_families` | expected vllm families present | vllm | pass | Phase 2: backend_kind=prometheus; summary has prefix_cache_* + gpu_cache_usage; metric_count>0 |
-| status.active_models.memory_bar@vllm | Status → Active Models memory bar | GET `/admin/api/proxy/status` | per-process GPU memory + soft limit shown | vllm | untested | |
+| status.active_models.memory_bar@vllm | Status → Active Models memory bar | GET `/admin/api/proxy/status` | per-process GPU memory + soft limit shown | vllm | pass | Phase 2: active_models.models has estimated_size (util budget); NOTE actual_size=null — nvidia-smi-exec per-process path not populating (GB10), bar falls back to estimated |
 | status.api_endpoints@both | Status → API Endpoints panel | GET `/admin/api/server-info` | host/port/aliases/cli_prefix "omni" present | both | pass | Phase 2: host/port/aliases via server-info; cli_prefix='omni' via /stats (refine: not in server-info) |
 | status.cache.router_note@router | Status → cache panel (router) | GET metrics in router mode | "not exposed" note path for Ollama | router | untested | |
 | status.active_models.ollama@router | Status → Active Models (router) | GET status with Ollama backend | `/api/ps` sizes + TTL shown | router | untested | |
@@ -89,8 +89,8 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 
 | id | area / control | exercise | expected | backend | status | notes/commit |
 |----|----------------|----------|----------|---------|--------|--------------|
-| models.local_scan@vllm | Models → local-model scan | GET `/admin/api/proxy/local-models` | lists HF-cache/GGUF repos when `--scan-models` on (else empty) | vllm | untested | |
-| logs.stream@both | Logs → container log stream | GET `/admin/api/logs` | streams/returns recent container log lines | both | untested | |
+| models.local_scan@vllm | Models → local-model scan | GET `/admin/api/proxy/local-models` | lists HF-cache/GGUF repos when `--scan-models` on (else empty) | vllm | pass | Phase 2: 12 HF repos listed, scan_dir=/models-scan |
+| logs.stream@both | Logs → container log stream | GET `/admin/api/logs` | streams/returns recent container log lines | both | pass | Phase 2: /admin/api/logs 200, JSON log lines |
 | chat.stream@vllm | Chat → streamed completion | POST chat via UI path with stream | tokens stream; usage shown | vllm | pass | Phase 2: streamed 14 chunks, content + include_usage trailing chunk |
 | chat.nonstream@vllm | Chat → non-streamed completion | POST chat without stream | full completion + usage | vllm | pass | Phase 2: /v1/chat/completions 200, content+usage (Qwen3-1.7B) |
 | render.dashboard@both | Dashboard page render | `smoke_page('/admin/dashboard')` | zero console/page errors | both | fixed | was: page error `Cannot read properties of null (reading 'owner_hash')`; fixed in `2e80418` (optional chaining on bench `:href`); re-smoke green |
