@@ -223,6 +223,21 @@ llama.cpp server, or any OpenAI-compatible endpoint (Ollama, for example).
 - Serving stats depend on backends emitting `usage` in responses. Backends
   that ignore `stream_options.include_usage` (older llama.cpp builds, some
   Ollama versions) undercount tokens; requests are still counted.
+- **Claude Code + small-context backends**: `omni launch claude` against a
+  backend with a small context window (e.g. Qwen3-1.7B, 40960) can 400 with
+  "maximum context length … exceeded". Claude Code requests a large output
+  budget (`max_tokens` ~32000) and, with its system prompt (~9k input tokens),
+  the total can exceed the backend context. The Anthropic `/v1/messages` bridge
+  forwards the client's `max_tokens` verbatim (`omlx/proxy/app.py` ~L374); the
+  context-fit guard only caps the proxy's *own* injected default
+  (`apply_proxy_request_defaults`, ~L540), so the context-length-400 retry
+  cannot recover a client-supplied cap. Intentionally not auto-fixed (decided
+  2026-06-15 via the UI QA loop). Workaround: use a backend/model with a larger
+  context, or export `CLAUDE_CODE_MAX_OUTPUT_TOKENS` to a value that fits the
+  backend context before launching. Candidate fixes if revisited: have
+  `omni launch claude` set `CLAUDE_CODE_MAX_OUTPUT_TOKENS` from
+  `ctx.context_window`, or cap client `max_tokens` to `context − input` on a
+  context-length 400. See `docs/qa/ui-loop-report.md`.
 
 ## Current Verification Gaps
 

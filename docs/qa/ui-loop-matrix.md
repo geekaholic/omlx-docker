@@ -100,7 +100,7 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 
 | id | area / control | exercise | expected | backend | status | notes/commit |
 |----|----------------|----------|----------|---------|--------|--------------|
-| integration.launch_claude@vllm | `omni launch claude` e2e | `run_claude_ping('http://localhost:8080','omlx','<served>')` | claude returns a completion via the backend | vllm | blocked | FINDING: claude -p 400s — client max_tokens(32000)+input(8961) > ctx(40960). /v1/messages forwards client max_tokens (app.py:374); context guard only caps proxy-injected default (app.py:540-549), so the context-400 retry can't help. Needs decision: integration set CLAUDE_CODE_MAX_OUTPUT_TOKENS from ctx.context_window, or proxy cap client max_tokens on context-400 retry. Probe's claude_env also omits the real launch's context wiring. |
+| integration.launch_claude@vllm | `omni launch claude` e2e | `run_claude_ping('http://localhost:8080','omlx','<served>')` | claude returns a completion via the backend | vllm | blocked | DECISION (2026-06-15): documented as a known limitation, not auto-fixed (see LINUX_PROXY_REMAINING_WORK.md Deferred). claude -p 400s when client max_tokens+input > backend ctx; /v1/messages forwards client max_tokens uncapped (app.py:374) |
 
 ## Proxy-mode "hidden capability" checks
 
