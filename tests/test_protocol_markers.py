@@ -182,3 +182,33 @@ def test_processor_does_not_misfire_on_recall():
     events = p.feed("I recall:foo was mentioned.") + p.flush()
     assert _tool_calls(events) == []
     assert "recall:foo was mentioned." in _texts(events)
+
+
+def test_processor_recovers_call_streamed_one_char_at_a_time():
+    # Real token streaming delivers ~1 char per delta; the call: keyword must
+    # accrete instead of leaking out a character at a time.
+    p = Gemma4StreamProcessor()
+    leaked = (
+        'call:exec_command{cmd:<|"|>sed -i '
+        "'s/a(`X', () => b.init());/c(`X', () => d.init());/' js/os.js<|\"|>}"
+    )
+    events = []
+    for ch in leaked:
+        events += p.feed(ch)
+    events += p.flush()
+    calls = _tool_calls(events)
+    assert len(calls) == 1 and calls[0]["name"] == "exec_command"
+    assert "call:exec_command" not in _texts(events)
+
+
+def test_processor_char_stream_keeps_surrounding_text():
+    p = Gemma4StreamProcessor()
+    stream = 'I recall the plan. call:ls{p:<|"|>.<|"|>} done'
+    events = []
+    for ch in stream:
+        events += p.feed(ch)
+    events += p.flush()
+    assert len(_tool_calls(events)) == 1
+    text = _texts(events)
+    assert "I recall the plan." in text and "done" in text  # 'recall' not eaten
+    assert "call:ls" not in text

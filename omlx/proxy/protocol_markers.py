@@ -115,6 +115,31 @@ class MarkerStripper:
 _TOOLCALL_START_RE = re.compile(r"(?:<\|tool_call>\s*)?(\bcall:[\w.:-]+\s*\{)")
 # A partial tool-call start at the buffer tail (no `{` yet) to hold across deltas.
 _TOOLCALL_PARTIAL_RE = re.compile(r"(?:<\|tool_call>\s*)?\bcall:[\w.:-]*\Z")
+_CALL_KEYWORD = "call:"
+
+
+def _is_word_char(c: str) -> bool:
+    return c.isalnum() or c == "_"
+
+
+def _partial_toolcall_cut(buf: str) -> int:
+    """Index of a trailing run that could grow into a tool-call start.
+
+    Holds both ``call:<partial-name>`` and the ``call:`` keyword itself forming
+    char-by-char (``c`` / ``ca`` / ``cal`` / ``call``) at a word boundary — real
+    token streaming delivers one or a few characters per delta, so the keyword
+    must be allowed to accrete instead of leaking out a character at a time.
+    """
+    match = _TOOLCALL_PARTIAL_RE.search(buf)
+    if match is not None:
+        return match.start()
+    for i in range(max(0, len(buf) - len(_CALL_KEYWORD) + 1), len(buf)):
+        suffix = buf[i:]
+        if _CALL_KEYWORD.startswith(suffix) and (
+            i == 0 or not _is_word_char(buf[i - 1])
+        ):
+            return i
+    return len(buf)
 
 
 def _match_braces(s: str, open_idx: int) -> int | None:
@@ -233,9 +258,7 @@ class Gemma4StreamProcessor:
     def _safe_text_cut(self, buf: str) -> int:
         cut = _safe_cut(buf)
         if self._recover:
-            partial = _TOOLCALL_PARTIAL_RE.search(buf)
-            if partial is not None:
-                cut = min(cut, partial.start())
+            cut = min(cut, _partial_toolcall_cut(buf))
         return cut
 
 
