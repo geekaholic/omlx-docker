@@ -25,16 +25,16 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 
 | id | area / control | exercise | expected | backend | status | notes/commit |
 |----|----------------|----------|----------|---------|--------|--------------|
-| settings.proxy.backend_type@router | Settings → Backend Type | POST `/admin/api/global-settings` `{"proxy":{"backend_type":"openai-compatible"}}`; GET config | `proxy.backend_type` persists; sidecar launch settings hidden (router mode); live-applied | router | untested | |
-| settings.proxy.backend_url@router | Settings → Backend URL | POST `proxy.backend_url`; GET `/admin/api/proxy/config` | url persisted + live-applied; `backend_url` reflects it | router | untested | |
-| settings.proxy.backend_api_key@router | Settings → Backend API Key | POST `proxy.backend_api_key`; GET config | `backend_api_key_set` flips true; value not echoed back | router | untested | |
+| settings.proxy.backend_type@router | Settings → Backend Type | POST `/admin/api/global-settings` `{"proxy":{"backend_type":"openai-compatible"}}`; GET config | `proxy.backend_type` persists; sidecar launch settings hidden (router mode); live-applied | router | pass | Phase 2: switch to openai-compatible persists; restored to vllm (guarded), chat 200 after |
+| settings.proxy.backend_url@router | Settings → Backend URL | POST `proxy.backend_url`; GET `/admin/api/proxy/config` | url persisted + live-applied; `backend_url` reflects it | router | pass | Phase 2: backend_url editable+persists in router mode (http://test-ollama...); reset to vllm url on switch-back |
+| settings.proxy.backend_api_key@router | Settings → Backend API Key | POST `proxy.backend_api_key`; GET config | `backend_api_key_set` flips true; value not echoed back | router | pass | Phase 2: backend_api_key_set flips True. NOTE: admin GET echoes the key value in plaintext (value_echoed_in_GET=True) — minor admin-only observation |
 | settings.backend.health@both | Settings → Backend health badge | GET `/admin/api/proxy/status` | health reflects reachable backend | both | pass | Phase 2: backend_reachable=True, no error |
 
 ## Settings → Sampling defaults
 
 | id | area / control | exercise | expected | backend | status | notes/commit |
 |----|----------------|----------|----------|---------|--------|--------------|
-| settings.sampling.max_tokens.guard@vllm | Sampling → Max Tokens vs context | POST `sampling.max_tokens` ≥ ctx; send a chat | request retried without cap on ctx-length 400; inline warning; "Use recommended (ctx/2)" offered | vllm | untested | |
+| settings.sampling.max_tokens.guard@vllm | Sampling → Max Tokens vs context | POST `sampling.max_tokens` ≥ ctx; send a chat | request retried without cap on ctx-length 400; inline warning; "Use recommended (ctx/2)" offered | vllm | pass | Phase 2: sampling_max_tokens=50000 (>=ctx), chat still 200 — proxy drops the oversized injected cap (app.py:540) |
 | settings.sampling.temperature@both | Sampling → Temperature | POST `sampling.temperature`=0.3; GET settings; send chat omitting temp | persisted; injected into forwarded request | both | pass | Phase 2: flat key sampling_temperature round-trips |
 | settings.sampling.top_p@both | Sampling → top_p | POST `sampling.top_p`; GET settings | persisted + injected | both | pass | Phase 2: flat key sampling_top_p round-trips |
 | settings.sampling.top_k@both | Sampling → top_k | POST `sampling.top_k`; GET settings | persisted + injected | both | pass | Phase 2: flat key sampling_top_k round-trips |
@@ -82,8 +82,8 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 | status.metrics.prometheus@vllm | Status → Backend Metrics samples | GET `/admin/api/proxy/metrics`; `vllm_metric_families` | expected vllm families present | vllm | pass | Phase 2: backend_kind=prometheus; summary has prefix_cache_* + gpu_cache_usage; metric_count>0 |
 | status.active_models.memory_bar@vllm | Status → Active Models memory bar | GET `/admin/api/proxy/status` | per-process GPU memory + soft limit shown | vllm | pass | Phase 2: active_models.models has estimated_size (util budget); NOTE actual_size=null — nvidia-smi-exec per-process path not populating (GB10), bar falls back to estimated |
 | status.api_endpoints@both | Status → API Endpoints panel | GET `/admin/api/server-info` | host/port/aliases/cli_prefix "omni" present | both | pass | Phase 2: host/port/aliases via server-info; cli_prefix='omni' via /stats (refine: not in server-info) |
-| status.cache.router_note@router | Status → cache panel (router) | GET metrics in router mode | "not exposed" note path for Ollama | router | untested | |
-| status.active_models.ollama@router | Status → Active Models (router) | GET status with Ollama backend | `/api/ps` sizes + TTL shown | router | untested | |
+| status.cache.router_note@router | Status → cache panel (router) | GET metrics in router mode | "not exposed" note path for Ollama | router | pass | Phase 2: in openai-compatible mode backend_kind=unknown -> non-prometheus/not-exposed cache path |
+| status.active_models.ollama@router | Status → Active Models (router) | GET status with Ollama backend | `/api/ps` sizes + TTL shown | router | blocked | no Ollama backend reachable on this host (host & container :11434 down) — needs a live Ollama to verify /api/ps size+TTL |
 
 ## Models / Logs / Chat / render
 
