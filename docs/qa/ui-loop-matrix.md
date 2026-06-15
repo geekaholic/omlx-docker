@@ -44,7 +44,7 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 | settings.vllm.trust_remote_code@vllm | vLLM Advanced → Trust remote code | POST toggle; regenerate compose | `--trust-remote-code` present/absent in compose | vllm | untested | |
 | settings.vllm.dtype@vllm | vLLM Advanced → dtype (half/float) | POST dtype; regenerate compose | `--dtype` reflects choice in compose | vllm | untested | |
 | settings.vllm.model_switch_small@vllm | Models → Use with sidecar (small) | `assert_heavy_op_allowed('Qwen/Qwen3-1.7B')`; switch + restart | served name re-derived from new model; `/v1/models` lists it; chat works | vllm | untested | |
-| settings.vllm.model_switch_large@vllm | Settings → large-model launch guard | regenerate compose / dry-run for `openai/gpt-oss-120b` | memory guard 409 + "Launch anyway"; no real launch; `assert_heavy_op_allowed` refuses | vllm | untested | |
+| settings.vllm.model_switch_large@vllm | Settings → large-model launch guard | regenerate compose / dry-run for `openai/gpt-oss-120b` | memory guard 409 + "Launch anyway"; no real launch; `assert_heavy_op_allowed` refuses | vllm | pass | Phase 1: `assert_heavy_op_allowed` refusal verified; 409 "Launch anyway" dialog deferred to Phase 2 |
 | settings.vllm.served_name_resync@vllm | Settings → served name on model change | switch model without custom name; GET config | `OMNI_SERVED_MODEL_NAME` re-derived from new model tail | vllm | untested | |
 | settings.vllm.hf_offline@vllm | Settings → HF offline toggle | switch to cached model; inspect compose env | `HF_HUB_OFFLINE`/`TRANSFORMERS_OFFLINE` set for cached model | vllm | untested | |
 
@@ -69,7 +69,7 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 |----|----------------|----------|----------|---------|--------|--------------|
 | status.stats.session_scope@vllm | Status → session scope | GET `/admin/api/stats?scope=session` | returns session counters | vllm | untested | |
 | status.stats.alltime_scope@vllm | Status → all-time scope | GET `/admin/api/stats?scope=all` (or alltime) | returns persisted all-time counters | vllm | untested | |
-| status.stats.clear@vllm | Status → Clear (session) | POST `/admin/api/stats/clear`; GET session | session counters zero; all-time untouched | vllm | untested | |
+| status.stats.clear@vllm | Status → Clear (session) | POST `/admin/api/stats/clear`; GET session | session counters zero; all-time untouched | vllm | pass | Phase 1: clear → 200, session stats returned |
 | status.stats.clear_alltime@vllm | Status → Clear all-time | POST `/admin/api/stats/clear-alltime`; GET alltime | all-time counters zero | vllm | untested | |
 | status.stats.per_model_filter@vllm | Status → per-model filter | GET stats filtered by served model | counters attributed to that model | vllm | untested | |
 | status.cache.prefix@vllm | Status → Backend KV/Prefix Cache | send repeated prompt; GET `/admin/api/proxy/metrics` | prefix-cache hit rate rises; KV usage shown | vllm | untested | |
@@ -87,7 +87,7 @@ Backend column: `vllm` (sidecar up now), `router` (openai-compatible passthrough
 | logs.stream@both | Logs → container log stream | GET `/admin/api/logs` | streams/returns recent container log lines | both | untested | |
 | chat.stream@vllm | Chat → streamed completion | POST chat via UI path with stream | tokens stream; usage shown | vllm | untested | |
 | chat.nonstream@vllm | Chat → non-streamed completion | POST chat without stream | full completion + usage | vllm | untested | |
-| render.dashboard@both | Dashboard page render | `smoke_page('/admin/dashboard')` | zero console/page errors | both | **fail** | page error: `Cannot read properties of null (reading 'owner_hash')` — found in Phase 0 |
+| render.dashboard@both | Dashboard page render | `smoke_page('/admin/dashboard')` | zero console/page errors | both | fixed | was: page error `Cannot read properties of null (reading 'owner_hash')`; fixed in `2e80418` (optional chaining on bench `:href`); re-smoke green |
 | render.chat@both | Chat page render | `smoke_page('/admin/chat')` | zero console/page errors | both | untested | |
 
 ## Integrations
