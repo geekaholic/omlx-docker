@@ -23,6 +23,26 @@ def _flatten(d: dict[str, Any], prefix: str = "") -> dict[str, Any]:
     return out
 
 
+# The admin GET payload nests display values (e.g. sampling.temperature), but
+# POST /admin/api/global-settings recognises only FLAT top-level keys (see
+# _COMMON_UPDATE_FIELDS / _VLLM_UPDATE_FIELDS in omlx/proxy/admin.py). For most
+# sections the flat key is just "section_field"; vLLM advanced settings show
+# under proxy.sidecar in GET but POST as vllm_*.
+_VLLM_DISPLAY_TO_FLAT = {
+    "vllm.gpu_memory_utilization": "vllm_gpu_memory_utilization",
+    "vllm.enforce_eager": "vllm_enforce_eager",
+    "vllm.trust_remote_code": "vllm_trust_remote_code",
+    "vllm.dtype": "vllm_dtype",
+}
+
+
+def flat_settings_key(dotted: str) -> str:
+    """Map a dotted GET-display path to the flat key POST expects."""
+    if dotted in _VLLM_DISPLAY_TO_FLAT:
+        return _VLLM_DISPLAY_TO_FLAT[dotted]
+    return dotted.replace(".", "_")
+
+
 def diff_settings(before: dict, after: dict) -> dict[str, tuple[Any, Any]]:
     """Return {dotted_key: (before, after)} for every leaf that changed."""
     fb, fa = _flatten(before), _flatten(after)
