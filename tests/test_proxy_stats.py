@@ -246,6 +246,97 @@ async def test_anthropic_streaming_records_usage_and_durations(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
+async def test_anthropic_streaming_injects_include_usage_for_stats(
+    monkeypatch, tmp_path
+):
+    seen_body = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_body.update(json.loads(request.content.decode()))
+        events = [
+            _chat_chunk(content="hi there"),
+            _chat_chunk(finish="stop"),
+        ]
+        if seen_body.get("stream_options", {}).get("include_usage") is True:
+            events.append(_chat_chunk(usage=_USAGE))
+        events.append("[DONE]")
+        return httpx.Response(
+            200,
+            content=_sse(*events),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    app = _make_app(handler, monkeypatch, tmp_path)
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-compatible",
+                "max_tokens": 64,
+                "stream": True,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+        assert response.status_code == 200
+
+        stats = await _get_stats(client)
+
+    assert seen_body["stream_options"] == {"include_usage": True}
+    assert stats["total_prompt_tokens"] == 100
+    assert stats["total_completion_tokens"] == 40
+    assert stats["total_cached_tokens"] == 25
+    assert stats["cache_efficiency"] == 25.0
+    assert stats["avg_prefill_tps"] > 0.0
+    assert stats["avg_generation_tps"] > 0.0
+
+
+@pytest.mark.asyncio
+async def test_anthropic_streaming_retries_when_include_usage_is_rejected(
+    monkeypatch, tmp_path
+):
+    seen_bodies = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        seen_bodies.append(body)
+        if body.get("stream_options", {}).get("include_usage") is True:
+            return httpx.Response(
+                400,
+                json={"error": {"message": "stream_options unsupported"}},
+            )
+        return httpx.Response(
+            200,
+            content=_sse(
+                _chat_chunk(content="hi"),
+                _chat_chunk(finish="stop"),
+                "[DONE]",
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    app = _make_app(handler, monkeypatch, tmp_path)
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-compatible",
+                "max_tokens": 64,
+                "stream": True,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+        assert response.status_code == 200
+        assert "message_stop" in response.text
+
+        stats = await _get_stats(client)
+
+    assert len(seen_bodies) == 2
+    assert seen_bodies[0]["stream_options"] == {"include_usage": True}
+    assert "stream_options" not in seen_bodies[1]
+    assert stats["total_requests"] == 1
+
+
+@pytest.mark.asyncio
 async def test_anthropic_nonstreaming_records_unscaled_usage(monkeypatch, tmp_path):
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

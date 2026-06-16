@@ -10,9 +10,9 @@ from omlx.api.anthropic_models import AnthropicMessage, AnthropicTool, MessagesR
 from omlx.proxy.app import anthropic_to_openai_chat_body, create_app
 from omlx.proxy.backend import OpenAIBackend
 from omlx.proxy.config import ProxyConfig
+from omlx.proxy.llamacpp_compose import load_llamacpp_env_file
 from omlx.proxy.metrics import parse_prometheus_text, select_prometheus_metrics
 from omlx.proxy.scaling import scale_token_count
-from omlx.proxy.llamacpp_compose import load_llamacpp_env_file
 from omlx.proxy.vllm_compose import (
     VllmComposeSettings,
     load_vllm_env_file,
@@ -62,6 +62,102 @@ def test_anthropic_request_maps_to_openai_chat_body():
     assert body["tools"][0]["function"]["name"] == "lookup"
 
 
+def test_anthropic_request_preserves_tool_history_for_proxy():
+    request = MessagesRequest(
+        model="claude-compatible",
+        max_tokens=128,
+        messages=[
+            AnthropicMessage(
+                role="assistant",
+                content=[
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "Read",
+                        "input": {"file_path": "/tmp/a.css"},
+                    }
+                ],
+            ),
+            AnthropicMessage(
+                role="user",
+                content=[
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_1",
+                        "content": "body { color: red; }",
+                    }
+                ],
+            ),
+            AnthropicMessage(role="user", content="continue"),
+        ],
+        tools=[AnthropicTool(**_read_tool_schema())],
+    )
+
+    body = anthropic_to_openai_chat_body(request)
+
+    serialized_messages = json.dumps(body["messages"])
+    assert "[Calling tool:" not in serialized_messages
+    assert body["messages"][0] == {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "toolu_1",
+                "type": "function",
+                "function": {
+                    "name": "Read",
+                    "arguments": '{"file_path": "/tmp/a.css"}',
+                },
+            }
+        ],
+    }
+    assert body["messages"][1] == {
+        "role": "tool",
+        "tool_call_id": "toolu_1",
+        "content": "body { color: red; }",
+    }
+    assert body["messages"][2] == {"role": "user", "content": "continue"}
+
+
+def test_anthropic_request_serializes_empty_tool_args_for_vllm():
+    request = MessagesRequest(
+        model="claude-compatible",
+        max_tokens=128,
+        messages=[
+            AnthropicMessage(
+                role="assistant",
+                content=[
+                    {
+                        "type": "tool_use",
+                        "id": "chatcmpl-tool-92bc0253e16bb5aa",
+                        "name": "EnterPlanMode",
+                        "input": {},
+                    }
+                ],
+            ),
+        ],
+        tools=[
+            AnthropicTool(
+                name="EnterPlanMode",
+                input_schema={"type": "object", "properties": {}},
+            )
+        ],
+    )
+
+    body = anthropic_to_openai_chat_body(request)
+
+    assert body["messages"][0]["tool_calls"] == [
+        {
+            "id": "chatcmpl-tool-92bc0253e16bb5aa",
+            "type": "function",
+            "function": {
+                "name": "EnterPlanMode",
+                "arguments": "{}",
+            },
+        }
+    ]
+
+
 def test_scale_token_count_uses_target_context_ratio():
     config = ProxyConfig(
         backend_url="http://backend/v1",
@@ -71,6 +167,64 @@ def test_scale_token_count_uses_target_context_ratio():
     )
 
     assert scale_token_count(25, config) == 100
+
+
+def _read_tool_schema():
+    return {
+        "name": "Read",
+        "description": "Read a file",
+        "input_schema": {
+            "type": "object",
+            "properties": {"file_path": {"type": "string"}},
+            "required": ["file_path"],
+        },
+    }
+
+
+def _write_tool_schema():
+    return {
+        "name": "Write",
+        "description": "Write a file",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["file_path", "content"],
+        },
+    }
+
+
+def _edit_tool_schema():
+    return {
+        "name": "Edit",
+        "description": "Edit a file",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string"},
+                "old_string": {"type": "string"},
+                "new_string": {"type": "string"},
+                "replace_all": {"type": "boolean"},
+            },
+            "required": ["file_path", "old_string", "new_string"],
+        },
+    }
+
+
+def _anthropic_sse_events(text: str) -> list[dict]:
+    events = []
+    for line in text.splitlines():
+        if not line.startswith("data: "):
+            continue
+        payload = line.removeprefix("data: ")
+        events.append(json.loads(payload))
+    return events
+
+
+def _sse_payload(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
 
 
 @pytest.mark.asyncio
@@ -194,6 +348,176 @@ async def test_anthropic_messages_non_stream_translates_response():
 
 
 @pytest.mark.asyncio
+async def test_anthropic_messages_non_stream_accepts_vllm_reasoning_field():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "model": "gemma",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "answer",
+                            "reasoning": "plan",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "total_tokens": 12,
+                },
+            },
+        )
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "gemma",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    blocks = response.json()["content"]
+    assert blocks[0]["type"] == "thinking"
+    assert blocks[0]["thinking"] == "plan"
+    assert blocks[1] == {"type": "text", "text": "answer"}
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_non_stream_recovers_bracket_tool_call():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        body = json.loads(request.content.decode())
+        assert body["tools"][0]["function"]["name"] == "Read"
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "model": "qwen",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                "[Calling tool: Read({"
+                                '"file_path":"/home/bud/Work/test-omni/css/style.css"'
+                                "})]"
+                            ),
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 4,
+                    "total_tokens": 14,
+                },
+            },
+        )
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "qwen",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "read the css"}],
+                "tools": [_read_tool_schema()],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    text_blocks = [block for block in data["content"] if block["type"] == "text"]
+    tool_use_blocks = [
+        block for block in data["content"] if block["type"] == "tool_use"
+    ]
+    assert all("[Calling tool:" not in block["text"] for block in text_blocks)
+    assert len(tool_use_blocks) == 1
+    assert tool_use_blocks[0]["name"] == "Read"
+    assert tool_use_blocks[0]["input"] == {
+        "file_path": "/home/bud/Work/test-omni/css/style.css"
+    }
+    assert data["stop_reason"] == "tool_use"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_non_stream_does_not_promote_unknown_tool():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "model": "qwen",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                "[Calling tool: Write({"
+                                '"file_path":"/tmp/a.css","content":"x"'
+                                "})]"
+                            ),
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 4,
+                    "total_tokens": 14,
+                },
+            },
+        )
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "qwen",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "read the css"}],
+                "tools": [_read_tool_schema()],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert not [block for block in data["content"] if block["type"] == "tool_use"]
+    assert data["stop_reason"] == "end_turn"
+
+
+@pytest.mark.asyncio
 async def test_anthropic_messages_stream_translates_openai_sse():
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/chat/completions"
@@ -234,6 +558,969 @@ async def test_anthropic_messages_stream_translates_openai_sse():
 
 
 @pytest.mark.asyncio
+async def test_anthropic_messages_stream_accepts_vllm_reasoning_delta():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                _sse_payload(
+                    {
+                        "choices": [
+                            {
+                                "delta": {"reasoning": "plan"},
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "choices": [
+                            {
+                                "delta": {"content": "answer"},
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "choices": [{"delta": {}, "finish_reason": "stop"}],
+                        "usage": {
+                            "prompt_tokens": 4,
+                            "completion_tokens": 2,
+                            "total_tokens": 6,
+                        },
+                    }
+                )
+                + "data: [DONE]\n\n"
+            ),
+        )
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "gemma",
+                "max_tokens": 64,
+                "stream": True,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    events = _anthropic_sse_events(response.text)
+    thinking = "".join(
+        event["delta"]["thinking"]
+        for event in events
+        if event.get("type") == "content_block_delta"
+        and event.get("delta", {}).get("type") == "thinking_delta"
+    )
+    text = "".join(
+        event["delta"]["text"]
+        for event in events
+        if event.get("type") == "content_block_delta"
+        and event.get("delta", {}).get("type") == "text_delta"
+    )
+
+    assert thinking == "plan"
+    assert text == "answer"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_stream_strips_markers_without_tools():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                _sse_payload(
+                    {
+                        "choices": [
+                            {
+                                "delta": {"content": "Visible <|channel>thou"},
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "choices": [
+                            {
+                                "delta": {"content": "ght\nsecret<channel|> text"},
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+                + _sse_payload(
+                    {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+                )
+                + "data: [DONE]\n\n"
+            ),
+        )
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "qwen",
+                "max_tokens": 64,
+                "stream": True,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    events = _anthropic_sse_events(response.text)
+    text = "".join(
+        event["delta"]["text"]
+        for event in events
+        if event.get("type") == "content_block_delta"
+        and event.get("delta", {}).get("type") == "text_delta"
+    )
+
+    assert text == "Visible  text"
+    assert "<|channel>" not in text
+    assert "<channel|>" not in text
+    assert "secret" not in text
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_stream_recovers_bracket_tool_call():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        body = json.loads(request.content.decode())
+        assert body["stream"] is True
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                _sse_payload(
+                    {"choices": [{"delta": {"role": "assistant"}, "finish_reason": None}]}
+                )
+                + _sse_payload(
+                    {
+                        "choices": [
+                            {
+                                "delta": {"content": "[Calling tool:"},
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "content": (
+                                        ' Read({"file_path":"/tmp/a.css"})]'
+                                    )
+                                },
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "choices": [{"delta": {}, "finish_reason": "stop"}],
+                        "usage": {
+                            "prompt_tokens": 4,
+                            "completion_tokens": 2,
+                            "total_tokens": 6,
+                        },
+                    }
+                )
+                + "data: [DONE]\n\n"
+            ),
+        )
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "qwen",
+                "max_tokens": 64,
+                "stream": True,
+                "messages": [{"role": "user", "content": "read the css"}],
+                "tools": [_read_tool_schema()],
+            },
+        )
+
+    assert response.status_code == 200
+    events = _anthropic_sse_events(response.text)
+    text = "".join(
+        event["delta"]["text"]
+        for event in events
+        if event.get("type") == "content_block_delta"
+        and event.get("delta", {}).get("type") == "text_delta"
+    )
+    tool_use_blocks = [
+        event["content_block"]
+        for event in events
+        if event.get("type") == "content_block_start"
+        and event.get("content_block", {}).get("type") == "tool_use"
+    ]
+    tool_json = "".join(
+        event["delta"]["partial_json"]
+        for event in events
+        if event.get("type") == "content_block_delta"
+        and event.get("delta", {}).get("type") == "input_json_delta"
+    )
+    stop_reasons = [
+        event["delta"]["stop_reason"]
+        for event in events
+        if event.get("type") == "message_delta"
+    ]
+
+    assert "[Calling tool:" not in text
+    assert len(tool_use_blocks) == 1
+    assert tool_use_blocks[0]["name"] == "Read"
+    assert json.loads(tool_json) == {"file_path": "/tmp/a.css"}
+    assert stop_reasons == ["tool_use"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_stream_recovers_split_reasoning_content_tool_call():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                _sse_payload(
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "reasoning_content": (
+                                        '[Calling tool: Write({"content":"body"'
+                                    )
+                                },
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "content": ',"file_path":"/tmp/a.css"})]'
+                                },
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "choices": [{"delta": {}, "finish_reason": "stop"}],
+                        "usage": {
+                            "prompt_tokens": 4,
+                            "completion_tokens": 2,
+                            "total_tokens": 6,
+                        },
+                    }
+                )
+                + "data: [DONE]\n\n"
+            ),
+        )
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "qwen",
+                "max_tokens": 64,
+                "stream": True,
+                "messages": [{"role": "user", "content": "write the css"}],
+                "tools": [_write_tool_schema()],
+            },
+        )
+
+    assert response.status_code == 200
+    events = _anthropic_sse_events(response.text)
+    text = "".join(
+        event["delta"]["text"]
+        for event in events
+        if event.get("type") == "content_block_delta"
+        and event.get("delta", {}).get("type") == "text_delta"
+    )
+    tool_use_blocks = [
+        event["content_block"]
+        for event in events
+        if event.get("type") == "content_block_start"
+        and event.get("content_block", {}).get("type") == "tool_use"
+    ]
+    tool_json = "".join(
+        event["delta"]["partial_json"]
+        for event in events
+        if event.get("type") == "content_block_delta"
+        and event.get("delta", {}).get("type") == "input_json_delta"
+    )
+    stop_reasons = [
+        event["delta"]["stop_reason"]
+        for event in events
+        if event.get("type") == "message_delta"
+    ]
+
+    assert text == ""
+    assert len(tool_use_blocks) == 1
+    assert tool_use_blocks[0]["name"] == "Write"
+    assert json.loads(tool_json) == {
+        "content": "body",
+        "file_path": "/tmp/a.css",
+    }
+    assert stop_reasons == ["tool_use"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_stream_preserves_split_reasoning_edit_string():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                _sse_payload(
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "reasoning_content": (
+                                        '[Calling tool: Edit({"file_path":'
+                                        '"js/window-manager.js","old_string":"'
+                                        "const val"
+                                    )
+                                },
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "reasoning_content": (
+                                        'ue = 1;","new_string":"const value = 2;"})]'
+                                    )
+                                },
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "choices": [{"delta": {}, "finish_reason": "stop"}],
+                        "usage": {
+                            "prompt_tokens": 4,
+                            "completion_tokens": 2,
+                            "total_tokens": 6,
+                        },
+                    }
+                )
+                + "data: [DONE]\n\n"
+            ),
+        )
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "qwen",
+                "max_tokens": 64,
+                "stream": True,
+                "messages": [{"role": "user", "content": "edit the js"}],
+                "tools": [_edit_tool_schema()],
+            },
+        )
+
+    assert response.status_code == 200
+    events = _anthropic_sse_events(response.text)
+    tool_json = "".join(
+        event["delta"]["partial_json"]
+        for event in events
+        if event.get("type") == "content_block_delta"
+        and event.get("delta", {}).get("type") == "input_json_delta"
+    )
+
+    assert json.loads(tool_json) == {
+        "file_path": "js/window-manager.js",
+        "old_string": "const value = 1;",
+        "new_string": "const value = 2;",
+    }
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_stream_suppresses_malformed_split_tool_tail():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                _sse_payload(
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "reasoning_content": (
+                                        '[Calling tool: Write({"content":"body"'
+                                    )
+                                },
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "content": '`,file_path: "/tmp/a.css"})]'
+                                },
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "choices": [{"delta": {}, "finish_reason": "stop"}],
+                        "usage": {
+                            "prompt_tokens": 4,
+                            "completion_tokens": 2,
+                            "total_tokens": 6,
+                        },
+                    }
+                )
+                + "data: [DONE]\n\n"
+            ),
+        )
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "qwen",
+                "max_tokens": 64,
+                "stream": True,
+                "messages": [{"role": "user", "content": "write the css"}],
+                "tools": [_write_tool_schema()],
+            },
+        )
+
+    assert response.status_code == 200
+    events = _anthropic_sse_events(response.text)
+    text = "".join(
+        event["delta"]["text"]
+        for event in events
+        if event.get("type") == "content_block_delta"
+        and event.get("delta", {}).get("type") == "text_delta"
+    )
+    tool_use_blocks = [
+        event
+        for event in events
+        if event.get("type") == "content_block_start"
+        and event.get("content_block", {}).get("type") == "tool_use"
+    ]
+    stop_reasons = [
+        event["delta"]["stop_reason"]
+        for event in events
+        if event.get("type") == "message_delta"
+    ]
+
+    assert "file_path" not in text
+    assert "Calling tool" not in text
+    assert tool_use_blocks == []
+    assert stop_reasons == ["end_turn"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_stream_strips_split_gemma_channel_markers():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                _sse_payload(
+                    {
+                        "model": "gemma-4-26B-A4B-it",
+                        "choices": [
+                            {
+                                "delta": {"content": "Plan ready.\n\n<|channel>thou"},
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "model": "gemma-4-26B-A4B-it",
+                        "choices": [
+                            {
+                                "delta": {
+                                    "content": "ght\ninternal notes<channel|> done"
+                                },
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "model": "gemma-4-26B-A4B-it",
+                        "choices": [{"delta": {}, "finish_reason": "stop"}],
+                    }
+                )
+                + "data: [DONE]\n\n"
+            ),
+        )
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "qwen",
+                "max_tokens": 64,
+                "stream": True,
+                "messages": [{"role": "user", "content": "continue"}],
+                "tools": [_read_tool_schema()],
+            },
+        )
+
+    assert response.status_code == 200
+    events = _anthropic_sse_events(response.text)
+    text = "".join(
+        event["delta"]["text"]
+        for event in events
+        if event.get("type") == "content_block_delta"
+        and event.get("delta", {}).get("type") == "text_delta"
+    )
+
+    assert text == "Plan ready.\n\n done"
+    assert "<|channel>" not in text
+    assert "<channel|>" not in text
+    assert "internal notes" not in text
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_stream_recovers_gemma_edit_tool_call():
+    old_string = """#desktop {
+    width: 100%;
+    height: calc(100% - var(--taskbar-height));
+    background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+    background-size: cover;
+    position: relative;
+    overflow: hidden;
+}
+"""
+    new_string = """#desktop {
+    width: 100%;
+    height: calc(100% - var(--taskbar-height));
+    background: #121212;
+    background-size: cover;
+    position: relative;
+    overflow: hidden;
+}
+"""
+    leaked_call = (
+        '<|tool_call>call:Edit{file_path:<|"|>css/style.css<|"|>,'
+        f'new_string:<|"|>{new_string}<|"|>,'
+        f'old_string:<|"|>{old_string}<|"|>,'
+        "replace_all:false}<tool_call|>"
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                _sse_payload(
+                    {
+                        "model": "gemma-4-26B-A4B-it",
+                        "choices": [
+                            {
+                                "delta": {"content": leaked_call[:45]},
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "model": "gemma-4-26B-A4B-it",
+                        "choices": [
+                            {
+                                "delta": {"content": leaked_call[45:]},
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "model": "gemma-4-26B-A4B-it",
+                        "choices": [{"delta": {}, "finish_reason": "stop"}],
+                    }
+                )
+                + "data: [DONE]\n\n"
+            ),
+        )
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "qwen",
+                "max_tokens": 64,
+                "stream": True,
+                "messages": [{"role": "user", "content": "edit the css"}],
+                "tools": [_edit_tool_schema()],
+            },
+        )
+
+    assert response.status_code == 200
+    events = _anthropic_sse_events(response.text)
+    text = "".join(
+        event["delta"]["text"]
+        for event in events
+        if event.get("type") == "content_block_delta"
+        and event.get("delta", {}).get("type") == "text_delta"
+    )
+    tool_use_blocks = [
+        event["content_block"]
+        for event in events
+        if event.get("type") == "content_block_start"
+        and event.get("content_block", {}).get("type") == "tool_use"
+    ]
+    tool_json = "".join(
+        event["delta"]["partial_json"]
+        for event in events
+        if event.get("type") == "content_block_delta"
+        and event.get("delta", {}).get("type") == "input_json_delta"
+    )
+    stop_reasons = [
+        event["delta"]["stop_reason"]
+        for event in events
+        if event.get("type") == "message_delta"
+    ]
+
+    assert text == ""
+    assert len(tool_use_blocks) == 1
+    assert tool_use_blocks[0]["name"] == "Edit"
+    assert json.loads(tool_json) == {
+        "file_path": "css/style.css",
+        "new_string": new_string,
+        "old_string": old_string,
+        "replace_all": False,
+    }
+    assert stop_reasons == ["tool_use"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_stream_drops_unknown_gemma_tool_call():
+    leaked_call = '<|tool_call>call:Unknown{path:<|"|>x<|"|>}<tool_call|>'
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                _sse_payload(
+                    {
+                        "model": "gemma-4-26B-A4B-it",
+                        "choices": [
+                            {
+                                "delta": {"content": leaked_call},
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "model": "gemma-4-26B-A4B-it",
+                        "choices": [{"delta": {}, "finish_reason": "stop"}],
+                    }
+                )
+                + "data: [DONE]\n\n"
+            ),
+        )
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "qwen",
+                "max_tokens": 64,
+                "stream": True,
+                "messages": [{"role": "user", "content": "edit the css"}],
+                "tools": [_edit_tool_schema()],
+            },
+        )
+
+    assert response.status_code == 200
+    events = _anthropic_sse_events(response.text)
+    text = "".join(
+        event["delta"]["text"]
+        for event in events
+        if event.get("type") == "content_block_delta"
+        and event.get("delta", {}).get("type") == "text_delta"
+    )
+    tool_use_blocks = [
+        event
+        for event in events
+        if event.get("type") == "content_block_start"
+        and event.get("content_block", {}).get("type") == "tool_use"
+    ]
+
+    assert text == ""
+    assert "<|tool_call>" not in response.text
+    assert "<tool_call|>" not in response.text
+    assert tool_use_blocks == []
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_stream_translates_backend_tool_deltas():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                _sse_payload(
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "Read",
+                                                "arguments": '{"file',
+                                            },
+                                        }
+                                    ]
+                                },
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "function": {
+                                                "arguments": '_path":"/tmp/a.css"}'
+                                            },
+                                        }
+                                    ]
+                                },
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "choices": [{"delta": {}, "finish_reason": "tool_calls"}],
+                        "usage": {
+                            "prompt_tokens": 4,
+                            "completion_tokens": 2,
+                            "total_tokens": 6,
+                        },
+                    }
+                )
+                + "data: [DONE]\n\n"
+            ),
+        )
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "qwen",
+                "max_tokens": 64,
+                "stream": True,
+                "messages": [{"role": "user", "content": "read the css"}],
+                "tools": [_read_tool_schema()],
+            },
+        )
+
+    assert response.status_code == 200
+    events = _anthropic_sse_events(response.text)
+    tool_use_blocks = [
+        event["content_block"]
+        for event in events
+        if event.get("type") == "content_block_start"
+        and event.get("content_block", {}).get("type") == "tool_use"
+    ]
+    tool_json = "".join(
+        event["delta"]["partial_json"]
+        for event in events
+        if event.get("type") == "content_block_delta"
+        and event.get("delta", {}).get("type") == "input_json_delta"
+    )
+
+    assert len(tool_use_blocks) == 1
+    assert tool_use_blocks[0]["id"] == "call_1"
+    assert tool_use_blocks[0]["name"] == "Read"
+    assert json.loads(tool_json) == {"file_path": "/tmp/a.css"}
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_stream_preserves_literal_bracket_text():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                _sse_payload(
+                    {
+                        "choices": [
+                            {
+                                "delta": {"content": "Heads up: [Calling tool:"},
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "choices": [
+                            {
+                                "delta": {"content": " maybe later]"},
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+                + _sse_payload(
+                    {
+                        "choices": [{"delta": {}, "finish_reason": "stop"}],
+                        "usage": {
+                            "prompt_tokens": 4,
+                            "completion_tokens": 2,
+                            "total_tokens": 6,
+                        },
+                    }
+                )
+                + "data: [DONE]\n\n"
+            ),
+        )
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "qwen",
+                "max_tokens": 64,
+                "stream": True,
+                "messages": [{"role": "user", "content": "heads up"}],
+                "tools": [_read_tool_schema()],
+            },
+        )
+
+    assert response.status_code == 200
+    events = _anthropic_sse_events(response.text)
+    text = "".join(
+        event["delta"]["text"]
+        for event in events
+        if event.get("type") == "content_block_delta"
+        and event.get("delta", {}).get("type") == "text_delta"
+    )
+    tool_use_blocks = [
+        event
+        for event in events
+        if event.get("type") == "content_block_start"
+        and event.get("content_block", {}).get("type") == "tool_use"
+    ]
+
+    assert text == "Heads up: [Calling tool: maybe later]"
+    assert tool_use_blocks == []
+
+
+@pytest.mark.asyncio
 async def test_openai_chat_completions_passthrough():
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/chat/completions"
@@ -256,6 +1543,46 @@ async def test_openai_chat_completions_passthrough():
 
     assert response.status_code == 200
     assert response.json()["model"] == "qwen"
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_completions_passthrough_aliases_vllm_reasoning():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        body = json.loads(request.content.decode())
+        return httpx.Response(
+            200,
+            json={
+                "model": body["model"],
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "done",
+                            "reasoning": "plan",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {},
+            },
+        )
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "gemma", "messages": [], "stream": False},
+        )
+
+    assert response.status_code == 200
+    message = response.json()["choices"][0]["message"]
+    assert message["reasoning"] == "plan"
+    assert message["reasoning_content"] == "plan"
 
 
 @pytest.mark.asyncio
@@ -291,6 +1618,51 @@ async def test_openai_chat_completions_stream_passthrough():
     assert response.status_code == 200
     assert "text/event-stream" in response.headers["content-type"]
     assert "hi" in response.text
+    assert "[DONE]" in response.text
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_completions_stream_aliases_vllm_reasoning():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        body = json.loads(request.content.decode())
+        assert body["stream"] is True
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                _sse_payload(
+                    {
+                        "choices": [
+                            {
+                                "delta": {"reasoning": "plan"},
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+                + "data: [DONE]\n\n"
+            ),
+        )
+
+    app = _app_with_mock_backend(handler)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gemma",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert '"reasoning":"plan"' in response.text
+    assert '"reasoning_content":"plan"' in response.text
     assert "[DONE]" in response.text
 
 

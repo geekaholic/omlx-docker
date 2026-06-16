@@ -3510,6 +3510,7 @@
                 stream.targetMessageId = null;
                 stream._statsRequestId = null;
                 stream._liveFooterStats = null;
+                stream._lastUsage = null;
                 if (stream._domUpdateRaf) {
                     cancelAnimationFrame(stream._domUpdateRaf);
                     stream._domUpdateRaf = null;
@@ -4959,10 +4960,12 @@
                             const delta = choice?.delta;
                             if (choice?.finish_reason) finishReason = choice.finish_reason;
 
-                            // Usage chunk arrives as { choices: [], usage: {...} }
-                            if (data.usage && !delta) {
+                            // Usage may arrive as a usage-only chunk or attached to the final choice.
+                            if (data.usage) {
                                 lastUsage = data.usage;
                                 stream._lastUsage = data.usage;
+                            }
+                            if (data.usage && !delta) {
                                 continue;
                             }
 
@@ -5004,7 +5007,8 @@
                                 }
                             }
 
-                            if (delta?.reasoning_content) {
+                            const reasoningDelta = delta?.reasoning_content ?? delta?.reasoning;
+                            if (reasoningDelta) {
                                 if (!firstToken) {
                                     firstToken = true;
                                     stream._ttft = (Date.now() - stream._statusStart) / 1000;
@@ -5016,8 +5020,8 @@
                                     this.setEngineStatus(context.chatId, { text: 'Thinking' });
                                 }
                                 // Accumulate into live thinking bubble
-                                stream.streamingThinking += delta.reasoning_content;
-                                this.scheduleStreamDisplayFlush(stream, delta.reasoning_content);
+                                stream.streamingThinking += reasoningDelta;
+                                this.scheduleStreamDisplayFlush(stream, reasoningDelta);
                             }
 
                             if (delta?.content) {

@@ -13,6 +13,8 @@ import httpx
 
 from omlx.api.adapters.base import InternalResponse, StreamChunk
 from omlx.api.openai_models import FunctionCall, ToolCall
+from omlx.api.thinking import extract_thinking
+from omlx.api.tool_calling import extract_tool_calls_with_thinking
 from omlx.utils.tokenizer import is_gemma4_model
 
 from .config import ProxyConfig
@@ -175,7 +177,10 @@ def parse_sse_line(line: str) -> dict[str, Any] | str | None:
         raise BackendError(f"Malformed backend SSE data: {data[:120]!r}") from exc
 
 
-def openai_response_to_internal(data: dict[str, Any]) -> InternalResponse:
+def openai_response_to_internal(
+    data: dict[str, Any],
+    tools: list[dict[str, Any]] | None = None,
+) -> InternalResponse:
     choices = data.get("choices") or []
     if not choices:
         raise BackendError("Backend response did not include choices")
@@ -187,8 +192,26 @@ def openai_response_to_internal(data: dict[str, Any]) -> InternalResponse:
 
     tool_calls = _coerce_tool_calls(message.get("tool_calls"))
     raw_content = message.get("content") or ""
+    reasoning = message.get("reasoning_content")
+    if reasoning is None:
+        reasoning = message.get("reasoning")
+    text = strip_markers(raw_content)
     # Recover a tool call vLLM left in content (Gemma-4, when it didn't already
     # produce a structured one); otherwise just strip protocol markers.
+    if not tool_calls and tools:
+        recovered_text, recovered_reasoning, recovered_calls = recover_text_tool_calls(
+            raw_content,
+            reasoning_content=reasoning,
+            tools=tools,
+        )
+        if recovered_calls:
+            text = recovered_text
+            reasoning = recovered_reasoning
+            tool_calls = recovered_calls
+        elif recovered_reasoning:
+            text = recovered_text
+            reasoning = recovered_reasoning
+
     if not tool_calls and is_gemma4_model(str(data.get("model") or "")):
         text, recovered = recover_tool_calls(raw_content)
         if recovered:
@@ -200,9 +223,6 @@ def openai_response_to_internal(data: dict[str, Any]) -> InternalResponse:
                 )
                 for rc in recovered
             ]
-    else:
-        text = strip_markers(raw_content)
-    reasoning = message.get("reasoning_content")
     if reasoning and not text:
         text = ""
 
@@ -232,7 +252,9 @@ def openai_chunk_to_stream_chunk(
 
     return StreamChunk(
         text=delta.get("content") or "",
-        reasoning_content=delta.get("reasoning_content"),
+        reasoning_content=delta.get("reasoning_content")
+        if delta.get("reasoning_content") is not None
+        else delta.get("reasoning"),
         tool_call_delta=delta.get("tool_calls"),
         finish_reason=choice.get("finish_reason"),
         is_first=is_first,
@@ -241,6 +263,131 @@ def openai_chunk_to_stream_chunk(
         completion_tokens=int(usage.get("completion_tokens") or 0),
         cached_tokens=int(prompt_details.get("cached_tokens") or 0),
     )
+
+
+def recover_text_tool_calls(
+    text: str,
+    *,
+    reasoning_content: str | None = None,
+    tools: list[dict[str, Any]] | None = None,
+) -> tuple[str, str | None, list[ToolCall] | None]:
+    """Recover structured tool calls from text-formatted model output.
+
+    Some local backends emit the conversation-history bracket form, e.g.
+    ``[Calling tool: Read({...})]``, as ordinary assistant text.  Claude Code
+    needs Anthropic ``tool_use`` blocks instead, so the proxy promotes these
+    envelopes only when they match a tool from the request.
+    """
+    thinking_content, regular_content = extract_thinking(text or "")
+    thinking_parts = [part for part in (reasoning_content, thinking_content) if part]
+    combined_thinking = "\n".join(thinking_parts)
+    extraction = extract_tool_calls_with_thinking(
+        combined_thinking,
+        regular_content,
+        tokenizer=None,
+        tools=tools,
+    )
+    tool_calls = filter_tool_calls_by_tools(extraction.tool_calls, tools)
+    if not tool_calls:
+        split_calls = _recover_split_bracket_tool_calls(
+            combined_thinking,
+            regular_content,
+            tools,
+        )
+        if split_calls:
+            return "", None, split_calls
+        if _has_unresolved_bracket_tool_prefix(
+            combined_thinking
+        ) and _looks_like_bracket_tool_tail(regular_content):
+            return "", None, None
+    return (
+        extraction.cleaned_text,
+        extraction.cleaned_thinking if extraction.cleaned_thinking else None,
+        tool_calls,
+    )
+
+
+def _recover_split_bracket_tool_calls(
+    thinking_content: str,
+    regular_content: str,
+    tools: list[dict[str, Any]] | None,
+) -> list[ToolCall] | None:
+    if not thinking_content or not regular_content:
+        return None
+    if not _has_unresolved_bracket_tool_prefix(thinking_content):
+        return None
+
+    extraction = extract_tool_calls_with_thinking(
+        "",
+        f"{thinking_content}{regular_content}",
+        tokenizer=None,
+        tools=tools,
+    )
+    return filter_tool_calls_by_tools(extraction.tool_calls, tools)
+
+
+def _has_unresolved_bracket_tool_prefix(text: str) -> bool:
+    for prefix in ("[Calling tool:", "[Tool call:"):
+        idx = text.rfind(prefix)
+        if idx >= 0 and "]" not in text[idx:]:
+            return True
+    return False
+
+
+def _looks_like_bracket_tool_tail(text: str) -> bool:
+    tail = (text or "").lstrip()
+    return bool(tail and "]" in tail and (")]" in tail or "}]" in tail))
+
+
+def coalesce_tool_call_deltas(deltas: list[Any]) -> list[ToolCall] | None:
+    """Merge OpenAI streaming ``delta.tool_calls`` fragments."""
+    if not deltas:
+        return None
+
+    merged: dict[int, dict[str, Any]] = {}
+    fallback_index = 0
+    for delta in deltas:
+        if not isinstance(delta, dict):
+            continue
+        raw_index = delta.get("index")
+        try:
+            index = int(raw_index)
+        except (TypeError, ValueError):
+            index = fallback_index
+            fallback_index += 1
+
+        current = merged.setdefault(
+            index,
+            {"id": "", "type": "function", "name": "", "arguments": ""},
+        )
+        if delta.get("id"):
+            current["id"] = delta["id"]
+        if delta.get("type"):
+            current["type"] = delta["type"]
+
+        function = delta.get("function") or {}
+        if isinstance(function, dict):
+            if function.get("name"):
+                current["name"] = function["name"]
+            if function.get("arguments"):
+                current["arguments"] += function["arguments"]
+
+    result: list[ToolCall] = []
+    for index in sorted(merged):
+        item = merged[index]
+        if not item["name"]:
+            continue
+        result.append(
+            ToolCall(
+                id=item["id"] or f"call_{uuid.uuid4().hex[:8]}",
+                type=item["type"] or "function",
+                function=FunctionCall(
+                    name=item["name"],
+                    arguments=item["arguments"] or "{}",
+                ),
+            )
+        )
+    return result or None
 
 
 def _coerce_tool_calls(value: Any) -> list[ToolCall] | None:
@@ -265,3 +412,64 @@ def _coerce_tool_calls(value: Any) -> list[ToolCall] | None:
             )
         )
     return result or None
+
+
+def filter_tool_calls_by_tools(
+    tool_calls: list[ToolCall] | None,
+    tools: list[dict[str, Any]] | None,
+) -> list[ToolCall] | None:
+    if not tool_calls:
+        return None
+    if tools is None:
+        return tool_calls
+
+    tools_by_name = {
+        function.get("name"): tool
+        for tool in tools
+        if isinstance(tool, dict)
+        and isinstance(function := tool.get("function"), dict)
+        and function.get("name")
+    }
+    filtered = [
+        tc
+        for tc in tool_calls
+        if (tool := tools_by_name.get(tc.function.name))
+        and _tool_call_matches_requested_tool(tc, tool)
+    ]
+    return filtered or None
+
+
+def _tool_call_matches_requested_tool(
+    tool_call: ToolCall,
+    tool: dict[str, Any],
+) -> bool:
+    try:
+        arguments = json.loads(tool_call.function.arguments or "{}")
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return False
+    if not isinstance(arguments, dict):
+        return False
+
+    function = tool.get("function") if isinstance(tool, dict) else None
+    parameters = function.get("parameters") if isinstance(function, dict) else None
+    if not isinstance(parameters, dict):
+        return set(arguments) != {"raw"}
+
+    properties = parameters.get("properties")
+    if not isinstance(properties, dict):
+        properties = {}
+
+    if set(arguments) == {"raw"} and "raw" not in properties:
+        return False
+
+    required = parameters.get("required")
+    if isinstance(required, list):
+        missing = [
+            name
+            for name in required
+            if isinstance(name, str) and name not in arguments
+        ]
+        if missing:
+            return False
+
+    return True

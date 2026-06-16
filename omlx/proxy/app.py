@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import time
@@ -23,8 +22,6 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
 
 from omlx._version import __version__
-from omlx.api.adapters.anthropic import AnthropicAdapter
-from omlx.api.adapters.base import StreamChunk
 from omlx.api.anthropic_models import (
     MessagesRequest,
     TokenCountRequest,
@@ -34,25 +31,41 @@ from omlx.api.anthropic_utils import (
     convert_anthropic_to_internal,
     convert_anthropic_tools_to_internal,
     convert_internal_to_anthropic_response,
+    create_content_block_start_event,
+    create_content_block_stop_event,
+    create_error_event,
+    create_input_json_delta_event,
+    create_message_delta_event,
+    create_message_start_event,
+    create_message_stop_event,
+    create_text_delta_event,
+    create_thinking_delta_event,
+    map_finish_reason_to_stop_reason,
     request_has_cache_control,
 )
+from omlx.api.openai_models import FunctionCall, ToolCall
 from omlx.server_metrics import ServerMetrics
+from omlx.utils.tokenizer import is_gemma4_model
 
+from .admin import configure_admin
 from .backend import (
     BackendError,
     OpenAIBackend,
-    openai_chunk_to_stream_chunk,
+    coalesce_tool_call_deltas,
+    filter_tool_calls_by_tools,
     openai_response_to_internal,
+    parse_sse_line,
+    recover_text_tool_calls,
 )
-from .admin import configure_admin
 from .config import ProxyConfig
 from .metrics import backend_context_limit
+from .protocol_markers import Gemma4StreamProcessor, MarkerStripper, strip_markers
 from .responses_adapter import (
     non_streaming_responses_response,
     responses_to_chat_body,
     stream_responses_events,
 )
-from .scaling import anthropic_keepalive_frame, scale_token_count
+from .scaling import scale_token_count
 from .stats import (
     inject_include_usage,
     model_from_body,
@@ -247,7 +260,10 @@ def create_app(
                 openai_body,
                 _backend_authorization(request, backend.config),
             )
-            internal = openai_response_to_internal(data)
+            internal = openai_response_to_internal(
+                data,
+                tools=openai_body.get("tools"),
+            )
             # Stats record the real backend token counts, before any
             # Claude Code context scaling is applied to the client reply.
             record_chat_response(
@@ -366,7 +382,11 @@ def anthropic_to_openai_chat_body(request: MessagesRequest) -> dict[str, Any]:
         request,
         preserve_images=True,
         native_reasoning_content=True,
+        force_native_tool_calling=bool(request.tools),
     )
+    for message in messages:
+        message.pop("_preserve_role_boundary", None)
+    _normalize_openai_tool_call_history(messages)
 
     body: dict[str, Any] = {
         "model": request.model,
@@ -401,6 +421,109 @@ def anthropic_to_openai_chat_body(request: MessagesRequest) -> dict[str, Any]:
     return body
 
 
+def _normalize_openai_tool_call_history(messages: list[dict[str, Any]]) -> None:
+    """Normalize structured tool history to OpenAI Chat Completions wire shape."""
+    for message in messages:
+        if message.get("role") != "assistant":
+            continue
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+
+        normalized_tool_calls: list[dict[str, Any]] = []
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+
+            function = tool_call.get("function")
+            if not isinstance(function, dict):
+                continue
+
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                arguments_json = arguments or "{}"
+            elif arguments is None:
+                arguments_json = "{}"
+            else:
+                arguments_json = json.dumps(arguments, ensure_ascii=False)
+
+            normalized = dict(tool_call)
+            normalized["type"] = normalized.get("type") or "function"
+            normalized["function"] = {
+                **function,
+                "arguments": arguments_json,
+            }
+            normalized_tool_calls.append(normalized)
+
+        if normalized_tool_calls:
+            message["tool_calls"] = normalized_tool_calls
+        else:
+            message.pop("tool_calls", None)
+
+
+def _gemma_recovery_enabled(model: str, text: str) -> bool:
+    return (
+        is_gemma4_model(model)
+        or "<|tool_call>" in text
+        or "<tool_call|>" in text
+        or '<|"|>' in text
+    )
+
+
+def _clean_protocol_text_and_calls(
+    text: str,
+    *,
+    model: str,
+) -> tuple[str, list[ToolCall] | None]:
+    processor = Gemma4StreamProcessor(
+        enable_tool_recovery=_gemma_recovery_enabled(model, text)
+    )
+    events = processor.feed(text) + processor.flush()
+    cleaned_text = "".join(value for kind, value in events if kind == "text")
+    tool_calls: list[ToolCall] = []
+    for kind, value in events:
+        if kind != "tool_call" or not isinstance(value, dict):
+            continue
+        name = value.get("name")
+        arguments = value.get("arguments")
+        if not isinstance(name, str) or not name:
+            continue
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments or {}, ensure_ascii=False)
+        try:
+            tool_calls.append(
+                ToolCall(
+                    id=f"call_{uuid.uuid4().hex[:8]}",
+                    type="function",
+                    function=FunctionCall(name=name, arguments=arguments or "{}"),
+                )
+            )
+        except ValueError:
+            continue
+    return cleaned_text, tool_calls or None
+
+
+def _body_with_stream_usage(body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    stream_options = body.get("stream_options")
+    if (
+        isinstance(stream_options, dict)
+        and stream_options.get("include_usage") is True
+    ):
+        return body, False
+
+    updated = dict(body)
+    updated_options = dict(stream_options) if isinstance(stream_options, dict) else {}
+    updated_options["include_usage"] = True
+    updated["stream_options"] = updated_options
+    return updated, True
+
+
+def _should_retry_without_stream_usage(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    return status_code in {400, 422}
+
+
 async def _stream_anthropic_response(
     backend: OpenAIBackend,
     config: ProxyConfig,
@@ -409,68 +532,247 @@ async def _stream_anthropic_response(
     inbound_authorization: str | None,
     metrics: ServerMetrics | None = None,
 ) -> AsyncIterator[str]:
-    adapter = AnthropicAdapter()
-    first = True
-    sent_last = False
     last_usage: tuple[int, int, int] = (0, 0, 0)
-    keepalive = anthropic_keepalive_frame(config)
     request_start = time.monotonic()
     first_chunk_at: float | None = None
     seen_model = ""
+    finish_reason: str | None = None
+    raw_text_parts: list[str] = []
+    raw_reasoning_parts: list[str] = []
+    tool_call_deltas: list[Any] = []
+    tools = openai_body.get("tools")
+    if not isinstance(tools, list):
+        tools = None
+
+    text_marker_filter = MarkerStripper() if not tools else None
+    thinking_marker_filter = MarkerStripper() if not tools else None
+    uses_cache_control = request_has_cache_control(request)
+
+    message_id = f"msg_{uuid.uuid4().hex[:24]}"
+    yield create_message_start_event(message_id, request.model)
+
+    next_block_index = 0
+    open_block_type: str | None = None
+    open_block_index: int | None = None
+    emitted_content_block = False
+
+    def start_block(block_type: str) -> list[str]:
+        nonlocal next_block_index
+        nonlocal open_block_type
+        nonlocal open_block_index
+        nonlocal emitted_content_block
+
+        events: list[str] = []
+        if open_block_type == block_type:
+            return events
+        if open_block_type is not None:
+            events.append(create_content_block_stop_event(open_block_index or 0))
+            next_block_index += 1
+            open_block_type = None
+            open_block_index = None
+
+        open_block_type = block_type
+        open_block_index = next_block_index
+        emitted_content_block = True
+        events.append(create_content_block_start_event(open_block_index, block_type))
+        return events
+
+    def close_open_block() -> list[str]:
+        nonlocal next_block_index
+        nonlocal open_block_type
+        nonlocal open_block_index
+
+        if open_block_type is None:
+            return []
+        events = [create_content_block_stop_event(open_block_index or 0)]
+        next_block_index += 1
+        open_block_type = None
+        open_block_index = None
+        return events
 
     try:
         try:
-            async for item in backend.stream_chat_completion(
-                openai_body,
-                inbound_authorization,
-            ):
-                if item == "[DONE]":
-                    break
-                if not isinstance(item, dict):
-                    continue
-                if first_chunk_at is None and item.get("choices"):
-                    first_chunk_at = time.monotonic()
-                if item.get("model"):
-                    seen_model = str(item["model"])
+            stream_body, injected_stream_usage = _body_with_stream_usage(openai_body)
+            retried_without_stream_usage = False
 
-                chunk = openai_chunk_to_stream_chunk(item, is_first=first)
-                first = False
-                if (
-                    chunk.prompt_tokens
-                    or chunk.completion_tokens
-                    or chunk.cached_tokens
-                ):
-                    last_usage = (
-                        chunk.prompt_tokens,
-                        chunk.completion_tokens,
-                        chunk.cached_tokens,
+            while True:
+                try:
+                    stream = backend.stream_chat_completion(
+                        stream_body,
+                        inbound_authorization,
                     )
-                if chunk.is_last:
-                    chunk.prompt_tokens = scale_token_count(last_usage[0], config)
-                    chunk.completion_tokens = scale_token_count(last_usage[1], config)
-                    chunk.cached_tokens = scale_token_count(last_usage[2], config)
-                    sent_last = True
-                formatted = adapter.format_stream_chunk(chunk, request)
-                if formatted:
-                    yield formatted
-                elif keepalive:
-                    await asyncio.sleep(0)
+                    async for item in stream:
+                        if item == "[DONE]":
+                            break
+                        if not isinstance(item, dict):
+                            continue
+                        if first_chunk_at is None and item.get("choices"):
+                            first_chunk_at = time.monotonic()
+                        if item.get("model"):
+                            seen_model = str(item["model"])
 
-            if not sent_last:
-                prompt, completion, cached = last_usage
-                yield adapter.format_stream_chunk(
-                    StreamChunk(
-                        is_first=first,
-                        is_last=True,
-                        finish_reason="stop",
-                        prompt_tokens=scale_token_count(prompt, config),
-                        completion_tokens=scale_token_count(completion, config),
-                        cached_tokens=scale_token_count(cached, config),
-                    ),
-                    request,
-                )
+                        usage = item.get("usage") or {}
+                        prompt_details = usage.get("prompt_tokens_details") or {}
+                        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+                        completion_tokens = int(usage.get("completion_tokens") or 0)
+                        cached_tokens = int(prompt_details.get("cached_tokens") or 0)
+                        if prompt_tokens or completion_tokens or cached_tokens:
+                            last_usage = (
+                                prompt_tokens,
+                                completion_tokens,
+                                cached_tokens,
+                            )
+
+                        choices = item.get("choices") or []
+                        if not choices:
+                            continue
+                        choice = choices[0] or {}
+                        delta = choice.get("delta") or {}
+                        if choice.get("finish_reason"):
+                            finish_reason = str(choice["finish_reason"])
+
+                        reasoning_delta = (
+                            delta.get("reasoning_content")
+                            if delta.get("reasoning_content") is not None
+                            else delta.get("reasoning")
+                        ) or ""
+                        if reasoning_delta:
+                            raw_reasoning_parts.append(reasoning_delta)
+                            if not tools:
+                                if thinking_marker_filter:
+                                    reasoning_delta = thinking_marker_filter.feed(
+                                        reasoning_delta
+                                    )
+                                if reasoning_delta:
+                                    for event in start_block("thinking"):
+                                        yield event
+                                    yield create_thinking_delta_event(
+                                        open_block_index or 0,
+                                        reasoning_delta,
+                                    )
+
+                        text_delta = delta.get("content") or ""
+                        if text_delta:
+                            raw_text_parts.append(text_delta)
+                            if not tools:
+                                if text_marker_filter:
+                                    text_delta = text_marker_filter.feed(text_delta)
+                                if text_delta:
+                                    for event in start_block("text"):
+                                        yield event
+                                    yield create_text_delta_event(
+                                        open_block_index or 0,
+                                        text_delta,
+                                    )
+
+                        delta_tool_calls = delta.get("tool_calls")
+                        if isinstance(delta_tool_calls, list):
+                            tool_call_deltas.extend(delta_tool_calls)
+                    break
+                except Exception as exc:
+                    if (
+                        injected_stream_usage
+                        and not retried_without_stream_usage
+                        and first_chunk_at is None
+                        and last_usage == (0, 0, 0)
+                        and not raw_text_parts
+                        and not raw_reasoning_parts
+                        and not tool_call_deltas
+                        and _should_retry_without_stream_usage(exc)
+                    ):
+                        retried_without_stream_usage = True
+                        stream_body = openai_body
+                        continue
+                    raise
+
         except Exception as exc:
-            yield adapter.format_error_event(str(exc))
+            yield create_error_event("api_error", str(exc))
+            yield create_message_stop_event()
+            return
+
+        tool_calls = coalesce_tool_call_deltas(tool_call_deltas)
+        if tools:
+            raw_text = "".join(raw_text_parts)
+            protocol_model = seen_model or str(openai_body.get("model") or "")
+            protocol_text, protocol_tool_calls = _clean_protocol_text_and_calls(
+                raw_text,
+                model=protocol_model,
+            )
+            protocol_tool_calls = filter_tool_calls_by_tools(protocol_tool_calls, tools)
+            protocol_reasoning = strip_markers("".join(raw_reasoning_parts))
+            cleaned_text, cleaned_reasoning, recovered_tool_calls = (
+                recover_text_tool_calls(
+                    protocol_text,
+                    reasoning_content=protocol_reasoning or None,
+                    tools=tools,
+                )
+            )
+            if not tool_calls:
+                tool_calls = protocol_tool_calls or recovered_tool_calls
+            if cleaned_reasoning:
+                for event in start_block("thinking"):
+                    yield event
+                yield create_thinking_delta_event(
+                    open_block_index or 0,
+                    cleaned_reasoning,
+                )
+            if cleaned_text:
+                for event in start_block("text"):
+                    yield event
+                yield create_text_delta_event(open_block_index or 0, cleaned_text)
+        else:
+            if thinking_marker_filter:
+                remaining_thinking = thinking_marker_filter.flush()
+                if remaining_thinking:
+                    for event in start_block("thinking"):
+                        yield event
+                    yield create_thinking_delta_event(
+                        open_block_index or 0,
+                        remaining_thinking,
+                    )
+            if text_marker_filter:
+                remaining_text = text_marker_filter.flush()
+                if remaining_text:
+                    for event in start_block("text"):
+                        yield event
+                    yield create_text_delta_event(open_block_index or 0, remaining_text)
+
+        for event in close_open_block():
+            yield event
+
+        if tool_calls:
+            for tc in tool_calls:
+                index = next_block_index
+                yield create_content_block_start_event(
+                    index,
+                    "tool_use",
+                    id=tc.id,
+                    name=tc.function.name,
+                )
+                yield create_input_json_delta_event(
+                    index,
+                    _tool_call_arguments_json(tc),
+                )
+                yield create_content_block_stop_event(index)
+                next_block_index += 1
+        elif not emitted_content_block:
+            index = next_block_index
+            yield create_content_block_start_event(index, "text")
+            yield create_content_block_stop_event(index)
+            next_block_index += 1
+
+        prompt, completion, cached = last_usage
+        yield create_message_delta_event(
+            stop_reason=map_finish_reason_to_stop_reason(
+                finish_reason or "stop",
+                bool(tool_calls),
+            ),
+            output_tokens=scale_token_count(completion, config),
+            input_tokens=scale_token_count(prompt, config),
+            cached_tokens=scale_token_count(cached, config),
+            request_uses_cache_control=uses_cache_control,
+        )
+        yield create_message_stop_event()
     finally:
         end = time.monotonic()
         prefill_duration = 0.0
@@ -487,6 +789,22 @@ async def _stream_anthropic_response(
             prefill_duration=prefill_duration,
             generation_duration=generation_duration,
         )
+
+
+def _tool_call_arguments_json(tool_call: ToolCall) -> str:
+    raw_arguments = getattr(tool_call.function, "arguments", "{}") or "{}"
+    if isinstance(raw_arguments, str):
+        try:
+            arguments = json.loads(raw_arguments)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            arguments = {}
+    elif isinstance(raw_arguments, dict):
+        arguments = raw_arguments
+    else:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        arguments = {}
+    return json.dumps(arguments, ensure_ascii=False)
 
 
 def apply_proxy_request_defaults(
@@ -728,6 +1046,8 @@ async def _passthrough_backend(
                 await response.aclose()
 
         stream: AsyncIterator[bytes] = iterator()
+        if path == "chat/completions" and response.status_code < 400:
+            stream = _normalize_openai_reasoning_stream(stream)
         if track_stats and response.status_code < 400:
             stream = track_usage_stream(
                 stream,
@@ -758,11 +1078,77 @@ async def _passthrough_backend(
         except Exception:
             data = None
         record_chat_response(metrics, data, fallback_model=model_from_body(body))
+    content = response.content
+    if path == "chat/completions" and response.status_code < 400:
+        content = _normalize_openai_reasoning_body(content)
     return Response(
-        content=response.content,
+        content=content,
         status_code=response.status_code,
         media_type=response.headers.get("content-type", "application/json"),
     )
+
+
+def _add_reasoning_content_aliases(payload: dict[str, Any]) -> bool:
+    changed = False
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return False
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        for key in ("message", "delta"):
+            part = choice.get(key)
+            if not isinstance(part, dict):
+                continue
+            if (
+                "reasoning_content" in part
+                or "reasoning" not in part
+                or part["reasoning"] is None
+            ):
+                continue
+            part["reasoning_content"] = part["reasoning"]
+            changed = True
+    return changed
+
+
+def _normalize_openai_reasoning_body(content: bytes) -> bytes:
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except Exception:
+        return content
+    if not isinstance(payload, dict):
+        return content
+    if not _add_reasoning_content_aliases(payload):
+        return content
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
+
+
+async def _normalize_openai_reasoning_stream(
+    stream: AsyncIterator[bytes],
+) -> AsyncIterator[bytes]:
+    buffer = b""
+    async for raw in stream:
+        buffer += raw
+        out = b""
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            text = line.decode("utf-8", errors="replace")
+            try:
+                parsed = parse_sse_line(text)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict) and _add_reasoning_content_aliases(parsed):
+                line = (
+                    "data: "
+                    + json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+                ).encode("utf-8")
+            out += line + b"\n"
+        if out:
+            yield out
+    if buffer:
+        yield buffer
 
 
 def _backend_headers(request: Request, backend: OpenAIBackend) -> dict[str, str]:
