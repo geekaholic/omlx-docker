@@ -1699,10 +1699,14 @@ def _qwen_config(snapshot):
     )
 
 
-def test_serve_auto_util_is_demand_sized_for_small_model(tmp_path):
+def test_serve_auto_util_is_demand_sized_for_small_model(tmp_path, monkeypatch):
     _make_cached_model(tmp_path, "org/small", 4 * _GIB)
     snap = next((tmp_path / "hub").glob("models--org--small/snapshots/*"))
     _qwen_config(snap)
+    monkeypatch.delenv("OMLX_HOST_MEMORY_RESERVE_GB", raising=False)
+    monkeypatch.setattr(
+        omni_cli, "host_memory_info", lambda *a, **k: {"total_bytes": 122 * _GIB}
+    )
     compose_file = tmp_path / "docker-compose.vllm.yml"
     env_file = compose_file.with_suffix(".env")
 
