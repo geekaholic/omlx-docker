@@ -346,6 +346,51 @@ def serve_command(args):
             sock.close()
 
 
+def proxy_command(args):
+    """Start the MLX-free proxy for a remote OpenAI-compatible backend."""
+    import os
+    import sys
+
+    import uvicorn
+
+    from .proxy.app import create_app
+    from .proxy.config import ProxyConfig
+
+    backend_url = args.backend_url or os.getenv("OMLX_BACKEND_URL")
+    if not backend_url:
+        print("Configuration error: --backend-url or OMLX_BACKEND_URL is required")
+        sys.exit(1)
+
+    config = ProxyConfig(
+        backend_url=backend_url,
+        backend_api_key=args.backend_api_key or os.getenv("OMLX_BACKEND_API_KEY") or None,
+        proxy_api_key=(
+            args.api_key
+            or os.getenv("OMLX_PROXY_API_KEY")
+            or os.getenv("OMLX_API_KEY")
+            or None
+        ),
+        host=args.host or os.getenv("OMLX_PROXY_HOST", "0.0.0.0"),
+        port=args.port or int(os.getenv("OMLX_PROXY_PORT", "8080")),
+        context_scaling_enabled=bool(args.context_scaling),
+        target_context_size=args.target_context_size,
+        actual_context_size=args.actual_context_size,
+        sse_keepalive_mode=args.sse_keepalive_mode,
+    )
+
+    print("\033[33moMLX Proxy - remote inference gateway\033[0m")
+    print(f"\033[33m├─ Backend: {config.normalized_backend_url}\033[0m")
+    print(f"\033[33m└─ Listening: http://{config.host}:{config.port}\033[0m")
+    print()
+
+    uvicorn.run(
+        create_app(config),
+        host=config.host,
+        port=config.port,
+        log_level="info",
+    )
+
+
 def launch_command(args, extra_args: list[str] | None = None):
     """Launch an external tool integrated with oMLX.
 
@@ -970,6 +1015,76 @@ Example directory structure:
         help="API key for authentication (optional)",
     )
 
+    # Proxy command
+    proxy_parser = subparsers.add_parser(
+        "proxy",
+        help="Start MLX-free proxy for a remote OpenAI-compatible backend",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="""
+Start a lightweight oMLX gateway that translates Anthropic /v1/messages and
+passes OpenAI-compatible requests to a remote backend such as vLLM or
+llama.cpp.
+
+Examples:
+  omlx proxy --backend-url http://localhost:8000/v1 --port 8080
+  ANTHROPIC_BASE_URL=http://localhost:8080 omlx proxy --backend-url http://vllm:8000/v1
+""",
+    )
+    proxy_parser.add_argument(
+        "--backend-url",
+        type=str,
+        default=None,
+        help="OpenAI-compatible backend URL including /v1 (e.g. http://vllm:8000/v1)",
+    )
+    proxy_parser.add_argument(
+        "--backend-api-key",
+        type=str,
+        default=None,
+        help="API key for the backend, if required",
+    )
+    proxy_parser.add_argument(
+        "--host",
+        type=str,
+        default=None,
+        help="Host to bind (default: 0.0.0.0)",
+    )
+    proxy_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Port to bind (default: 8080)",
+    )
+    proxy_parser.add_argument(
+        "--api-key",
+        type=str,
+        default=None,
+        help="API key required by the proxy, independent of backend auth",
+    )
+    proxy_parser.add_argument(
+        "--context-scaling",
+        action="store_true",
+        help="Scale Anthropic token usage for Claude Code auto-compact behavior",
+    )
+    proxy_parser.add_argument(
+        "--target-context-size",
+        type=int,
+        default=200000,
+        help="Target Anthropic context size for usage scaling (default: 200000)",
+    )
+    proxy_parser.add_argument(
+        "--actual-context-size",
+        type=int,
+        default=32768,
+        help="Actual backend model context size for usage scaling (default: 32768)",
+    )
+    proxy_parser.add_argument(
+        "--sse-keepalive-mode",
+        type=str,
+        choices=["ping", "comment", "off"],
+        default="ping",
+        help="Anthropic SSE keepalive mode for the proxy (default: ping)",
+    )
+
     # Launch command
     launch_parser = subparsers.add_parser(
         "launch",
@@ -1060,6 +1175,8 @@ Example directory structure:
             parser.error(f"unrecognized arguments: {' '.join(extra_args)}")
         if args.command == "serve":
             serve_command(args)
+        elif args.command == "proxy":
+            proxy_command(args)
         elif args.command in {"start", "stop", "restart"}:
             sys.exit(lifecycle_command(args))
         elif args.command == "diagnose":

@@ -3,11 +3,11 @@
             <!-- Logo -->
             <div class="flex items-center gap-2">
                 <a href="/admin/dashboard" class="flex items-center gap-2">
-                    <img x-show="activeTheme === 'light'" src="/admin/static/navbar-logo-light.svg" alt="oMLX" class="w-9 h-9">
-                    <img x-show="activeTheme === 'dark'" src="/admin/static/navbar-logo-dark.svg" alt="oMLX" class="w-9 h-9" x-cloak>
+                    <img x-show="activeTheme === 'light'" src="/admin/static/navbar-logo-light.svg" alt="oMNI" class="w-9 h-9">
+                    <img x-show="activeTheme === 'dark'" src="/admin/static/navbar-logo-dark.svg" alt="oMNI" class="w-9 h-9" x-cloak>
                 </a>
                 <div class="flex flex-col gap-0">
-                    <a href="/admin/dashboard" class="font-bold tracking-tight text-xl leading-none">oMLX</a>
+                    <a href="/admin/dashboard" class="font-bold tracking-tight text-xl leading-none">oMNI</a>
                     <a :href="updateAvailable && releaseUrl ? releaseUrl : 'https://github.com/jundot/omlx'" target="_blank"
                        class="relative text-[10px] text-neutral-500 dark:text-neutral-400 leading-none hover:text-neutral-700 dark:hover:text-neutral-300"
                        @mouseenter="versionHover = true" @mouseleave="versionHover = false">
@@ -81,6 +81,8 @@
                             {{ t('navbar.dropdown.manager') }}
                         </button>
                         <button
+                            x-show="!proxyMode"
+                            x-cloak
                             @click="setModelsTab('downloader'); modelsDropdown = false;"
                             class="w-full px-4 py-2 text-left text-sm font-medium transition-colors duration-150 flex items-center gap-2 rounded-lg mx-auto"
                             :class="mainTab === 'models' && modelsTab === 'downloader'
@@ -91,6 +93,8 @@
                             {{ t('navbar.dropdown.downloader') }}
                         </button>
                         <button
+                            x-show="!proxyMode"
+                            x-cloak
                             @click="setModelsTab('quantizer'); modelsDropdown = false;"
                             class="w-full px-4 py-2 text-left text-sm font-medium transition-colors duration-150 flex items-center gap-2 rounded-lg mx-auto"
                             :class="mainTab === 'models' && modelsTab === 'quantizer'
@@ -101,6 +105,8 @@
                             {{ t('navbar.dropdown.quantizer') }}
                         </button>
                         <button
+                            x-show="!proxyMode"
+                            x-cloak
                             @click="setModelsTab('uploader'); modelsDropdown = false;"
                             class="w-full px-4 py-2 text-left text-sm font-medium transition-colors duration-150 flex items-center gap-2 rounded-lg mx-auto"
                             :class="mainTab === 'models' && modelsTab === 'uploader'
@@ -177,7 +183,7 @@
                     <i data-lucide="scroll-text" class="w-4 h-4"></i>
                     {{ t('navbar.tab.logs') }}
                 </button>
-                <div class="relative" @mouseenter="benchDropdown = true" @mouseleave="benchDropdown = false">
+                <div x-show="!proxyMode" x-cloak class="relative" @mouseenter="benchDropdown = true" @mouseleave="benchDropdown = false">
                     <button
                         @click="setMainTab('bench')"
                         :class="mainTab === 'bench'
@@ -337,7 +343,8 @@
                     <i data-lucide="scroll-text" class="w-4 h-4"></i>
                     {{ t('navbar.tab.logs') }}
                 </button>
-                <button @click="setMainTab('bench'); mobileMenuOpen = false"
+                <button x-show="!proxyMode" x-cloak
+                        @click="setMainTab('bench'); mobileMenuOpen = false"
                         :class="mainTab === 'bench' ? 'bg-neutral-100 text-neutral-900' : 'text-neutral-600'"
                         class="w-full px-4 py-2.5 rounded-xl text-sm font-medium transition-all flex items-center gap-2">
                     <i data-lucide="gauge" class="w-4 h-4"></i>

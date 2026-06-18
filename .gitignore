@@ -121,3 +121,13 @@ docs/native_app_architecture.md
 uv.lock
 # generated TurboQuant memory report (machine-specific)
 tq_batch_memory.md
+# Generated local Docker Compose files
+docker/docker-compose.vllm.yml
+docker/docker-compose.vllm.env
+docker/docker-compose.llamacpp.yml
+docker/docker-compose.llamacpp.env
+docker/docker-compose.proxy.env
+docker/omni-serve.json
+
+# UI QA loop browser-smoke artifacts
+docs/qa/artifacts/

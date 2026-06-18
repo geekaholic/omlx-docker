@@ -65,6 +65,46 @@
     const DASHBOARD_SETTINGS_TABS = new Set(['global', 'integrations', 'models']);
     const DASHBOARD_MODELS_TABS = new Set(['manager', 'downloader', 'quantizer', 'uploader']);
     const DASHBOARD_BENCH_TABS = new Set(['throughput', 'accuracy']);
+    const ADMIN_API_KEY_STORAGE = 'omlx_chat_api_key';
+
+    function setAdminApiKeyCookie(apiKey) {
+        if (!apiKey) return;
+        document.cookie = `omlx_api_key=${encodeURIComponent(apiKey)}; Path=/; SameSite=Lax`;
+    }
+
+    function clearAdminApiKeyCookie() {
+        document.cookie = 'omlx_api_key=; Path=/; Max-Age=0; SameSite=Lax';
+    }
+
+    (function installAdminApiAuthFetch() {
+        if (window.__omlxAdminApiAuthFetchInstalled) return;
+        window.__omlxAdminApiAuthFetchInstalled = true;
+        const nativeFetch = window.fetch.bind(window);
+        window.fetch = async function(input, init = {}) {
+            const url = typeof input === 'string' ? input : input?.url;
+            const isAdminApi = typeof url === 'string' && url.startsWith('/admin/api/');
+            if (!isAdminApi) {
+                return nativeFetch(input, init);
+            }
+            const apiKey = localStorage.getItem(ADMIN_API_KEY_STORAGE) || '';
+            if (apiKey) {
+                setAdminApiKeyCookie(apiKey);
+            }
+            let response = await nativeFetch(input, init);
+            if (response.status !== 401) {
+                return response;
+            }
+            clearAdminApiKeyCookie();
+            localStorage.removeItem(ADMIN_API_KEY_STORAGE);
+            const entered = window.prompt('Enter the oMNI proxy API key');
+            if (!entered) {
+                return response;
+            }
+            localStorage.setItem(ADMIN_API_KEY_STORAGE, entered);
+            setAdminApiKeyCookie(entered);
+            return nativeFetch(input, init);
+        };
+    })();
 
     function dashboard() {
         return {
@@ -91,7 +131,7 @@
                 memory: { prefill_memory_guard: true, memory_guard_tier: 'balanced', memory_guard_custom_ceiling_gb: 0 },
                 scheduler: { max_concurrent_requests: 8, embedding_batch_size: 32, chunked_prefill: false },
                 cache: { enabled: true, ssd_cache_dir: '', ssd_cache_max_size: 'auto', hot_cache_max_size: '0', initial_cache_blocks: 256, hot_cache_only: false },
-                sampling: { max_context_window: 32768, max_context_window_policy: null, max_tokens: 32768, temperature: 1.0, top_p: 0.95, top_k: 0, repetition_penalty: 1.0 },
+                sampling: { max_context_window: 32768, max_context_window_policy: null, max_tokens: null, temperature: 1.0, top_p: 0.95, top_k: 0, repetition_penalty: 1.0 },
                 mcp: { config_path: '' },
                 huggingface: { endpoint: '', hf_cache_enabled: true, hf_cache_path: '' },
                 network: { http_proxy: '', https_proxy: '', no_proxy: '', ca_bundle: '' },
@@ -114,6 +154,70 @@
                 ui: { language: 'en' },
                 idle_timeout: { idle_timeout_seconds: null },
                 system: { total_memory_bytes: 0, total_memory: '', auto_model_memory: '', ssd_total_bytes: 0, ssd_total: '' },
+                proxy: {
+                    mode: 'native',
+                    backend_url: '',
+                    backend_type: 'openai-compatible',
+                    backend_api_key: '',
+                    backend_api_key_set: false,
+                    state_path: '',
+                    capabilities: {},
+                    backend_url_defaults: {},
+                    backend_url_locked: ['vllm', 'llama.cpp'],
+                    backend_profiles: {},
+                    docker_socket_available: false,
+                    sidecar_backend: 'vllm',
+                    sidecar: {
+                        // Portable (OMNI_*) settings shared by managed backends
+                        model: '',
+                        served_model_name: 'qwen',
+                        context_length: 8192,
+                        max_parallel: 4,
+                        backend_port: 8000,
+                        hf_home: '${HOME}/.cache/huggingface',
+                        image: '',
+                        // vLLM-specific
+                        gpu_memory_utilization: 0.8,
+                        generation_config: 'vllm',
+                        default_chat_template_kwargs: '{"enable_thinking":false}',
+                        trust_remote_code: true,
+                        enforce_eager: false,
+                        enable_auto_tool_choice: false,
+                        tool_call_parser: 'hermes',
+                        reasoning_parser: '',
+                        // llama.cpp-specific
+                        n_gpu_layers: 999,
+                        flash_attn: '',
+                        cache_type_k: '',
+                        cache_type_v: '',
+                        threads: '',
+                        batch_size: '',
+                        ubatch_size: '',
+                        jinja: true,
+                        reasoning_format: '',
+                        cache_dir: '${HOME}/.cache/llama.cpp',
+                        model_dir: '',
+                        extra_args: '',
+                        compose_output_path: null,
+                    },
+                },
+            },
+            proxyStatus: {
+                mode: 'native',
+                backend_url: '',
+                backend_type: 'openai-compatible',
+                backend_reachable: false,
+                backend_error: null,
+                model_count: 0,
+                latency_ms: 0,
+                capabilities: {},
+            },
+            proxyMetrics: {
+                backend_kind: 'unknown',
+                latency_ms: 0,
+                summary: {},
+                prometheus: { available: false, sample_count: 0, metric_count: 0, selected: {} },
+                ollama: { available: false, models_count: 0, loaded_count: 0, models: [], loaded_models: [] },
             },
 
             // Cache slider (0-100%)
@@ -136,6 +240,7 @@
 
             // Auth UI state
             showApiKey: false,
+            showBackendApiKey: false,
             // Sub key management
             newSubKeyValue: '',
             newSubKeyName: '',
@@ -257,6 +362,30 @@
                 status: 'idle',
                 message: '',
             },
+
+            // Sidecar-backend restart state (proxy mode). Same status values
+            // as restartServer, but polls backend reachability instead of
+            // the proxy's own /health.
+            restartBackend: {
+                status: 'idle',
+                message: '',
+            },
+            // True after a save reported requires_restart: shows the
+            // "restart backend to apply" banner.
+            backendRestartNeeded: false,
+            // Scanned local models (proxy mode, omni serve --scan-models).
+            localModels: { enabled: false, models: [], current_model: '', backend_type: '' },
+            localModelsLoading: false,
+            localModelSwitching: false,
+            // Unified-memory fit guard: populated when a launch/switch is
+            // refused (HTTP 409); the modal offers an override.
+            memoryBlock: { show: false, detail: '', info: null, acknowledge: false, retry: null },
+            // Client-side stash of per-backend sidecar image edits; the
+            // server profiles don't carry the image field.
+            _sidecarImageByType: {},
+            // Set while applying server settings so the backend-type watcher
+            // doesn't stash transient values into the profiles.
+            _suppressBackendProfileStash: false,
 
             statsScope: 'session',
             selectedStatsModel: '',
@@ -530,10 +659,12 @@
                     this.loadGlobalSettings(),
                     this.loadModels(),
                     this.loadServerInfo(),
+                    this.loadProxyStatus(),
                     this.loadProfileFields(),
                     this.loadPresets(),
                     this.checkForUpdate()
                 ]);
+                this.normalizeProxyTabs();
 
                 this.startUpdateCheckTimer();
 
@@ -577,6 +708,11 @@
                     }
                 });
 
+                // Swap per-backend settings when the backend type changes.
+                this.$watch('globalSettings.proxy.backend_type', (newType, oldType) => {
+                    this.onBackendTypeChange(newType, oldType);
+                });
+
                 window.addEventListener('popstate', () => {
                     this.applyTabStateFromUrl();
                 });
@@ -593,8 +729,17 @@
             },
 
             async handleMainTabChange(value) {
+                if (this.proxyMode && value === 'bench') {
+                    this.mainTab = 'status';
+                    this.syncTabStateToUrl();
+                    return;
+                }
                 if (value === 'status') {
                     await this.loadStats();
+                    if (this.proxyMode) {
+                        await this.loadProxyStatus();
+                        await this.loadProxyMetrics();
+                    }
                     this.startStatsRefresh();
                 } else {
                     this.stopStatsRefresh();
@@ -606,6 +751,10 @@
                     this.stopLogRefresh();
                 }
                 if (value === 'models') {
+                    if (this.proxyMode) {
+                        await Promise.all([this.loadModels(), this.loadLocalModels()]);
+                        return;
+                    }
                     const loads = [this.loadHFModels(), this.loadHFTasks(), this.loadOQTasks()];
                     if (this.modelsTab === 'downloader' && !this.hfRecommendedLoaded) {
                         loads.push(this.loadRecommendedModels());
@@ -679,6 +828,7 @@
 
             setMainTab(tab) {
                 if (!DASHBOARD_MAIN_TABS.has(tab)) return;
+                if (this.proxyMode && tab === 'bench') return;
                 this.mainTab = tab;
                 this.syncTabStateToUrl();
             },
@@ -692,6 +842,9 @@
 
             setModelsTab(tab) {
                 if (!DASHBOARD_MODELS_TABS.has(tab)) return;
+                if (this.proxyMode && tab !== 'manager') {
+                    tab = 'manager';
+                }
                 this.modelsTab = tab;
                 this.mainTab = 'models';
                 this.syncTabStateToUrl();
@@ -739,6 +892,8 @@
                         const modelDirs = data.model?.model_dirs?.length
                             ? data.model.model_dirs
                             : (data.model?.model_dir ? [data.model.model_dir] : ['']);
+                        this._suppressBackendProfileStash = true;
+                        this.$nextTick(() => { this._suppressBackendProfileStash = false; });
                         this.globalSettings = {
                             ...this.globalSettings,
                             ...data,
@@ -756,8 +911,10 @@
                             integrations: { ...this.globalSettings.integrations, ...data.integrations },
                             idle_timeout: { ...this.globalSettings.idle_timeout, ...data.idle_timeout },
                             system: { ...this.globalSettings.system, ...data.system },
+                            proxy: { ...this.globalSettings.proxy, ...data.proxy },
                         };
                         this.globalSettings.ui = data.ui || { language: 'en' };
+                        this.normalizeProxyTabs();
 
                         // Sync idle timeout select value
                         this.idleTimeoutValue = this.globalSettings.idle_timeout?.idle_timeout_seconds != null
@@ -794,7 +951,7 @@
                 }
             },
 
-            async saveGlobalSettings() {
+            async saveGlobalSettings(force = false) {
                 this.saving = true;
                 this.saveSuccess = false;
                 this.saveError = '';
@@ -802,14 +959,19 @@
                 // Validate required fields
                 const errors = [];
                 const s = this.globalSettings;
-                if (!s.server.host) errors.push('Host');
-                if (!s.server.port) errors.push('Port');
-                if (!s.model.model_dirs || !s.model.model_dirs.some(d => d.trim())) errors.push('Model Directory');
-                if (!s.scheduler.max_concurrent_requests) errors.push('Max Concurrent Requests');
-                if (!s.scheduler.embedding_batch_size) errors.push('Embedding Batch Size');
-                if (!s.cache.ssd_cache_max_size) errors.push('Max Cache Size');
-                if (!s.sampling.max_context_window) errors.push('Max Context Window');
-                if (!s.sampling.max_tokens) errors.push('Max Tokens');
+                if (this.proxyMode) {
+                    if (!s.proxy.backend_url || !s.proxy.backend_url.trim()) errors.push('Backend URL');
+                    if (!s.proxy.backend_type) errors.push('Backend Type');
+                } else {
+                    if (!s.server.host) errors.push('Host');
+                    if (!s.server.port) errors.push('Port');
+                    if (!s.model.model_dirs || !s.model.model_dirs.some(d => d.trim())) errors.push('Model Directory');
+                    if (!s.scheduler.max_concurrent_requests) errors.push('Max Concurrent Requests');
+                    if (!s.scheduler.embedding_batch_size) errors.push('Embedding Batch Size');
+                    if (!s.cache.ssd_cache_max_size) errors.push('Max Cache Size');
+                    if (!s.sampling.max_context_window) errors.push('Max Context Window');
+                    if (!s.sampling.max_tokens) errors.push('Max Tokens');
+                }
 
                 if (errors.length > 0) {
                     this.saveError = window.t('js.error.required_fields').replace('{fields}', errors.join(', '));
@@ -857,9 +1019,12 @@
                             ),
                             initial_cache_blocks: this.globalSettings.cache.initial_cache_blocks,
                             hot_cache_only: this.globalSettings.cache.hot_cache_only,
-                            sampling_max_context_window: this.globalSettings.sampling.max_context_window,
+                            // Proxy mode: the context window comes from the serving
+                            // backend and Max Tokens is Auto, so clear these admin
+                            // overrides (power users set them via `omni serve`).
+                            sampling_max_context_window: this.proxyMode ? null : this.globalSettings.sampling.max_context_window,
                             sampling_max_context_window_policy: this.globalSettings.sampling.max_context_window_policy || null,
-                            sampling_max_tokens: this.globalSettings.sampling.max_tokens,
+                            sampling_max_tokens: this.proxyMode ? null : this.globalSettings.sampling.max_tokens,
                             sampling_temperature: this.globalSettings.sampling.temperature,
                             sampling_top_p: this.globalSettings.sampling.top_p,
                             sampling_top_k: this.globalSettings.sampling.top_k,
@@ -870,11 +1035,77 @@
                             network_https_proxy: this.globalSettings.network.https_proxy,
                             network_no_proxy: this.globalSettings.network.no_proxy,
                             network_ca_bundle: this.globalSettings.network.ca_bundle,
+                            ...(this.proxyMode ? {
+                                proxy_backend_url: this.globalSettings.proxy.backend_url,
+                                proxy_backend_type: this.globalSettings.proxy.backend_type,
+                                ...(this.globalSettings.proxy.backend_api_key ? {
+                                    proxy_backend_api_key: this.globalSettings.proxy.backend_api_key,
+                                } : {}),
+                                ...(['vllm', 'llama.cpp'].includes(this.globalSettings.proxy.backend_type) ? {
+                                    omni_model: this.globalSettings.proxy.sidecar?.model || '',
+                                    omni_served_model_name: this.globalSettings.proxy.sidecar?.served_model_name || '',
+                                    omni_context_length: this.globalSettings.proxy.sidecar?.context_length || this.globalSettings.sampling.max_context_window,
+                                    omni_max_parallel: this.globalSettings.proxy.sidecar?.max_parallel || this.globalSettings.scheduler.max_concurrent_requests,
+                                    omni_backend_port: this.globalSettings.proxy.sidecar?.backend_port || 8000,
+                                    omni_hf_home: this.globalSettings.proxy.sidecar?.hf_home || '${HOME}/.cache/huggingface',
+                                    huggingface_endpoint: this.globalSettings.huggingface?.endpoint || '',
+                                } : {}),
+                                ...(this.globalSettings.proxy.backend_type === 'vllm' ? {
+                                    vllm_image: this.globalSettings.proxy.sidecar?.image || '',
+                                    vllm_gpu_memory_utilization: this.globalSettings.proxy.sidecar?.gpu_memory_utilization ?? 0.8,
+                                    vllm_generation_config: this.globalSettings.proxy.sidecar?.generation_config || 'vllm',
+                                    vllm_default_chat_template_kwargs: this.globalSettings.proxy.sidecar?.default_chat_template_kwargs || '',
+                                    vllm_trust_remote_code: !!this.globalSettings.proxy.sidecar?.trust_remote_code,
+                                    vllm_enforce_eager: !!this.globalSettings.proxy.sidecar?.enforce_eager,
+                                    vllm_enable_auto_tool_choice: !!this.globalSettings.proxy.sidecar?.enable_auto_tool_choice,
+                                    vllm_tool_call_parser: this.globalSettings.proxy.sidecar?.tool_call_parser || '',
+                                    vllm_reasoning_parser: this.globalSettings.proxy.sidecar?.reasoning_parser || '',
+                                    vllm_dtype: this.globalSettings.proxy.sidecar?.dtype || '',
+                                    vllm_tokenizer: this.globalSettings.proxy.sidecar?.tokenizer || '',
+                                    vllm_tokenizer_mode: this.globalSettings.proxy.sidecar?.tokenizer_mode || '',
+                                    vllm_revision: this.globalSettings.proxy.sidecar?.revision || '',
+                                    vllm_load_format: this.globalSettings.proxy.sidecar?.load_format || '',
+                                    vllm_quantization: this.globalSettings.proxy.sidecar?.quantization || '',
+                                    vllm_download_dir: this.globalSettings.proxy.sidecar?.download_dir || '',
+                                    vllm_max_num_batched_tokens: this.globalSettings.proxy.sidecar?.max_num_batched_tokens || '',
+                                    ...(this.globalSettings.proxy.sidecar?.enable_chunked_prefill == null || this.globalSettings.proxy.sidecar?.enable_chunked_prefill === '' ? {} : { vllm_enable_chunked_prefill: this.globalSettings.proxy.sidecar.enable_chunked_prefill }),
+                                    ...(this.globalSettings.proxy.sidecar?.enable_prefix_caching == null || this.globalSettings.proxy.sidecar?.enable_prefix_caching === '' ? {} : { vllm_enable_prefix_caching: this.globalSettings.proxy.sidecar.enable_prefix_caching }),
+                                    vllm_kv_cache_dtype: this.globalSettings.proxy.sidecar?.kv_cache_dtype || '',
+                                    vllm_cpu_offload_gb: this.globalSettings.proxy.sidecar?.cpu_offload_gb ?? 0,
+                                    vllm_swap_space: this.globalSettings.proxy.sidecar?.swap_space ?? 0,
+                                    vllm_tensor_parallel_size: this.globalSettings.proxy.sidecar?.tensor_parallel_size || 1,
+                                    vllm_pipeline_parallel_size: this.globalSettings.proxy.sidecar?.pipeline_parallel_size || 1,
+                                    vllm_uvicorn_log_level: this.globalSettings.proxy.sidecar?.uvicorn_log_level || '',
+                                    vllm_disable_log_stats: !!this.globalSettings.proxy.sidecar?.disable_log_stats,
+                                    vllm_extra_args_json: this.globalSettings.proxy.sidecar?.extra_args_json || '[]',
+                                } : {}),
+                                ...(this.globalSettings.proxy.backend_type === 'llama.cpp' ? {
+                                    llamacpp_image: this.globalSettings.proxy.sidecar?.image || '',
+                                    llamacpp_n_gpu_layers: this.globalSettings.proxy.sidecar?.n_gpu_layers ?? 999,
+                                    llamacpp_flash_attn: this.globalSettings.proxy.sidecar?.flash_attn || '',
+                                    llamacpp_cache_type_k: this.globalSettings.proxy.sidecar?.cache_type_k || '',
+                                    llamacpp_cache_type_v: this.globalSettings.proxy.sidecar?.cache_type_v || '',
+                                    llamacpp_threads: this.globalSettings.proxy.sidecar?.threads || '',
+                                    llamacpp_batch_size: this.globalSettings.proxy.sidecar?.batch_size || '',
+                                    llamacpp_ubatch_size: this.globalSettings.proxy.sidecar?.ubatch_size || '',
+                                    llamacpp_jinja: !!this.globalSettings.proxy.sidecar?.jinja,
+                                    llamacpp_reasoning_format: this.globalSettings.proxy.sidecar?.reasoning_format || '',
+                                    llamacpp_cache_dir: this.globalSettings.proxy.sidecar?.cache_dir || '${HOME}/.cache/llama.cpp',
+                                    llamacpp_model_dir: this.globalSettings.proxy.sidecar?.model_dir || '',
+                                    llamacpp_extra_args: this.globalSettings.proxy.sidecar?.extra_args || '',
+                                } : {}),
+                            } : {}),
                             ...(this.globalSettings.auth.api_key ? { api_key: this.globalSettings.auth.api_key } : {}),
                             skip_api_key_verification: this.globalSettings.auth.skip_api_key_verification,
                             idle_timeout_seconds: this.globalSettings.idle_timeout?.idle_timeout_seconds ?? null,
+                            ...(force ? { force_memory: true } : {}),
                         }),
                     });
+
+                    if (await this._handleMemoryBlock(response, () => this.saveGlobalSettings(true))) {
+                        this.saving = false;
+                        return;
+                    }
 
                     if (response.ok) {
                         const data = await response.json();
@@ -883,6 +1114,13 @@
                         // Refresh stats and model list (cache changes unload models)
                         await this.loadStats();
                         await this.loadModels();
+                        if (this.proxyMode) {
+                            this.backendRestartNeeded = !!data.requires_restart;
+                            // Re-sync saved values and backend profiles.
+                            await this.loadGlobalSettings();
+                            await this.loadProxyStatus();
+                            await this.loadProxyMetrics();
+                        }
                         setTimeout(() => { this.saveSuccess = false; }, 5000);
                     } else if (response.status === 401) {
                         window.location.href = '/admin';
@@ -969,6 +1207,14 @@
                     if (response.ok) {
                         const data = await response.json();
                         this.models = data.models || [];
+                        if (this.proxyMode) {
+                            this.hfModels = this.models.map(m => ({
+                                name: m.id,
+                                size: 0,
+                                size_formatted: 'remote',
+                            }));
+                            this.hfModelsLoaded = true;
+                        }
                     } else if (response.status === 401) {
                         window.location.href = '/admin';
                     }
@@ -2110,7 +2356,8 @@
             //  - unwraps existing IPv6 brackets so we can re-bracket consistently
             //  - maps unspecified bind addresses (0.0.0.0, ::) to a placeholder
             //    since they are not routable from a client
-            //  - maps `localhost` to 127.0.0.1 for consistency with other URLs
+            //  - preserves `localhost` because Docker Desktop may publish IPv6
+            //    localhost separately from a host process on 127.0.0.1
             //  - bracket-wraps IPv6 addresses per RFC 3986 (`http://[::1]:8000/v1`)
             formatDisplayHost(host) {
                 const value = (host || '').trim();
@@ -2121,13 +2368,12 @@
                     : value;
 
                 if (unwrapped === '0.0.0.0' || unwrapped === '::') return 'your-ip-address';
-                if (unwrapped === 'localhost') return '127.0.0.1';
                 if (unwrapped.includes(':')) return `[${unwrapped}]`;
                 return unwrapped;
             },
 
             get displayHost() {
-                const host = this.selectedAlias || this.stats.host || '127.0.0.1';
+                const host = this.selectedAlias || this.stats.host || 'localhost';
                 return this.formatDisplayHost(host);
             },
 
@@ -2163,6 +2409,130 @@
                 }
             },
 
+            async loadProxyStatus() {
+                if (!this.proxyMode && this.globalSettings.proxy?.mode !== 'proxy') return;
+                try {
+                    const response = await fetch('/admin/api/proxy/status');
+                    if (response.ok) {
+                        this.proxyStatus = { ...this.proxyStatus, ...await response.json() };
+                    }
+                } catch (err) {
+                    console.error('Failed to load proxy status:', err);
+                }
+            },
+
+            async loadProxyMetrics() {
+                if (!this.proxyMode && this.globalSettings.proxy?.mode !== 'proxy') return;
+                try {
+                    const response = await fetch('/admin/api/proxy/metrics');
+                    if (response.ok) {
+                        const data = await response.json();
+                        this.proxyMetrics = {
+                            ...this.proxyMetrics,
+                            ...data,
+                            summary: { ...this.proxyMetrics.summary, ...(data.summary || {}) },
+                            prometheus: { ...this.proxyMetrics.prometheus, ...(data.prometheus || {}) },
+                            ollama: { ...this.proxyMetrics.ollama, ...(data.ollama || {}) },
+                        };
+                    }
+                } catch (err) {
+                    console.error('Failed to load proxy metrics:', err);
+                }
+            },
+
+            get proxyMode() {
+                return this.globalSettings.proxy?.mode === 'proxy'
+                    || this.proxyStatus.mode === 'proxy'
+                    || this.stats.proxy?.mode === 'proxy';
+            },
+
+            get backendCacheSummary() {
+                return this.proxyMetrics?.summary || {};
+            },
+
+            get backendContextLimit() {
+                // Live limit reported by the backend (vLLM max_model_len,
+                // llama.cpp /props), delivered with global settings.
+                const live = Number(this.globalSettings.proxy?.backend_context_limit) || null;
+                const configured = this.proxyMode
+                    ? Number(this.globalSettings.proxy?.sidecar?.context_length) || null
+                    : null;
+                if (live && configured) return Math.min(live, configured);
+                return live || configured;
+            },
+
+            get backendCacheMetricsAvailable() {
+                // Throughput/peak metrics count too: current llama.cpp
+                // builds dropped the kv_cache_* families, and an all-null
+                // gate would blank the panel despite usable data.
+                const s = this.backendCacheSummary;
+                return s.prefix_cache_hit_rate != null
+                    || s.prefix_cache_queries != null
+                    || s.gpu_cache_usage_perc != null
+                    || s.kv_cache_usage_ratio != null
+                    || s.kv_cache_tokens != null
+                    || s.context_tokens_peak != null
+                    || s.prompt_tokens_seconds != null
+                    || s.predicted_tokens_seconds != null;
+            },
+
+            get isSidecarBackendType() {
+                const locked = this.globalSettings.proxy?.backend_url_locked
+                    || ['vllm', 'llama.cpp'];
+                return locked.includes(this.globalSettings.proxy?.backend_type);
+            },
+
+            get canRestartBackend() {
+                return this.isSidecarBackendType
+                    && !!this.globalSettings.proxy?.docker_socket_available;
+            },
+
+            defaultBackendUrl(type) {
+                const defaults = this.globalSettings.proxy?.backend_url_defaults || {};
+                return defaults[type] || '';
+            },
+
+            onBackendTypeChange(newType, oldType) {
+                if (this._suppressBackendProfileStash) return;
+                if (!this.proxyMode || !newType || newType === oldType) return;
+                const proxy = this.globalSettings.proxy;
+                const profiles = proxy.backend_profiles = proxy.backend_profiles || {};
+                if (oldType) {
+                    profiles[oldType] = {
+                        ...(profiles[oldType] || {}),
+                        backend_url: proxy.backend_url,
+                        backend_api_key: proxy.backend_api_key,
+                        model: proxy.sidecar?.model ?? '',
+                        served_model_name: proxy.sidecar?.served_model_name ?? '',
+                    };
+                    this._sidecarImageByType[oldType] = proxy.sidecar?.image ?? '';
+                }
+                const profile = profiles[newType] || {};
+                const locked = (proxy.backend_url_locked || []).includes(newType);
+                proxy.backend_url = locked
+                    ? this.defaultBackendUrl(newType)
+                    : (profile.backend_url || this.defaultBackendUrl(newType));
+                proxy.backend_api_key = profile.backend_api_key || '';
+                if (proxy.sidecar) {
+                    proxy.sidecar.model = profile.model ?? '';
+                    proxy.sidecar.served_model_name = profile.served_model_name ?? '';
+                    proxy.sidecar.image = this._sidecarImageByType[newType] ?? '';
+                }
+            },
+
+            get proxyCapabilities() {
+                return this.globalSettings.proxy?.capabilities
+                    || this.proxyStatus.capabilities
+                    || {};
+            },
+
+            normalizeProxyTabs() {
+                if (!this.proxyMode) return;
+                if (this.mainTab === 'bench') this.mainTab = 'status';
+                if (this.modelsTab !== 'manager') this.modelsTab = 'manager';
+                this.syncTabStateToUrl();
+            },
+
             async restartServerStart() {
                 if (this.restartServer.status === 'restarting'
                     || this.restartServer.status === 'waiting') {
@@ -2191,7 +2561,7 @@
                     return;
                 }
 
-                if (response.status === 503) {
+                if (response.status === 503 || response.status === 501) {
                     let msg = window.t('settings.server.restart_status_unavailable');
                     try {
                         const data = await response.json();
@@ -2266,6 +2636,187 @@
                 tick();
             },
 
+            async loadLocalModels(refresh = false) {
+                if (!this.proxyMode) return;
+                this.localModelsLoading = true;
+                try {
+                    const url = '/admin/api/proxy/local-models' + (refresh ? '?refresh=1' : '');
+                    const response = await fetch(url, { credentials: 'same-origin' });
+                    if (response.ok) {
+                        this.localModels = await response.json();
+                    }
+                } catch (err) {
+                    // Scan endpoint is best-effort; leave the section as-is.
+                } finally {
+                    this.localModelsLoading = false;
+                }
+            },
+
+            // If a response is a memory-fit block (409 + blocked), open the
+            // modal wired to retry the same action with the override. Returns
+            // true when it handled a block so the caller can stop.
+            async _handleMemoryBlock(response, retry) {
+                if (response.status !== 409) return false;
+                let data;
+                try { data = await response.clone().json(); } catch (e) { return false; }
+                if (!data || !data.blocked) return false;
+                this.memoryBlock = {
+                    show: true,
+                    detail: data.detail || '',
+                    info: data.memory || null,
+                    acknowledge: false,
+                    retry,
+                };
+                return true;
+            },
+
+            async memoryBlockOverride() {
+                if (!this.memoryBlock.acknowledge) return;
+                const retry = this.memoryBlock.retry;
+                this.memoryBlock = { show: false, detail: '', info: null, acknowledge: false, retry: null };
+                if (typeof retry === 'function') await retry();
+            },
+
+            async useLocalModel(model, force = false) {
+                if (this.localModelSwitching && !force) return;
+                this.localModelSwitching = true;
+                try {
+                    const servedName = model.repo_id.split('/').pop();
+                    const payload = {
+                        omni_model: model.repo_id,
+                        omni_served_model_name: servedName,
+                        // Ask the server to (re)apply optimal per-model defaults
+                        // (auto util + clear the previous model's tuning) even
+                        // when re-selecting the model that is already current.
+                        reset_optimal: true,
+                    };
+                    // Cap the launch context length at the model's own
+                    // limit — vLLM refuses to start when max-model-len
+                    // exceeds the config.json maximum.
+                    const currentCtx = Number(this.globalSettings.proxy?.sidecar?.context_length) || null;
+                    if (model.context_length && (!currentCtx || model.context_length < currentCtx)) {
+                        payload.omni_context_length = model.context_length;
+                    }
+                    if (force) payload.force_memory = true;
+                    const response = await fetch('/admin/api/global-settings', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+                    if (await this._handleMemoryBlock(response, () => this.useLocalModel(model, true))) return;
+                    if (!response.ok) return;
+                    this.localModels.current_model = model.repo_id;
+                    this.backendRestartNeeded = true;
+                    await this.loadGlobalSettings();
+                    // The env file is regenerated server-side; the switch
+                    // takes effect when the sidecar restarts (confirm dialog
+                    // inside restartBackendStart).
+                    await this.restartBackendStart(force);
+                } finally {
+                    this.localModelSwitching = false;
+                }
+            },
+
+            async restartBackendStart(force = false) {
+                if (this.restartBackend.status === 'restarting'
+                    || this.restartBackend.status === 'waiting') {
+                    return;
+                }
+                if (!force && !window.confirm(window.t('settings.proxy.restart_backend_confirm'))) {
+                    return;
+                }
+
+                this.restartBackend = {
+                    status: 'restarting',
+                    message: window.t('settings.proxy.restart_backend_status_sending'),
+                };
+
+                let response;
+                try {
+                    response = await fetch('/admin/api/sidecar/restart', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(force ? { force_memory: true } : {}),
+                    });
+                } catch (err) {
+                    this.restartBackend = {
+                        status: 'error',
+                        message: window.t('settings.proxy.restart_backend_status_failed'),
+                    };
+                    return;
+                }
+
+                if (response.status === 401) {
+                    window.location.href = '/admin';
+                    return;
+                }
+
+                if (await this._handleMemoryBlock(response, () => this.restartBackendStart(true))) {
+                    this.restartBackend = { status: 'idle', message: '' };
+                    return;
+                }
+
+                if (response.status !== 202) {
+                    let msg = window.t('settings.proxy.restart_backend_status_failed');
+                    try {
+                        const data = await response.json();
+                        if (data && data.detail) msg = data.detail;
+                    } catch (e) { /* ignore */ }
+                    const status = response.status === 501 ? 'unsupported' : 'error';
+                    this.restartBackend = { status, message: msg };
+                    return;
+                }
+
+                this.restartBackend = {
+                    status: 'waiting',
+                    message: window.t('settings.proxy.restart_backend_status_waiting'),
+                };
+                this._restartBackendPoll();
+            },
+
+            _restartBackendPoll() {
+                // Model reloads can take a while; allow up to 120s.
+                const deadline = Date.now() + 120000;
+                let sawDown = false;
+                const tick = async () => {
+                    if (Date.now() > deadline) {
+                        this.restartBackend = {
+                            status: 'error',
+                            message: window.t('settings.proxy.restart_backend_status_timeout'),
+                        };
+                        return;
+                    }
+                    let reachable = false;
+                    try {
+                        const r = await fetch('/admin/api/proxy/status', { cache: 'no-store' });
+                        if (r.ok) {
+                            const data = await r.json();
+                            this.proxyStatus = { ...this.proxyStatus, ...data };
+                            reachable = !!data.backend_reachable;
+                        }
+                    } catch (e) {
+                        reachable = false;
+                    }
+                    if (!reachable) {
+                        sawDown = true;
+                        setTimeout(tick, 2000);
+                        return;
+                    }
+                    if (!sawDown) {
+                        // Backend hasn't gone down yet — keep polling.
+                        setTimeout(tick, 1000);
+                        return;
+                    }
+                    this.backendRestartNeeded = false;
+                    this.restartBackend = {
+                        status: 'idle',
+                        message: window.t('settings.proxy.restart_backend_status_back'),
+                    };
+                    await this.loadProxyMetrics();
+                };
+                tick();
+            },
+
             get llmModels() {
                 return this.models.filter(m => m.model_type === 'llm' || m.model_type === 'vlm' || !m.model_type);
             },
@@ -2283,21 +2834,29 @@
             get claudeCodeCommand() {
                 const mode = this.globalSettings.claude_code.mode;
                 if (mode === 'cloud') {
-                    return 'env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_DEFAULT_OPUS_MODEL -u ANTHROPIC_DEFAULT_SONNET_MODEL -u ANTHROPIC_DEFAULT_HAIKU_MODEL -u API_TIMEOUT_MS -u CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC claude';
+                    return 'env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_MODEL -u ANTHROPIC_SMALL_FAST_MODEL -u ANTHROPIC_DEFAULT_OPUS_MODEL -u ANTHROPIC_DEFAULT_SONNET_MODEL -u ANTHROPIC_DEFAULT_HAIKU_MODEL -u CLAUDE_CODE_SUBAGENT_MODEL -u API_TIMEOUT_MS -u CLAUDE_CODE_ATTRIBUTION_HEADER -u CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC claude';
                 }
                 // Local mode
                 const port = this.stats.port || 8000;
                 const opusModel = this.globalSettings.claude_code.opus_model || 'select-a-model';
                 const sonnetModel = this.globalSettings.claude_code.sonnet_model || 'select-a-model';
                 const haikuModel = this.globalSettings.claude_code.haiku_model || 'select-a-model';
+                const selected = (value) => value && value !== 'select-a-model';
+                const primaryModel = selected(sonnetModel) ? sonnetModel : opusModel;
+                const smallFastModel = selected(haikuModel)
+                    ? haikuModel
+                    : (selected(sonnetModel) ? sonnetModel : opusModel);
                 const parts = [];
                 parts.push(this.shellEnvAssign('ANTHROPIC_BASE_URL', `http://${this.displayHost}:${port}`));
-                if (this.stats.api_key) {
-                    parts.push(this.shellEnvAssign('ANTHROPIC_AUTH_TOKEN', this.stats.api_key));
-                }
+                parts.push(this.shellEnvAssign('ANTHROPIC_AUTH_TOKEN', this.stats.api_key || 'omlx'));
+                parts.push(this.shellEnvAssign('ANTHROPIC_API_KEY', this.stats.api_key || 'omlx'));
+                parts.push(this.shellEnvAssign('ANTHROPIC_MODEL', primaryModel));
+                parts.push(this.shellEnvAssign('ANTHROPIC_SMALL_FAST_MODEL', smallFastModel));
                 parts.push(this.shellEnvAssign('ANTHROPIC_DEFAULT_OPUS_MODEL', opusModel));
                 parts.push(this.shellEnvAssign('ANTHROPIC_DEFAULT_SONNET_MODEL', sonnetModel));
                 parts.push(this.shellEnvAssign('ANTHROPIC_DEFAULT_HAIKU_MODEL', haikuModel));
+                parts.push(this.shellEnvAssign('CLAUDE_CODE_SUBAGENT_MODEL', smallFastModel));
+                parts.push('CLAUDE_CODE_ATTRIBUTION_HEADER=0');
                 parts.push('API_TIMEOUT_MS=3000000');
                 parts.push('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1');
                 parts.push('claude');
@@ -2650,7 +3209,13 @@
             activeModelsPressureLabel() {
                 const mp = this.stats.active_models?.memory_pressure;
                 if (!mp || !mp.enabled || !mp.hard_bytes) {
-                    return window.t('status.active_models.enforcer_disabled');
+                    // Proxy mode has no MLX memory enforcer; the bar is fed
+                    // by backend-reported memory when available instead.
+                    return this.proxyMode ? '—' : window.t('status.active_models.enforcer_disabled');
+                }
+                if (!mp.soft_bytes || mp.soft_bytes >= mp.hard_bytes) {
+                    // No distinct soft limit (llama.cpp/Ollama backends).
+                    return `${this.formatSizeBytes(mp.current_bytes)} / ${this.formatSizeBytes(mp.hard_bytes)}`;
                 }
                 return `${this.formatSizeBytes(mp.current_bytes)} / ${this.formatSizeBytes(mp.soft_bytes)} soft / ${this.formatSizeBytes(mp.hard_bytes)} hard`;
             },
@@ -4072,6 +4637,15 @@
             },
 
             async loadHFModels() {
+                if (this.proxyMode) {
+                    this.hfModels = this.models.map(m => ({
+                        name: m.id,
+                        size: 0,
+                        size_formatted: 'remote',
+                    }));
+                    this.hfModelsLoaded = true;
+                    return;
+                }
                 try {
                     const response = await fetch('/admin/api/hf/models');
                     if (response.ok) {

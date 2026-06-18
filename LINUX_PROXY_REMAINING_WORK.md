@@ -1,0 +1,255 @@
+# Linux Proxy Remaining Work
+
+This fork is moving toward a Linux-friendly oMLX UI/proxy that delegates
+inference to remote or sidecar OpenAI-compatible backends such as vLLM,
+llama.cpp server, or any OpenAI-compatible endpoint (Ollama, for example).
+
+## Current Decisions
+
+- vLLM lifecycle is Compose-owned. `omni serve --backend vllm` generates
+  `docker/docker-compose.vllm.yml` plus `docker/docker-compose.vllm.env`, then
+  launches the stack with Docker Compose.
+- The FastAPI proxy does not directly own or supervise the GPU server process.
+- Admin can edit proxy settings live. Admin can also edit intended vLLM launch
+  settings and regenerate the env/compose files, but vLLM launch changes require
+  a backend/container restart.
+- Sampling defaults are proxy request defaults. They are persisted as
+  `OMLX_SAMPLING_*` values and injected into forwarded chat/completion requests
+  when the client omits those fields.
+- Serving stats are proxy-side accounting, not backend scraping: the proxy
+  records per-request `usage` (including `prompt_tokens_details.cached_tokens`)
+  and wall-clock timing on every request path, mirroring upstream's
+  `ServerMetrics` semantics. Backend Prometheus/Ollama metrics remain a
+  supplementary panel.
+- KV/prefix caching is left to the inference backend (vLLM prefix caching,
+  llama.cpp KV cache). The proxy only surfaces the cache metrics backends
+  expose; it does not add its own caching layer.
+
+## Completed Linux Proxy Work
+
+- Dockerized MLX-free proxy container.
+- OpenAI-compatible passthrough and Anthropic Messages API bridge.
+- Proxy admin dashboard and browser chat UI.
+- Backend URL/API key/type controls with persisted proxy state. The dedicated
+  `ollama` backend type was folded into `openai-compatible`, which defaults to
+  the Ollama endpoint; per-backend settings persist keyed by backend type.
+- Live application of backend URL/API key/type changes.
+- Sidecar backend restart from the admin UI through the Docker Engine API,
+  with the sidecar re-reading its generated env file on restart.
+- Backend status and metrics endpoints, including vLLM Prometheus and Ollama
+  native probes.
+- `omni` CLI for `serve`, `status`, `logs`, `restart`, and `stop`.
+- vLLM sidecar compose generation for NVIDIA hosts.
+- vLLM env-file persistence, admin regeneration, HF cache mounting, and
+  advanced launch settings.
+- vLLM compose startup sanitation for empty Hugging Face/proxy/cert env vars.
+- llama.cpp managed sidecar (template + generated compose/env + `omni serve`
+  flags), now launched with `--metrics` for Prometheus observability.
+- Dashboard resynced with upstream v0.4.4rc1 (merge of `origin/main`):
+  Serving Stats cards, Average Speed, Active Models, cache panel, and API
+  Endpoints panels from the upstream redesign.
+- Proxy-side serving stats: session/all-time scopes with persistence
+  (`OMLX_PROXY_STATS_PATH`, default next to the proxy state file), per-model
+  filtering, cached-token counts and cache efficiency, prompt/generation
+  tok/s from TTFT and stream timing, and split clear endpoints. The
+  chat-completions passthrough injects `stream_options.include_usage` when
+  the client didn't request it (the trailing usage-only chunk is stripped
+  from the relayed stream; a backend 400 triggers one retry without
+  injection).
+- Active Models panel in proxy mode: Ollama loaded models with real memory
+  size and TTL from `/api/ps`; vLLM/llama.cpp running/waiting request counts
+  attributed to the served model; 5s TTL cache on backend metric collection.
+- Backend cache observability: the Runtime Cache panel becomes "Backend KV /
+  Prefix Cache" in proxy mode, showing vLLM prefix-cache hit rate (v1
+  hit/query counters or the v0 hit-rate gauge) and GPU KV usage, or
+  llama.cpp KV cache usage/tokens and average throughputs. Backends that
+  expose nothing (Ollama) get an explicit note.
+- Proxy-mode admin UI cleanup: model downloader/quantizer/uploader/bench
+  tabs, MLX cache controls, per-model unload, server restart, and the Engine
+  Versions panel are hidden in proxy mode; the sidecar restart card replaces
+  native restart.
+
+## Spark Verification Log (June 2026, DGX Spark GB10)
+
+- Proxy test suites run natively on Linux: 266 pass in a plain venv with
+  fastapi/uvicorn/httpx/pydantic/jinja2/jsonschema/regex + pytest/pytest-asyncio
+  and `PYTHONPATH=.` (no MLX install needed for these files).
+- **llama.cpp sidecar (ghcr.io/ggml-org/llama.cpp:server-cuda, b9570)**:
+  - Streamed + non-streamed chat OK through the proxy; `usage` injection
+    works (backend honors `stream_options.include_usage`; trailing usage
+    chunk is stripped when the client didn't ask, relayed when it did).
+  - Repeated prompts: llama.cpp reports `cached_tokens` on the second hit
+    (22/26 prompt tokens); Serving Stats cached tokens + cache efficiency
+    move accordingly; avg prompt/generation tok/s populate.
+  - Finding: this build no longer emits `llamacpp:kv_cache_usage_ratio` /
+    `llamacpp:kv_cache_tokens`. Fixed by selecting `llamacpp:n_tokens_max`
+    as a "Peak Context Tokens" tile and counting throughput metrics toward
+    cache-panel availability (commit 2fd4ba7).
+- **Active Models memory bar (green bar) now works in proxy mode**
+  (commit 769bcc0): per-process GPU memory via `nvidia-smi` run inside the
+  sidecar through the Docker exec API (on GB10 unified memory, CUDA
+  allocations show up neither in the container cgroup — 922MiB vs the real
+  8.8GiB — nor in process RSS); Ollama uses `/api/ps` sizes; hard limit is
+  host MemTotal from `/proc/meminfo`; vLLM's `gpu_memory_utilization`
+  budget is surfaced as the soft limit. Verified live with all three
+  backends (llama.cpp 8.62 GB, vLLM 97.05 GB vs 97.35 GB soft, Ollama
+  17.76 GB from `/api/ps`).
+- **vLLM sidecar (vllm/vllm-openai:latest, gemma-4-26B-A4B-it)**:
+  - Prometheus metric names drifted as predicted: this generation emits
+    `vllm:prefix_cache_{hits,queries}_total` (no `gpu_` prefix) and
+    `vllm:kv_cache_usage_perc`. Candidates extended (commit 37bacf1),
+    ordered so the `*external_prefix_cache*` families are never
+    double-counted. Live: 63% prefix hit rate on repeated prompts.
+  - `usage.prompt_tokens_details.cached_tokens` requires vLLM's
+    `--enable-prompt-tokens-details`; the generated compose now passes it
+    (verified: cached_tokens 480/499 on a repeated prompt).
+  - Sidecar restart from the admin API works (202 + container restart).
+  - Streamed + non-streamed chat, stats accumulation, tok/s all good.
+- **Backend switching (CLI vs persisted state)**: launching a stack with
+  `omni serve` now overrides stale persisted backend routing in both
+  directions (sidecar↔sidecar in 37bacf1, sidecar→standalone/openai in
+  dafe959); per-backend profiles are archived for switching back.
+- **Ollama (host service 0.14.2, via openai-compatible)**: Active Models
+  rows show real size + TTL countdown from `/api/ps`; cache panel takes
+  the "not exposed" path; streamed usage honored
+  (`stream_options.include_usage`); stats accumulate.
+- **Cross-cutting**: Session/All-Time scopes, both Clear endpoints,
+  per-model filter, API Endpoints data (host/port/aliases/cli_prefix
+  "omni"), dashboard + chat pages render. All-Time stats survived
+  multiple proxy container rebuilds/restarts via the `proxy-state`
+  volume; clear-alltime zeroes them. (Browser-console check still worth
+  an eyeball on a real browser.)
+- **Environment gotchas** (documented in `docs/SPARK_RUNBOOK.md`): broken
+  DNS sandbox in containers created during a failed first `up`
+  (force-recreate fixes); pre-merge generated env files use old
+  `VLLM_*` key names and silently fall back to template defaults —
+  regenerate with `omni serve` or the admin UI.
+- **Local model scan** (commit e43c082): opt-in `omni serve
+  --scan-models [--model-dir DIR]` mounts host caches read-only into the
+  proxy; `omlx/proxy/local_models.py` classifies HF-cache safetensors
+  (vLLM) and GGUF repos/files (llama.cpp) reusing MLX-free
+  `model_discovery` helpers; Models tab lists them with a one-click
+  "Use with sidecar" switch through the existing settings + restart
+  flows. Verified live: 12 HF repos listed on the vLLM stack, switch to
+  Qwen/Qwen3-1.7B via API + restart worked end-to-end.
+- **Demand-aware gpu-memory-utilization**: vLLM preallocates its whole
+  `gpu_memory_utilization` budget as KV cache regardless of model size, so the
+  memory-guard auto-util (0.83 for a small cached model) made a 1.7B model grab
+  ~95 GiB of KV (~101 GiB total), most of it unusable past `max_num_seqs`; context
+  length is not the lever. `omni serve` (and the admin model switch) now size the
+  auto util to *demand* — `auto_utilization = min(safety ceiling, (weights +
+  kv_per_token × context × max_parallel × OMLX_KV_HEADROOM + activation)/total)` —
+  reading KV geometry from `config.json` (`kv_bytes_per_token` in
+  `omlx/proxy/memory_fit.py`). Qwen3-1.7B at ctx 40960 / parallel 2 now picks
+  util ≈ 0.16 (~19 GiB) instead of 101 GiB; large models still hit the safety
+  ceiling. `--gpu-memory-utilization` overrides; `FitResult.recommended_util` and
+  the Settings hint are demand-aware too.
+- **HF offline mode for cached models**: vLLM crash-looped with
+  `[Errno -3] Temporary failure in name resolution` because it does a
+  Hugging Face repo check at startup even for a cached model, and the
+  container had a broken DNS sandbox (`127.0.0.53` instead of Docker's
+  `127.0.0.11`). `omni serve` now sets `HF_HUB_OFFLINE`/`TRANSFORMERS_OFFLINE`
+  (via `OMNI_HF_OFFLINE`) automatically when the model resolves to the local
+  cache (reusing `resolve_local_model_path`), with `--offline`/`--online`
+  overrides; the admin model switch sets it the same way. Threaded through
+  `CommonSidecarSettings.hf_offline` / `OMNI_ENV_KEYS` and both sidecar compose
+  templates. So a broken DNS sandbox or an offline box no longer crashes
+  startup for an already-downloaded model.
+- **Served-name resync on model change**: `omni serve --model X` (and the
+  admin Settings save) used to keep the previous session's
+  `OMNI_SERVED_MODEL_NAME`, so a freshly-loaded model was exposed under the
+  old model's API name (e.g. Qwen3-1.7B served as `gpt-oss-120b`). Now the
+  served name is re-derived from the new model's tail
+  (`derive_served_name` in `omlx/proxy/sidecar_compose.py`) whenever the
+  model changes and `--served-model-name` / a custom name wasn't supplied;
+  an explicit/custom name is always preserved. Applied in both
+  `portable_cli_environment` (CLI) and `update_global_settings` (admin),
+  matching the existing "Use with sidecar" derivation.
+- **Unified-memory launch guard**: loading 120B-class models
+  (`openai/gpt-oss-120b` ~64 GiB, `nvidia/…-120B-…-NVFP4` ~79 GiB) on the
+  vLLM sidecar hard-locked the Spark and needed a power cycle. Root cause:
+  vLLM's discrete-GPU default `--gpu-memory-utilization 0.8` is a fraction
+  of *total* memory, which on GB10's ~122 GiB unified pool targets ~97 GiB
+  and, during the page-cache weight-load transient, overshoots into
+  driver-pinned (unreclaimable) RAM → kernel livelock. Fixed with
+  `omlx/proxy/memory_fit.py` (host-reserve-aware fit check; safe condition
+  `budget + weights + reserve <= total`), a model-aware utilization default
+  in `omni serve`, a CLI pre-flight that **refuses** oversized launches
+  (`--force-memory`/`OMLX_SKIP_MEMORY_GUARD` to override), an admin 409 +
+  "Launch anyway" dialog on the save/switch/restart paths, and a Settings
+  recommended-util hint. `OMLX_HOST_MEMORY_RESERVE_GB` tunes the reserve
+  (default 16). Verified on the Spark: both 120B models block in
+  `--dry-run` and refuse a real launch (exit 1, no compose written), small
+  models pass, `--force-memory` proceeds. The container `mem_limit` route
+  was rejected — unified CUDA allocations don't reliably hit the cgroup.
+- **max_tokens vs context window** (commit e6178c8): a Max Tokens
+  sampling default >= the backend context made vLLM reject every chat
+  request, and the Settings UI used to pre-fill Max Tokens with the
+  context size. Fixed with a backend context-limit probe
+  (`backend_context_limit` in `omlx/proxy/metrics.py`: vLLM
+  `max_model_len`, llama.cpp `/props`), injection guard + one retry
+  without the cap on context-length 400s, unset-by-default Max Tokens
+  (was hardcoded 32768), and inline Settings/chat warnings with a
+  "Use recommended (ctx/2)" action. Verified live against the
+  misconfigured env (OMLX_SAMPLING_MAX_TOKENS=65000, ctx 65000).
+
+## Remaining Implementation Steps
+
+1. Test against real backends. — **Done** (June 2026 on DGX Spark; see
+   the verification log above and `docs/SPARK_RUNBOOK.md`).
+   - Ollama (via the OpenAI-compatible backend type): verify chat, `/v1/models`, `/admin/api/proxy/metrics`, `/api/tags`, `/api/ps`, and the Active Models size/TTL display.
+   - vLLM: verify chat streaming, tool calls, Prometheus `/metrics`, token counters, prefix-cache hit rate movement on repeated prompts, and restart flows on Spark.
+   - llama.cpp server: verify OpenAI compatibility, model listing behavior, streaming, tool calling, and that `--metrics` exposes the `llamacpp:*` families the dashboard parses.
+   - Prometheus metric names drift across vLLM versions; the candidate lists
+     live in `select_prometheus_metrics` (`omlx/proxy/metrics.py`) — `curl
+     <backend>/metrics` on the deployed image and extend the candidates if a
+     family is missed.
+
+2. Add Spark/Linux runbook coverage. — **Done**: `docs/SPARK_RUNBOOK.md`
+   (sidecar quick starts, external Ollama/vLLM, troubleshooting from
+   real incidents, unsupported native features).
+
+3. Continue fork cleanup.
+   - Isolate or remove native MLX/Metal imports from the Linux proxy path.
+   - Decide the final package/module rename strategy from `omlx` toward `omni`.
+   - Remove unused macOS app and native-inference code once the proxy surface is stable.
+
+## Deferred
+
+- External caching/router layers (LMCache, KV offload tiers, prompt routers)
+  are intentionally not integrated. Cache observability comes only from
+  backend-native metrics; revisit if Spark usage shows prefix caching at the
+  vLLM/llama.cpp layer is insufficient.
+- Serving stats depend on backends emitting `usage` in responses. Backends
+  that ignore `stream_options.include_usage` (older llama.cpp builds, some
+  Ollama versions) undercount tokens; requests are still counted.
+- **Claude Code + small-context backends**: `omni launch claude` against a
+  backend with a small context window (e.g. Qwen3-1.7B, 40960) can 400 with
+  "maximum context length … exceeded". Claude Code requests a large output
+  budget (`max_tokens` ~32000) and, with its system prompt (~9k input tokens),
+  the total can exceed the backend context. The Anthropic `/v1/messages` bridge
+  forwards the client's `max_tokens` verbatim (`omlx/proxy/app.py` ~L374); the
+  context-fit guard only caps the proxy's *own* injected default
+  (`apply_proxy_request_defaults`, ~L540), so the context-length-400 retry
+  cannot recover a client-supplied cap. Intentionally not auto-fixed (decided
+  2026-06-15 via the UI QA loop). Workaround: use a backend/model with a larger
+  context, or export `CLAUDE_CODE_MAX_OUTPUT_TOKENS` to a value that fits the
+  backend context before launching. Candidate fixes if revisited: have
+  `omni launch claude` set `CLAUDE_CODE_MAX_OUTPUT_TOKENS` from
+  `ctx.context_window`, or cap client `max_tokens` to `context − input` on a
+  context-length 400. See `docs/qa/ui-loop-report.md`.
+
+## Current Verification Gaps
+
+- Full pytest collection still imports MLX/Metal paths and fails in headless,
+  sandboxed, virtualized, or Linux sessions without an accessible Metal device.
+- The proxy-specific and `omni` test suites (`tests/test_proxy*.py`,
+  `tests/test_omni_cli.py`, `tests/test_*_compose.py`,
+  `tests/test_server_metrics.py`, `tests/test_docker_control.py`,
+  `tests/test_integrations.py`) are the reliable Linux-port signal until
+  native MLX paths are isolated or removed — 270+ tests, run on the Spark
+  in a plain venv with `PYTHONPATH=.`.
+- Real-backend manual testing with Ollama, vLLM, and llama.cpp is done
+  (see the Spark Verification Log above); re-run it when bumping backend
+  images, since both vLLM and llama.cpp have renamed metrics between
+  releases.

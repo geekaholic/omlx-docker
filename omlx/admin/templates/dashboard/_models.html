@@ -11,6 +11,8 @@
                             {{ t('models.tab.manager') }}
                         </button>
                         <button
+                            x-show="!proxyMode"
+                            x-cloak
                             @click="setModelsTab('downloader')"
                             :class="modelsTab === 'downloader'
                                 ? 'bg-neutral-900 text-white'
@@ -19,6 +21,8 @@
                             {{ t('models.tab.downloader') }}
                         </button>
                         <button
+                            x-show="!proxyMode"
+                            x-cloak
                             @click="setModelsTab('quantizer')"
                             :class="modelsTab === 'quantizer'
                                 ? 'bg-neutral-900 text-white'
@@ -27,6 +31,8 @@
                             {{ t('models.tab.quantizer') }}
                         </button>
                         <button
+                            x-show="!proxyMode"
+                            x-cloak
                             @click="setModelsTab('uploader')"
                             :class="modelsTab === 'uploader'
                                 ? 'bg-neutral-900 text-white'
@@ -53,6 +59,9 @@
                                 </button>
                             </div>
                             <p class="text-sm text-neutral-500 mt-2">{{ t('models.manager.description') }}</p>
+                            <p x-show="proxyMode" x-cloak class="text-sm text-neutral-500 mt-2">
+                                Remote models are discovered from the configured OpenAI-compatible backend. Load, unload, download, quantization, and upload actions are managed outside the proxy.
+                            </p>
                         </div>
 
                         <!-- Local Models Section -->
@@ -60,7 +69,8 @@
                             <div class="flex items-center justify-between px-4 sm:px-6 py-4 bg-neutral-100 border-b border-neutral-200">
                                 <div class="flex items-center gap-3">
                                     <i data-lucide="hard-drive" class="w-4 h-4 text-neutral-500"></i>
-                                    <span class="text-xs font-bold uppercase tracking-wider text-neutral-600">{{ t('models.manager.local_models') }}</span>
+                                    <span class="text-xs font-bold uppercase tracking-wider text-neutral-600"
+                                          x-text="proxyMode ? 'Remote Backend Models' : window.t('models.manager.local_models')"></span>
                                     <span class="text-xs text-neutral-400" x-text="window.t('models.manager.models_count').replace('{count}', hfModels.length)"></span>
                                 </div>
                                 <button @click="loadHFModels()"
@@ -95,7 +105,7 @@
                                                 <svg x-show="copied" x-cloak class="w-3.5 h-3.5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
                                             </button>
                                         </div>
-                                        <div class="flex items-center gap-2 ml-4 shrink-0">
+                                        <div x-show="!proxyMode" x-cloak class="flex items-center gap-2 ml-4 shrink-0">
                                             <template x-if="hfDeleteConfirm !== model.name">
                                                 <button @click="hfDeleteConfirm = model.name"
                                                         class="p-1.5 text-neutral-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
@@ -116,6 +126,58 @@
                                                     </button>
                                                 </div>
                                             </template>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+
+                        <!-- Scanned local models (proxy mode, omni serve --scan-models) -->
+                        <div x-show="proxyMode && localModels.enabled" x-cloak
+                             class="bg-white rounded-2xl border border-neutral-200 overflow-hidden mt-8">
+                            <div class="flex items-center justify-between px-4 sm:px-6 py-4 bg-neutral-100 border-b border-neutral-200">
+                                <div class="flex items-center gap-3 min-w-0">
+                                    <i data-lucide="folder-search" class="w-4 h-4 text-neutral-500"></i>
+                                    <span class="text-xs font-bold uppercase tracking-wider text-neutral-600">{{ t('models.local_scan.section_label') }}</span>
+                                    <span class="text-xs text-neutral-400" x-text="window.t('models.manager.models_count').replace('{count}', localModels.models.length)"></span>
+                                </div>
+                                <button @click="loadLocalModels(true)"
+                                        :disabled="localModelsLoading"
+                                        class="px-3 py-1.5 text-xs font-medium text-neutral-500 hover:text-neutral-700
+                                               hover:bg-neutral-100 rounded-lg transition-all flex items-center gap-1.5
+                                               disabled:opacity-50 disabled:cursor-not-allowed">
+                                    <span class="inline-flex" :class="localModelsLoading && 'animate-spin'"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></span>
+                                    {{ t('models.local_scan.rescan') }}
+                                </button>
+                            </div>
+                            <p class="px-4 sm:px-6 py-2 text-xs text-neutral-400 border-b border-neutral-100">
+                                {{ t('models.local_scan.description') }}
+                            </p>
+                            <div class="divide-y divide-neutral-100">
+                                <template x-if="localModels.models.length === 0">
+                                    <div class="px-6 py-8 text-center text-sm text-neutral-400">{{ t('models.local_scan.none_found') }}</div>
+                                </template>
+                                <template x-for="m in localModels.models" :key="m.repo_id">
+                                    <div class="px-4 sm:px-6 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 hover:bg-neutral-50 transition-colors">
+                                        <div class="min-w-0 flex-1 flex flex-wrap items-center gap-2">
+                                            <span class="text-sm font-medium text-neutral-900 break-all" x-text="m.repo_id"></span>
+                                            <span x-show="m.repo_id === localModels.current_model" x-cloak
+                                                  class="px-1.5 py-0.5 text-[10px] font-bold rounded bg-green-100 text-green-700 border border-green-200">{{ t('models.local_scan.serving') }}</span>
+                                            <span class="px-1.5 py-0.5 text-[10px] font-medium rounded bg-neutral-100 text-neutral-500 border border-neutral-200" x-text="m.model_format"></span>
+                                            <span x-show="m.model_type && m.model_type !== 'llm'"
+                                                  class="px-1.5 py-0.5 text-[10px] font-medium rounded bg-blue-50 text-blue-600 border border-blue-100" x-text="m.model_type"></span>
+                                            <span class="text-xs text-neutral-400" x-text="'(' + m.size_formatted + (m.context_length ? ' · ctx ' + m.context_length.toLocaleString() : '') + ')'"></span>
+                                        </div>
+                                        <div class="flex items-center gap-2 shrink-0">
+                                            <button x-show="m.backends.includes(localModels.backend_type) && m.repo_id !== localModels.current_model"
+                                                    @click="useLocalModel(m)"
+                                                    :disabled="localModelSwitching"
+                                                    class="px-2.5 py-1 text-xs font-medium text-white bg-neutral-900 hover:bg-neutral-700 rounded-lg transition-all disabled:opacity-50">
+                                                {{ t('models.local_scan.use_with_sidecar') }}
+                                            </button>
+                                            <span x-show="!m.backends.includes(localModels.backend_type)"
+                                                  class="text-[10px] text-neutral-400"
+                                                  x-text="window.t('models.local_scan.needs_backend').replace('{backend}', m.backends.join(', '))"></span>
                                         </div>
                                     </div>
                                 </template>

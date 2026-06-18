@@ -40,7 +40,7 @@ class ClaudeCodeIntegration(Integration):
         # Use the actual omlx API key so Claude Code authenticates correctly.
         # Fallback to "omlx" only when no API key is configured (open server).
         env["ANTHROPIC_AUTH_TOKEN"] = ctx.auth_token
-        env["ANTHROPIC_API_KEY"] = ""
+        env["ANTHROPIC_API_KEY"] = ctx.auth_token
         env["CLAUDE_CODE_ATTRIBUTION_HEADER"] = "0"
         # Large timeout for local model inference (model loading + generation).
         env["API_TIMEOUT_MS"] = "3000000"
@@ -62,12 +62,23 @@ class ClaudeCodeIntegration(Integration):
         if subagent_model:
             env["CLAUDE_CODE_SUBAGENT_MODEL"] = subagent_model
 
+        primary_model = sonnet_model or opus_model
+        if primary_model:
+            env["ANTHROPIC_MODEL"] = primary_model
+        small_fast_model = haiku_model or sonnet_model or opus_model
+        if small_fast_model:
+            env["ANTHROPIC_SMALL_FAST_MODEL"] = small_fast_model
+
         if ctx.context_window:
             env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(ctx.context_window)
+        if ctx.max_tokens:
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(ctx.max_tokens)
 
         binary = self._find_claude_binary()
         argv = [binary, *ctx.extra_args]
         print(f"Launching Claude Code with model {ctx.model}...")
         if ctx.context_window:
             print(f"Auto-compact window: {ctx.context_window:,} tokens")
+        if ctx.max_tokens:
+            print(f"Max output tokens: {ctx.max_tokens:,}")
         os.execvpe(binary, argv, env)

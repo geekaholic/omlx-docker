@@ -94,6 +94,10 @@ grammar = [
     # Grammar-constrained decoding for structured output (requires torch ~2GB)
     "xgrammar>=0.1.32",
 ]
+ui-loop = [
+    # Headless-Chromium console-error smoke pass for the admin UI QA loop
+    "playwright>=1.40",
+]
 mcp = [
     "mcp>=1.0.0",
 ]
@@ -183,6 +187,7 @@ Repository = "https://github.com/jundot/omlx"
 
 [project.scripts]
 omlx = "omlx.cli:main"
+omni = "omlx.omni_cli:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "omlx._version.__version__"}

@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for chat MCP tool call loop (chat.html streamResponse changes)."""
 import json
+from pathlib import Path
+
+
+CHAT_TEMPLATE = Path(__file__).parent.parent / "omlx" / "admin" / "templates" / "chat.html"
 
 
 class TestChatToolCallMessageFiltering:
@@ -126,6 +130,75 @@ class TestChatToolCallAccumulation:
         result = self.accumulate_tool_calls(deltas)
         assert len(result) == 1
         assert result[0]["id"] == "tc_1"
+
+
+class TestChatStreamUsageAccounting:
+    """Test chat UI usage extraction from OpenAI-compatible stream chunks."""
+
+    @staticmethod
+    def capture_last_usage(events):
+        """Replicate the streamResponse usage capture logic from chat.html."""
+        last_usage = None
+        visible_content = ""
+        for data in events:
+            choices = data.get("choices")
+            choice = choices[0] if choices else None
+            delta_exists = (
+                isinstance(choice, dict)
+                and "delta" in choice
+                and choice.get("delta") is not None
+            )
+            delta = choice.get("delta") if delta_exists else None
+
+            if data.get("usage"):
+                last_usage = data["usage"]
+            if data.get("usage") and not delta_exists:
+                continue
+
+            if isinstance(delta, dict) and delta.get("content"):
+                visible_content += delta["content"]
+        return last_usage, visible_content
+
+    def test_usage_only_chunk_updates_recent_stats(self):
+        usage = {"prompt_tokens": 10, "completion_tokens": 3}
+        last_usage, visible = self.capture_last_usage([
+            {"choices": [{"delta": {"content": "hi"}}]},
+            {"choices": [], "usage": usage},
+        ])
+
+        assert last_usage == usage
+        assert visible == "hi"
+
+    def test_final_choice_chunk_with_usage_updates_recent_stats(self):
+        usage = {"prompt_tokens": 10, "completion_tokens": 3}
+        last_usage, visible = self.capture_last_usage([
+            {"choices": [{"delta": {"content": "hi"}}]},
+            {
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+                "usage": usage,
+            },
+        ])
+
+        assert last_usage == usage
+        assert visible == "hi"
+
+    def test_template_records_usage_before_usage_only_continue(self):
+        source = CHAT_TEMPLATE.read_text()
+        capture = (
+            "if (data.usage) {\n"
+            "                                lastUsage = data.usage;\n"
+            "                                stream._lastUsage = data.usage;\n"
+            "                            }"
+        )
+        usage_only_continue = (
+            "if (data.usage && !delta) {\n"
+            "                                continue;\n"
+            "                            }"
+        )
+
+        assert capture in source
+        assert usage_only_continue in source
+        assert source.index(capture) < source.index(usage_only_continue)
 
 
 class TestChatToolCallSafety:

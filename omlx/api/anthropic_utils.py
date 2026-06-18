@@ -194,6 +194,7 @@ def convert_anthropic_to_internal(
     tokenizer: Any | None = None,
     preserve_images: bool = False,
     native_reasoning_content: bool = False,
+    force_native_tool_calling: bool = False,
 ) -> list[dict[str, Any]]:
     """
     Convert Anthropic Messages API format to internal format.
@@ -214,6 +215,9 @@ def convert_anthropic_to_internal(
             as a ``reasoning_content`` field on assistant messages (Qwen 3.6+
             templates).  If False, inline each block as ``<think>...</think>``
             in the message content as a fallback.
+        force_native_tool_calling: If True, preserve Anthropic ``tool_use`` and
+            ``tool_result`` history as structured OpenAI tool calls/results even
+            when no tokenizer is available to prove template support.
 
     Returns:
         List of {"role": str, "content": str or list}
@@ -221,7 +225,7 @@ def convert_anthropic_to_internal(
     from .utils import _chat_template_supports_tool_role
 
     processed_messages: list[dict[str, Any]] = []
-    native_tool_calling = bool(
+    native_tool_calling = force_native_tool_calling or bool(
         tokenizer and _chat_template_supports_tool_role(tokenizer)
     )
 

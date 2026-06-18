@@ -63,9 +63,35 @@ class TestIntegrationCommands:
             cmd = ClaudeCodeIntegration().get_command(ctx())
 
         assert (
-            cmd
-            == "'/Users/me/My Apps/oMLX.app/Contents/MacOS/omlx-cli' launch claude"
+            cmd == "'/Users/me/My Apps/oMLX.app/Contents/MacOS/omlx-cli' launch claude"
         )
+
+
+def _capture_codex_launch(codex: CodexIntegration, launch_ctx, base_env=None):
+    """Run codex.launch with os.execvpe patched, returning captured argv/env."""
+    captured: dict = {}
+
+    def fake_execvpe(binary, argv, env):
+        captured["binary"] = binary
+        captured["argv"] = argv
+        captured["env"] = env
+
+    env = base_env if base_env is not None else {"PATH": "/usr/bin"}
+    with (
+        patch("omlx.integrations.codex.os.environ", env),
+        patch("omlx.integrations.codex.os.execvpe", side_effect=fake_execvpe),
+    ):
+        codex.launch(launch_ctx)
+    return captured
+
+
+def _override_value(argv, key):
+    """Return the value passed via `-c key=value` in argv, or None."""
+    prefix = f"{key}="
+    for i, arg in enumerate(argv):
+        if arg == "-c" and i + 1 < len(argv) and argv[i + 1].startswith(prefix):
+            return argv[i + 1][len(prefix) :]
+    return None
 
 
 class TestCodexIntegration:
@@ -80,161 +106,104 @@ class TestCodexIntegration:
         cmd = codex.get_command(ctx(port=8000, api_key="", model=""))
         assert "select-a-model" in cmd
 
-    def test_configure(self, tmp_path):
-        codex = CodexIntegration()
-        config_path = tmp_path / "codex" / "config.toml"
-        with patch.object(CodexIntegration, "CONFIG_PATH", config_path):
-            codex.configure(ctx(port=8000, api_key="test-key", model="qwen3.5"))
-
-        assert config_path.exists()
-        content = config_path.read_text()
-        assert 'model = "qwen3.5"' in content
-        assert 'model_provider = "omlx"' in content
-        assert 'base_url = "http://127.0.0.1:8000/v1"' in content
-        assert 'env_key = "OMLX_API_KEY"' in content
-
-    def test_configure_custom_host(self, tmp_path):
-        codex = CodexIntegration()
-        config_path = tmp_path / "codex" / "config.toml"
-        with patch.object(CodexIntegration, "CONFIG_PATH", config_path):
-            codex.configure(
-                ctx(port=9000, api_key="key", model="test", host="192.168.1.100")
-            )
-
-        content = config_path.read_text()
-        assert 'base_url = "http://192.168.1.100:9000/v1"' in content
-
-    def test_configure_creates_backup(self, tmp_path):
-        config_path = tmp_path / "config.toml"
-        config_path.write_text('model = "old"')
-
-        codex = CodexIntegration()
-        with patch.object(CodexIntegration, "CONFIG_PATH", config_path):
-            codex.configure(ctx(port=8000, api_key="", model="new"))
-
-        backups = list(tmp_path.glob("config.*.bak"))
-        assert len(backups) == 1
-        assert backups[0].read_text() == 'model = "old"'
-
     def test_type(self):
         codex = CodexIntegration()
-        assert codex.type == "config_file"
+        # Codex now configures purely via ephemeral CLI overrides + env, so it
+        # is categorized like the other env-only integrations.
+        assert codex.type == "env_var"
         assert codex.display_name == "Codex"
 
-    def test_configure_preserves_existing(self, tmp_path):
-        config_path = tmp_path / "config.toml"
-        existing = """\
-model = "old-model"
-other_key = "value"
-
-[model_providers.custom]
-name = "Custom"
-model = "should-not-override"
-
-[model_providers.omlx]
-name = "old-omlx"
-"""
-        config_path.write_text(existing)
-
+    def test_launch_does_not_write_config(self, tmp_path, monkeypatch):
+        # The whole point of the redesign: launching must never touch the
+        # user's ~/.codex/config.toml.
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
         codex = CodexIntegration()
-        with patch.object(CodexIntegration, "CONFIG_PATH", config_path):
-            codex.configure(ctx(port=8000, api_key="", model="new-model"))
+        _capture_codex_launch(codex, ctx(port=8000, api_key="key", model="qwen3.5"))
+        assert not (tmp_path / ".codex" / "config.toml").exists()
 
-        content = config_path.read_text()
-        assert 'model = "new-model"' in content
-        assert 'model_provider = "omlx"' in content
-        assert 'other_key = "value"' in content
-        assert "[model_providers.custom]" in content
-        assert 'model = "should-not-override"' in content
-        assert "[model_providers.omlx]" in content
-        assert 'name = "oMLX"' in content
-        assert "old-omlx" not in content
-
-    def test_configure_reasoning_model(self, tmp_path):
-        config_path = tmp_path / "config.toml"
+    def test_launch_includes_provider_overrides(self):
         codex = CodexIntegration()
-        with patch.object(CodexIntegration, "CONFIG_PATH", config_path):
-            codex.configure(ctx(port=8000, api_key="", model="deepseek-r1-distill"))
-
-        content = config_path.read_text()
-        assert 'model_reasoning_effort = "high"' in content
-        assert 'model = "deepseek-r1-distill"' in content
-
-    def test_configure_non_reasoning_model(self, tmp_path):
-        config_path = tmp_path / "config.toml"
-        codex = CodexIntegration()
-        with patch.object(CodexIntegration, "CONFIG_PATH", config_path):
-            codex.configure(ctx(port=8000, api_key="", model="llama-3.1-8b"))
-
-        content = config_path.read_text()
-        assert "model_reasoning_effort" not in content
-
-    def test_configure_reasoning_true_overrides_slug(self, tmp_path):
-        config_path = tmp_path / "config.toml"
-        codex = CodexIntegration()
-        with patch.object(CodexIntegration, "CONFIG_PATH", config_path):
-            codex.configure(ctx(port=8000, model="qwen3.6", reasoning=True))
-
-        content = config_path.read_text()
-        assert 'model_reasoning_effort = "high"' in content
-
-    def test_configure_reasoning_false_overrides_slug(self, tmp_path):
-        config_path = tmp_path / "config.toml"
-        codex = CodexIntegration()
-        with patch.object(CodexIntegration, "CONFIG_PATH", config_path):
-            codex.configure(
-                ctx(port=8000, model="deepseek-r1-distill", reasoning=False)
-            )
-
-        content = config_path.read_text()
-        assert "model_reasoning_effort" not in content
-
-    def test_configure_clears_stale_reasoning_flag(self, tmp_path):
-        config_path = tmp_path / "config.toml"
-        config_path.write_text(
-            'model = "old-thinking-model"\n'
-            'model_provider = "omlx"\n'
-            'model_reasoning_effort = "high"\n'
+        captured = _capture_codex_launch(
+            codex, ctx(port=9000, api_key="key", model="qwen3.5", host="192.168.1.100")
         )
+        argv = captured["argv"]
+        assert _override_value(argv, "model_provider") == "omlx"
+        assert (
+            _override_value(argv, "model_providers.omlx.base_url")
+            == '"http://192.168.1.100:9000/v1"'
+        )
+        assert _override_value(argv, "model_providers.omlx.env_key") == '"OMLX_API_KEY"'
+        assert _override_value(argv, "model_providers.omlx.wire_api") == '"responses"'
+        assert captured["env"]["OMLX_API_KEY"] == "key"
 
+    def test_launch_reasoning_model(self):
         codex = CodexIntegration()
-        with patch.object(CodexIntegration, "CONFIG_PATH", config_path):
-            codex.configure(ctx(port=8000, api_key="", model="llama-3.1-8b"))
+        captured = _capture_codex_launch(
+            codex, ctx(port=8000, model="deepseek-r1-distill")
+        )
+        assert _override_value(captured["argv"], "model_reasoning_effort") == '"high"'
 
-        content = config_path.read_text()
-        assert 'model = "llama-3.1-8b"' in content
-        assert "model_reasoning_effort" not in content
-
-    def test_launch_forwards_extra_args(self, tmp_path):
+    def test_launch_non_reasoning_model(self):
         codex = CodexIntegration()
-        config_path = tmp_path / "codex" / "config.toml"
-        captured = {}
+        captured = _capture_codex_launch(codex, ctx(port=8000, model="llama-3.1-8b"))
+        assert _override_value(captured["argv"], "model_reasoning_effort") is None
 
-        def fake_execvpe(binary, argv, env):
-            captured["argv"] = argv
-            captured["env"] = env
+    def test_launch_reasoning_true_overrides_slug(self):
+        codex = CodexIntegration()
+        captured = _capture_codex_launch(
+            codex, ctx(port=8000, model="qwen3.6", reasoning=True)
+        )
+        assert _override_value(captured["argv"], "model_reasoning_effort") == '"high"'
 
+    def test_launch_reasoning_false_overrides_slug(self):
+        codex = CodexIntegration()
+        captured = _capture_codex_launch(
+            codex, ctx(port=8000, model="deepseek-r1-distill", reasoning=False)
+        )
+        assert _override_value(captured["argv"], "model_reasoning_effort") is None
+
+    def test_launch_passes_context_window_and_max_output_tokens(self):
+        codex = CodexIntegration()
+        captured = _capture_codex_launch(
+            codex,
+            ctx(
+                port=8000,
+                model="gemma-4-26B-A4B-it",
+                context_window=32768,
+                max_tokens=8192,
+            ),
+        )
+        argv = captured["argv"]
+        # Bare ints so Codex parses them as TOML integers (no quotes).
+        assert _override_value(argv, "model_context_window") == "32768"
+        assert _override_value(argv, "model_max_output_tokens") == "8192"
+
+    def test_launch_omits_metadata_when_unknown(self):
+        codex = CodexIntegration()
+        captured = _capture_codex_launch(codex, ctx(port=8000, model="some-model"))
+        argv = captured["argv"]
+        assert _override_value(argv, "model_context_window") is None
+        assert _override_value(argv, "model_max_output_tokens") is None
+
+    def test_launch_forwards_extra_args(self):
+        codex = CodexIntegration()
         base_env = {
             "PATH": "/usr/bin",
             "PYTHONHOME": "/bundle/python",
             "PYTHONPATH": "/bundle/lib",
             "PYTHONDONTWRITEBYTECODE": "1",
         }
-        with (
-            patch.object(CodexIntegration, "CONFIG_PATH", config_path),
-            patch("omlx.integrations.codex.os.environ", base_env),
-            patch("omlx.integrations.codex.os.execvpe", side_effect=fake_execvpe),
-        ):
-            codex.launch(
-                ctx(
-                    port=8000,
-                    api_key="key",
-                    model="qwen3.5",
-                    extra_args=("--yolo",),
-                )
-            )
+        captured = _capture_codex_launch(
+            codex,
+            ctx(port=8000, api_key="key", model="qwen3.5", extra_args=("--yolo",)),
+            base_env=base_env,
+        )
 
-        assert captured["argv"] == ["codex", "-m", "qwen3.5", "--yolo"]
+        argv = captured["argv"]
+        # Model flag comes first; extra args are appended after the overrides.
+        assert argv[:3] == ["codex", "-m", "qwen3.5"]
+        assert argv[-1] == "--yolo"
+        assert _override_value(argv, "model_provider") == "omlx"
         assert captured["env"]["OMLX_API_KEY"] == "key"
         assert "PYTHONHOME" not in captured["env"]
         assert "PYTHONPATH" not in captured["env"]
@@ -1160,18 +1129,22 @@ class TestClaudeCodeIntegration:
                     api_key="secret",
                     model="qwen3.5",
                     context_window=131072,
+                    max_tokens=8192,
                 )
             )
 
         env = captured["env"]
         assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8000"
         assert env["ANTHROPIC_AUTH_TOKEN"] == "secret"
-        assert env["ANTHROPIC_API_KEY"] == ""
+        assert env["ANTHROPIC_API_KEY"] == "secret"
         assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "qwen3.5"
         assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "qwen3.5"
         assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "qwen3.5"
         assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "qwen3.5"
+        assert env["ANTHROPIC_MODEL"] == "qwen3.5"
+        assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "qwen3.5"
         assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "131072"
+        assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "8192"
         # Bundled-python vars must be stripped so claude code subprocess hooks
         # don't inherit our cpython-3.11 stack.
         assert "PYTHONHOME" not in env
@@ -1208,6 +1181,8 @@ class TestClaudeCodeIntegration:
         assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "sonnet-local"
         assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "haiku-local"
         assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "haiku-local"
+        assert env["ANTHROPIC_MODEL"] == "sonnet-local"
+        assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "haiku-local"
 
     def test_launch_open_server_uses_omlx_token(self):
         cc = ClaudeCodeIntegration()
@@ -1248,6 +1223,8 @@ class TestClaudeCodeIntegration:
         env = captured["env"]
         assert "ANTHROPIC_DEFAULT_OPUS_MODEL" not in env
         assert "CLAUDE_CODE_SUBAGENT_MODEL" not in env
+        assert "ANTHROPIC_MODEL" not in env
+        assert "ANTHROPIC_SMALL_FAST_MODEL" not in env
 
     def test_launch_default_argv_has_no_extra(self):
         cc = ClaudeCodeIntegration()

@@ -1,393 +1,551 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/icon-rounded-dark.svg" width="140">
-    <source media="(prefers-color-scheme: light)" srcset="docs/images/icon-rounded-light.svg" width="140">
-    <img alt="oMLX" src="docs/images/icon-rounded-light.svg" width="140">
-  </picture>
-</p>
+# oMNI
 
-<h1 align="center">oMLX</h1>
-<p align="center"><b>LLM inference, optimized for your Mac</b><br>Continuous batching and tiered KV caching, managed directly from your menu bar.</p>
+oMNI is a Linux-friendly fork of [oMLX](https://github.com/jundot/omlx) that keeps
+the useful web UI, chat surface, Anthropic/OpenAI compatibility layer, and admin
+workflow while removing the requirement that inference run through Apple MLX.
 
-<p align="center">
-<a href="https://www.buymeacoffee.com/jundot"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="40"></a>
-</p>
+The current direction is proxy-first: oMNI runs as a lightweight FastAPI gateway
+and admin UI in Docker, then delegates inference to an existing LLM backend such
+as vLLM, llama.cpp server, or any OpenAI-compatible endpoint (Ollama, for
+example).
 
-<p align="center">
-  <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License">
-  <img src="https://img.shields.io/badge/python-3.10+-green" alt="Python 3.10+">
-  <img src="https://img.shields.io/badge/platform-Apple%20Silicon-black?logo=apple" alt="Apple Silicon">
-</p>
+This repository still contains a lot of upstream oMLX code and the Python
+package/CLI is still named `omlx` for now. The fork is being reshaped toward the
+oMNI identity incrementally.
 
-<p align="center">
-  <a href="mailto:junkim.dot@gmail.com">junkim.dot@gmail.com</a> · <a href="https://omlx.ai/me">https://omlx.ai/me</a>
-</p>
+## Why oMNI
 
-<p align="center">
-  <a href="#install">Install</a> ·
-  <a href="#quickstart">Quickstart</a> ·
-  <a href="#features">Features</a> ·
-  <a href="#models">Models</a> ·
-  <a href="#cli-configuration">CLI Configuration</a> ·
-  <a href="https://omlx.ai/benchmarks">Benchmarks</a> ·
-  <a href="https://omlx.ai">oMLX.ai</a>
-</p>
+Upstream oMLX is a strong Mac/Apple-Silicon local inference project built around
+MLX, mlx-lm, native macOS app integration, and local model management.
 
-<p align="center">
-  <b>English</b> ·
-  <a href="README.zh.md">中文</a> ·
-  <a href="README.ko.md">한국어</a> ·
-  <a href="README.ja.md">日本語</a>
-</p>
+This fork has a different goal:
 
----
+- Run on Linux and NVIDIA systems, including DGX Spark.
+- Run headless in Docker.
+- Preserve the oMLX admin/chat UI where it is useful.
+- Proxy to multiple inference backends instead of owning one MLX runtime.
+- Prefer vLLM or llama.cpp sidecars for production Linux deployments.
+- Keep Anthropic-compatible endpoints for tools that expect Claude-style APIs.
 
-<p align="center">
-  <img src="docs/images/omlx_dashboard.png" alt="oMLX Admin Dashboard" width="800">
-</p>
+In short: oMNI is oMLX without the MLX runtime dependency, adapted for many LLM
+inference backends.
 
-> *Every LLM server I tried made me choose between convenience and control. I wanted to pin everyday models in memory, auto-swap heavier ones on demand, set context limits - and manage it all from a menu bar.*
->
-> *oMLX persists KV cache across a hot in-memory tier and cold SSD tier - even when context changes mid-conversation, all past context stays cached and reusable across requests, making local LLMs practical for real coding work with tools like Claude Code. That's why I built it.*
+## Quickstart: Docker Proxy
 
-## Install
+The default Docker workflow runs oMNI as a proxy and expects an external backend
+that provides an OpenAI-compatible `/v1` API.
 
-### macOS App
-
-Download the `.dmg` from [Releases](https://github.com/jundot/omlx/releases), drag to Applications, done. The app includes in-app auto-update, so future upgrades are just one click. The macOS app also installs a lightweight `~/.omlx/bin/omlx` CLI shim so terminal commands and Apple Shortcuts can control the app-managed server.
-
-### Homebrew
+For Docker Desktop on Mac with an OpenAI-compatible backend such as Ollama
+running on the host:
 
 ```bash
-brew tap jundot/omlx https://github.com/jundot/omlx
-brew install omlx
-
-# Upgrade to the latest version
-brew update && brew upgrade omlx
-
-# Run as a background service (auto-restarts on crash)
-omlx start
-
-# Optional: MCP (Model Context Protocol) support
-/opt/homebrew/opt/omlx/libexec/bin/pip install mcp
+docker compose -f docker/docker-compose.proxy.yml up --build
 ```
 
-### From Source
+By default this points at:
+
+```text
+http://host.docker.internal:11434/v1
+```
+
+Open:
+
+- Admin dashboard: `http://localhost:8080/admin/dashboard`
+- Chat UI: `http://localhost:8080/admin/chat`
+- OpenAI-compatible API: `http://localhost:8080/v1`
+- Anthropic-compatible API: `http://localhost:8080/v1/messages`
+
+To point at a different backend:
 
 ```bash
-git clone https://github.com/jundot/omlx.git
-cd omlx
-pip install -e .          # Core only
-pip install -e ".[mcp]"   # With MCP (Model Context Protocol) support
+OMLX_BACKEND_URL=http://your-backend:8000/v1 \
+docker compose -f docker/docker-compose.proxy.yml up --build
 ```
 
-Requires macOS 15.0+ (Sequoia), Python 3.10+, and Apple Silicon (M1/M2/M3/M4).
-
-## Quickstart
-
-### macOS App
-
-Launch oMLX from your Applications folder. The Welcome screen guides you through three steps - model directory, server start, and first model download. That's it. To connect OpenClaw, OpenCode, Codex, Hermes Agent, or Copilot, see [Integrations](#integrations).
-
-<p align="center">
-  <img src="docs/images/Screenshot 2026-02-10 at 00.36.32.png" alt="oMLX Welcome Screen" width="360">
-  <img src="docs/images/Screenshot 2026-02-10 at 00.34.30.png" alt="oMLX Menubar" width="240">
-</p>
-
-### CLI
+If the backend needs an API key:
 
 ```bash
-# Managed background server (macOS app or Homebrew install)
-omlx start
-omlx stop
-omlx restart
-
-# Foreground server attached to this terminal
-omlx serve --model-dir ~/models
+OMLX_BACKEND_URL=http://your-backend:8000/v1 \
+OMLX_BACKEND_API_KEY=backend-secret \
+OMLX_PROXY_API_KEY=proxy-secret \
+docker compose -f docker/docker-compose.proxy.yml up --build
 ```
 
-The server discovers LLMs, VLMs, embedding models, and rerankers from subdirectories automatically. Any OpenAI-compatible client can connect to `http://localhost:8000/v1`. A built-in chat UI is also available at `http://localhost:8000/admin/chat`.
+`OMLX_BACKEND_API_KEY` is sent to the upstream backend. `OMLX_PROXY_API_KEY`
+protects the oMNI proxy itself.
 
-### Homebrew Service
+## Installing the `omni` Tool
 
-If you installed via Homebrew, you can run oMLX as a managed background service:
+`omni` is installed from this repo as a Python console script. The Python
+package is named `omlx` (the install output will say `+ omlx==...`), but the
+install registers both the `omlx` and `omni` commands in your environment. On
+Linux/Spark hosts, the CLI is mainly a Docker Compose launcher, so the
+lightweight install path is to install the local package without resolving the
+Mac/MLX runtime dependencies:
 
 ```bash
-omlx start                    # Start via brew services
-omlx stop                     # Stop
-omlx restart                  # Restart
-
-brew services start omlx    # Start (auto-restarts on crash)
-brew services stop omlx     # Stop
-brew services restart omlx  # Restart
-brew services info omlx     # Check status
+cd path/to/omlx-docker
+python3 -m pip install -e . --no-deps
+rehash  # zsh only; refreshes command lookup after installing console scripts
+omni --help
 ```
 
-The service runs `omlx serve` with zero-config defaults (`~/.omlx/models`, port 8000). `omlx start`, `omlx stop`, and `omlx restart` are the portable lifecycle commands; Homebrew installs delegate them to `brew services`. To customize, either set environment variables (`OMLX_MODEL_DIR`, `OMLX_PORT`, etc.) or run `omlx serve --model-dir /your/path` once to persist settings to `~/.omlx/settings.json`.
+If the shell still cannot find `omni`, run it through Python directly:
 
-Logs are written to two locations:
-- **Service log**: `$(brew --prefix)/var/log/omlx.log` (stdout/stderr)
-- **Server log**: `~/.omlx/logs/server.log` (structured application log)
+```bash
+cd path/to/omlx-docker
+python3 -m omlx.omni_cli --help
+python3 -m omlx.omni_cli serve --backend vllm --generate-only
+```
 
-## Features
+With `uv`, use an isolated environment and the same no-dependency install:
 
-Supports text LLMs, vision-language models (VLM), OCR models, embeddings, and rerankers on Apple Silicon.
+```bash
+cd path/to/omlx-docker
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -e . --no-deps
+rehash  # zsh only; refreshes command lookup after installing console scripts
+omni --help
+```
 
-### Admin Dashboard
+Use `--no-deps` for the Linux proxy workflow because the upstream project still
+declares Mac/MLX-oriented dependencies. The Docker proxy image installs its own
+minimal server dependencies. For development tests in this repo, install pytest
+into the active environment:
 
-Web UI at `/admin` for real-time monitoring, model management, chat, benchmark, and per-model settings. Supports English, Korean, Japanese, Chinese, French, and Russian. All CDN dependencies are vendored for fully offline operation.
+```bash
+python3 -m pip install pytest
+python3 -m pytest tests/test_omni_cli.py -q
+```
 
-<p align="center">
-  <img src="docs/images/Screenshot 2026-02-10 at 00.45.34.png" alt="oMLX Admin Dashboard" width="720">
-</p>
+## Quickstart: vLLM Sidecar
 
-### Vision-Language Models
+Use `omni serve --backend vllm` to generate a local vLLM Compose file and launch
+oMNI plus a vLLM OpenAI server sidecar on Linux/NVIDIA hosts.
 
-Run VLMs with the same continuous batching and tiered KV cache stack as text LLMs. Supports multi-image chat, base64/URL/file image inputs, and tool calling with vision context. OCR models (DeepSeek-OCR, DOTS-OCR, GLM-OCR) are auto-detected with optimized prompts.
+```bash
+omni serve --backend vllm \
+  --model Qwen/Qwen3-1.7B \
+  --served-model-name qwen
+```
 
-### Tiered KV Cache (Hot + Cold)
+The command writes two local generated files, then runs Docker Compose with an
+explicit env file:
 
-Block-based KV cache management inspired by vLLM, with prefix sharing and Copy-on-Write. The cache operates across two tiers:
+- `docker/docker-compose.vllm.yml` - generated Compose stack, ignored by git.
+- `docker/docker-compose.vllm.env` - last-used vLLM launch settings, ignored by git.
+- `docker/omni-serve.json` - last-used `omni serve` backend/compose selection, ignored by git.
 
-- **Hot tier (RAM)**: Frequently accessed blocks stay in memory for fast access.
-- **Cold tier (SSD)**: When the hot cache fills up, blocks are offloaded to SSD in safetensors format. On the next request with a matching prefix, they're restored from disk instead of recomputed from scratch - even after a server restart.
+If `docker/docker-compose.vllm.env` already exists, omitted `omni serve` flags
+reuse values from that file. Passing a flag such as `--model`,
+`--served-model-name`, or `--context-length` updates only the corresponding env
+value. On first run, missing values use the built-in defaults. The proxy talks
+to vLLM at `http://vllm:8000/v1` inside the compose network and publishes oMNI
+on port `8080`. The compose file bind-mounts the host Hugging Face cache at
+`${HOME}/.cache/huggingface`, so already downloaded models are reused.
 
-<p align="center">
-  <img src="docs/images/omlx_hot_cold_cache.png" alt="oMLX Hot & Cold Cache" width="720">
-</p>
+For vLLM sidecars, `omni serve` auto-sizes context and
+`gpu-memory-utilization` from the selected model and host memory when those
+flags are omitted and the model is available locally. The context calculation
+uses model weights, KV-cache geometry, the host reserve, and the current
+`OMNI_MAX_PARALLEL`; there is no fixed long-context default. To refresh a stale
+env file for the currently selected model, run:
 
-### Continuous Batching
+```bash
+omni serve --backend vllm --optimize
+```
 
-Handles concurrent requests through mlx-lm's BatchGenerator. Max concurrent requests is configurable via CLI or admin panel.
+`--optimize` clears model-specific vLLM overrides such as dtype, quantization,
+tool parser, scheduler token budget, and chunked-prefill before recomputing the
+resource-based context/utilization profile. Explicit flags in the same command
+still win. Long computed contexts automatically enable chunked prefill unless
+you pass `--no-enable-chunked-prefill`.
 
-### Claude Code Optimization
+Restart the vLLM container after changing vLLM launch settings; proxy backend
+settings and proxy sampling defaults apply live in the running proxy.
 
-Context scaling support for running smaller context models with Claude Code. Scales reported token counts so that auto-compact triggers at the right timing, and SSE keep-alive prevents read timeouts during long prefill.
+The sidecar compose uses `gpus: all` and `ipc: host`, so Docker must be
+configured with NVIDIA Container Toolkit on Linux. Use `omni serve --backend vllm`
+for vLLM sidecar launches.
 
-### Multi-Model Serving
+## Quickstart: llama.cpp Sidecar
 
-Load LLMs, VLMs, embedding models, and rerankers within the same server. Models are managed through a combination of automatic and manual controls:
+Use `omni serve --backend llamacpp` to generate a local llama.cpp Compose file
+and launch oMNI plus a `llama-server` sidecar. The model is either a Hugging
+Face GGUF repo (`owner/repo[:quantTag]`, downloaded by llama.cpp via `-hf` and
+cached in the mounted `~/.cache/llama.cpp`) or a local `.gguf` path (passed via
+`-m`; relative paths resolve inside the read-only `/models` mount):
 
-- **LRU eviction**: Least-recently-used models are evicted automatically when memory runs low.
-- **Manual load/unload**: Interactive status badges in the admin panel let you load or unload models on demand.
-- **Model pinning**: Pin frequently used models to keep them always loaded.
-- **Per-model TTL**: Set an idle timeout per model to auto-unload after a period of inactivity.
-- **Process memory enforcement**: Total memory limit (default: system RAM - 8GB) prevents system-wide OOM.
+```bash
+omni serve --backend llamacpp \
+  --model ggml-org/Qwen3-1.7B-GGUF:Q8_0 \
+  --served-model-name qwen \
+  --context-length 16384
 
-### Per-Model Settings
+# Local GGUF file from the llama.cpp cache / model dir mount
+omni serve --backend llamacpp --model qwen3.gguf \
+  --llamacpp-model-dir ~/gguf-models
+```
 
-Configure sampling parameters, chat template kwargs, TTL, model alias, model type override, and more per model directly from the admin panel. Changes apply immediately without server restart.
+Generated files mirror the vLLM workflow:
 
-- **Model alias**: set a custom API-visible name. `/v1/models` returns the alias, and requests accept both the alias and directory name.
-- **Model type override**: manually set a model as LLM or VLM regardless of auto-detection.
+- `docker/docker-compose.llamacpp.yml` - generated Compose stack, ignored by git.
+- `docker/docker-compose.llamacpp.env` - last-used llama.cpp launch settings, ignored by git.
 
-<p align="center">
-  <img src="docs/images/omlx_ChatTemplateKwargs.png" alt="oMLX Chat Template Kwargs" width="480">
-</p>
+The host Hugging Face cache (`OMNI_HF_HOME`) is mounted into both the vLLM and
+llama.cpp containers, and `~/.cache/llama.cpp` persists `-hf` downloads, so
+switching backends never re-downloads models. With `--backend llamacpp
+--backend-url URL`, the command instead proxies to an external llama.cpp server
+and generates no sidecar compose.
 
-### Built-in Chat
+## Sidecar Environment Variables
 
-Chat directly with any loaded model from the admin panel. Supports conversation history, model switching, dark mode, reasoning model output, and image upload for VLM/OCR models.
+Portable settings carry the `OMNI_` prefix and apply to whichever managed
+sidecar backend is selected:
 
-<p align="center">
-  <img src="docs/images/ScreenShot_2026-03-14_104350_610.png" alt="oMLX Chat" width="720">
-</p>
+| Variable | Default | Purpose |
+|---|---:|---|
+| `OMNI_MODEL` | per backend | Model id/path (vLLM: HF id or container path; llama.cpp: GGUF repo `owner/repo[:quant]` or `.gguf` path) |
+| `OMNI_SERVED_MODEL_NAME` | `qwen` | API-visible model name |
+| `OMNI_CONTEXT_LENGTH` | `8192` | Context length (vLLM `--max-model-len`, llama.cpp `--ctx-size`); vLLM auto-sizes this from local model + host memory when omitted |
+| `OMNI_MAX_PARALLEL` | `4` | Max concurrent sequences (vLLM `--max-num-seqs`, llama.cpp `--parallel`) |
+| `OMNI_BACKEND_PORT` | `8000` | Host port published for the backend container |
+| `OMNI_HF_HOME` | `${HOME}/.cache/huggingface` | Host Hugging Face cache to mount into the backend |
+| `OMNI_HF_ENDPOINT` | empty | Hugging Face endpoint exposed as `HF_ENDPOINT` |
+| `OMNI_HTTP_PROXY` / `OMNI_HTTPS_PROXY` | empty | Proxy env passed to proxy and backend containers |
+| `OMNI_NO_PROXY` | empty | No-proxy host list for both containers |
+| `OMNI_CA_BUNDLE` | empty | CA bundle path exposed as `REQUESTS_CA_BUNDLE`/`SSL_CERT_FILE` (llama.cpp: `CURL_CA_BUNDLE`) |
 
+vLLM-specific settings:
 
-### Model Downloader
+| Variable | Default | Purpose |
+|---|---:|---|
+| `VLLM_IMAGE` | `vllm/vllm-openai:latest` | vLLM container image |
+| `VLLM_GPU_MEMORY_UTILIZATION` | `0.80` | vLLM GPU memory fraction; vLLM sidecar auto-sizes this on unified-memory hosts when omitted |
+| `VLLM_GENERATION_CONFIG` | `vllm` | Use vLLM defaults instead of model `generation_config.json` |
+| `VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS` | `{"enable_thinking":false}` | Disables Qwen thinking output in chat templates |
+| `VLLM_TRUST_REMOTE_CODE` | `true` | Add `--trust-remote-code` |
+| `VLLM_ENABLE_AUTO_TOOL_CHOICE` | `true` | Add vLLM auto tool-choice flags when a parser is available |
+| `VLLM_TOOL_CALL_PARSER` | `auto` | vLLM tool-choice parser; `auto` detects from the model family |
+| `VLLM_REASONING_PARSER` | empty | vLLM reasoning parser |
+| `VLLM_DTYPE` | empty | Optional `--dtype` override |
+| `VLLM_TOKENIZER` | empty | Optional tokenizer id/path |
+| `VLLM_TOKENIZER_MODE` | empty | Optional tokenizer mode |
+| `VLLM_REVISION` | empty | Optional model revision |
+| `VLLM_LOAD_FORMAT` | empty | Optional load format |
+| `VLLM_QUANTIZATION` | empty | Optional quantization mode |
+| `VLLM_DOWNLOAD_DIR` | empty | Optional vLLM download directory |
+| `VLLM_MAX_NUM_BATCHED_TOKENS` | empty | Optional scheduler token budget |
+| `VLLM_ENABLE_CHUNKED_PREFILL` | empty | `true`/`false` to force chunked prefill on/off; empty uses vLLM default |
+| `VLLM_ENABLE_PREFIX_CACHING` | empty | `true`/`false` to force prefix caching on/off; empty uses vLLM default |
+| `VLLM_KV_CACHE_DTYPE` | empty | Optional KV cache dtype |
+| `VLLM_CPU_OFFLOAD_GB` | empty | Optional CPU offload GB per GPU |
+| `VLLM_SWAP_SPACE` | empty | Optional swap space GB per GPU |
+| `VLLM_TENSOR_PARALLEL_SIZE` | `1` | Tensor parallel size |
+| `VLLM_PIPELINE_PARALLEL_SIZE` | `1` | Pipeline parallel size |
+| `VLLM_UVICORN_LOG_LEVEL` | empty | Optional vLLM API log level |
+| `VLLM_DISABLE_LOG_STATS` | `false` | Add `--disable-log-stats` when true |
+| `VLLM_EXTRA_ARGS_JSON` | `[]` | Raw extra vLLM args as a JSON array appended last |
 
-Search and download MLX models from HuggingFace directly in the admin dashboard. Browse model cards, check file sizes, and download with one click.
+llama.cpp-specific settings:
 
-<p align="center">
-  <img src="docs/images/downloader_omlx.png" alt="oMLX Model Downloader" width="720">
-</p>
+| Variable | Default | Purpose |
+|---|---:|---|
+| `LLAMACPP_IMAGE` | `ghcr.io/ggml-org/llama.cpp:server-cuda` | llama.cpp server image (use `:server` for CPU, `:server-vulkan` for non-NVIDIA GPUs) |
+| `LLAMACPP_N_GPU_LAYERS` | `999` | Layers offloaded to the GPU (`999` = all) |
+| `LLAMACPP_FLASH_ATTN` | empty (auto) | `--flash-attn on/off` when set |
+| `LLAMACPP_CACHE_TYPE_K` / `LLAMACPP_CACHE_TYPE_V` | empty (f16) | KV cache quantization, e.g. `q8_0` |
+| `LLAMACPP_THREADS` | empty (auto) | CPU threads |
+| `LLAMACPP_BATCH_SIZE` / `LLAMACPP_UBATCH_SIZE` | empty | Logical/physical batch sizes |
+| `LLAMACPP_JINJA` | `true` | `--jinja` chat templates (required for tool calling) |
+| `LLAMACPP_REASONING_FORMAT` | empty (auto) | `--reasoning-format` for thinking models |
+| `LLAMACPP_CACHE_DIR` | `${HOME}/.cache/llama.cpp` | Host cache for `-hf` GGUF downloads |
+| `LLAMACPP_MODEL_DIR` | cache dir | Host dir mounted read-only at `/models` for local `.gguf` files |
+| `LLAMACPP_EXTRA_ARGS` | empty | Raw llama-server args appended last (whitespace-split, unlike `VLLM_EXTRA_ARGS_JSON`) |
 
-### Integrations
+Proxy defaults shared by both stacks:
 
-Set up OpenClaw, OpenCode, Codex, Hermes Agent, Copilot, and Pi directly from the admin dashboard with a single click. No manual config editing required.
+| Variable | Default | Purpose |
+|---|---:|---|
+| `OMLX_SAMPLING_MAX_TOKENS` | `32768` | Proxy default max output tokens when request omits it |
+| `OMLX_SAMPLING_TEMPERATURE` | `1.0` | Proxy default temperature when request omits it |
+| `OMLX_SAMPLING_TOP_P` | `1.0` | Proxy default top-p when request omits it |
+| `OMLX_SAMPLING_TOP_K` | `0` | Proxy default top-k when request omits it |
+| `OMLX_SAMPLING_REPETITION_PENALTY` | `1.0` | Proxy default repetition penalty when request omits it |
+| `HF_TOKEN` | empty | Hugging Face token for gated models |
 
-<p align="center">
-  <img src="docs/images/omlx_integrations.png" alt="oMLX Integrations" width="720">
-</p>
+The admin settings page edits the same env-backed sidecar launch and proxy
+default settings, then regenerates the active stack's compose file. Sampling
+defaults such as temperature, top-p, top-k, repetition penalty, and max tokens
+are persisted in the generated `.env` file as `OMLX_SAMPLING_*` values and
+applied by the oMNI proxy to forwarded chat/completion requests when the client
+omits those fields. Backend launch settings still require a backend/container
+restart. The generated entrypoints export Hugging Face, proxy, and CA bundle
+environment variables only when configured, avoiding empty URL values such as
+`HF_ENDPOINT=` inside the backend process.
 
-### Performance Benchmark
+Note: earlier releases used `VLLM_`-prefixed names for the portable settings
+(`VLLM_MODEL`, `VLLM_MAX_MODEL_LEN`, `VLLM_PORT`, ...). Those names are no
+longer read; rerun `omni serve` with your flags (or re-save the admin settings)
+to regenerate the env file with the `OMNI_` names.
 
-One-click benchmarking from the admin panel. Measures prefill (PP) and text generation (TG) tokens per second, with partial prefix cache hit testing for realistic performance numbers.
+## Managing the Docker Stack
 
-<p align="center">
-  <img src="docs/images/benchmark_omlx.png" alt="oMLX Benchmark Tool" width="720">
-</p>
+Use `omni status` to view the containers for the active oMNI Compose stack:
 
-### macOS Menubar App
+```bash
+omni status
+```
 
-Native Swift / SwiftUI menubar app (not Electron). Start, stop, and monitor the server without opening a terminal. Includes persistent serving stats (survives restarts), auto-restart on crash, and Sparkle-driven auto-update.
+By default, a first `omni serve` with no backend flags launches
+`docker/docker-compose.proxy.yml` with the `openai` backend, which defaults to
+Ollama on the Docker host at `http://host.docker.internal:11434/v1`. Explicit backend launches are
+remembered in `docker/omni-serve.json`, so future plain `omni serve` invocations
+reuse the last backend and compose file. Proxy launch environment is persisted in
+`docker/docker-compose.proxy.env`; sidecar launch environments are persisted in
+`docker/docker-compose.vllm.env` and `docker/docker-compose.llamacpp.env`.
 
-<p align="center">
-  <img src="docs/images/Screenshot 2026-02-10 at 00.51.54.png" alt="oMLX Menubar Stats" width="400">
-</p>
+By default, `omni status` uses the last saved compose file when present. Without
+saved state it uses the generated `docker/docker-compose.vllm.yml` when it
+exists, otherwise it falls back to `docker/docker-compose.proxy.yml`. To inspect
+a specific stack:
 
-### API Compatibility
+```bash
+omni status --compose-file docker/docker-compose.proxy.yml
+```
 
-Drop-in replacement for OpenAI and Anthropic APIs. Supports streaming usage stats (`stream_options.include_usage`), Anthropic adaptive thinking, and vision inputs (base64, URL).
+View logs for the selected stack, optionally following new output or filtering
+to the proxy or managed backend service:
 
-| Endpoint | Description |
-|----------|-------------|
-| `POST /v1/chat/completions` | Chat completions (streaming) |
-| `POST /v1/completions` | Text completions (streaming) |
-| `POST /v1/messages` | Anthropic Messages API |
-| `POST /v1/embeddings` | Text embeddings |
-| `POST /v1/rerank` | Document reranking |
-| `GET /v1/models` | List available models |
+```bash
+omni logs
+omni logs -f
+omni logs --target proxy
+omni logs --target backend
+omni logs --compose-file docker/docker-compose.proxy.yml
+```
 
-### Tool Calling & Structured Output
+Restart the proxy, the managed backend, or both services:
 
-Supports all function calling formats available in mlx-lm, JSON schema validation, and MCP tool integration. Tool calling requires the model's chat template to support the `tools` parameter. The following model families are auto-detected via mlx-lm's built-in tool parsers:
+```bash
+omni restart --target proxy
+omni restart --target backend
+omni restart --target both
+```
 
-| Model Family | Format |
+Stop the proxy, the managed backend, or both services. `omni stop` requires an
+explicit target and stops containers without removing volumes or networks:
+
+```bash
+omni stop --target proxy
+omni stop --target backend
+omni stop --target both
+```
+
+For the vLLM and llama.cpp sidecar stacks, `--target backend` reads logs from,
+restarts, or stops the `vllm` or `llamacpp` service. For OpenAI-compatible and
+external llama.cpp proxy stacks, the backend is not managed by this repo, so use
+`--target proxy` or inspect/restart/stop the backend with its own tooling.
+
+For the sidecar stacks, the admin dashboard also offers a **Restart Backend**
+button (Settings → Proxy Backend) that restarts the sidecar container through
+the Docker Engine API and applies saved launch settings (model, context length,
+backend flags). Image and port-mapping changes still require recreating the
+stack on the host with `omni serve` or `docker compose up -d`. The generated
+compose files mount `/var/run/docker.sock` into the proxy container to enable
+this; that grants the proxy control over the local Docker daemon, so remove the
+mount if you do not want it — the button then reports that restart is
+unavailable.
+
+## Running Without Docker
+
+The proxy can also run directly from Python:
+
+```bash
+pip install -e .
+omlx proxy --backend-url http://localhost:8000/v1 --host 0.0.0.0 --port 8080
+```
+
+The direct command is useful for development, but Docker is the primary target
+for Linux and DGX deployments.
+
+## Configuration
+
+Proxy mode is configured with environment variables or CLI flags.
+
+| Environment Variable | Description |
 |---|---|
-| Llama, Qwen, DeepSeek, etc. | JSON `<tool_call>` |
-| Qwen3.5 Series | XML `<function=...>` |
-| Gemma | `<start_function_call>` |
-| GLM (4.7, 5) | `<arg_key>/<arg_value>` XML |
-| MiniMax | Namespaced `<minimax:tool_call>` |
-| Mistral | `[TOOL_CALLS]` |
-| Kimi K2 | `<\|tool_calls_section_begin\|>` |
-| Longcat | `<longcat_tool_call>` |
+| `OMLX_BACKEND_URL` | Required backend URL, normally ending in `/v1` |
+| `OMLX_BACKEND_API_KEY` | Optional API key for the backend |
+| `OMLX_PROXY_API_KEY` | Optional API key required by oMNI clients |
+| `OMLX_PROXY_HOST` | Bind host, defaults to `0.0.0.0` |
+| `OMLX_PROXY_PORT` | Bind port, defaults to `8080` |
+| `OMLX_PROXY_TIMEOUT` | Backend request timeout in seconds, defaults to `600` |
+| `OMLX_CONTEXT_SCALING` | Enable reported token scaling |
+| `OMLX_TARGET_CONTEXT_SIZE` | Token count target reported to clients |
+| `OMLX_ACTUAL_CONTEXT_SIZE` | Actual backend context size |
+| `OMLX_SSE_KEEPALIVE_MODE` | Anthropic SSE keepalive mode, defaults to `ping` |
+| `OMLX_PROXY_STATE_PATH` | Persistent proxy admin state path |
 
-Models not listed above may still work if their chat template accepts `tools` and their output uses a recognized `<tool_call>` XML format. For tool-enabled streaming, assistant text is emitted incrementally while known tool-call control markup is suppressed from visible content; structured tool calls are emitted after parsing the completed turn.
+## API Surface
 
-## Models
+oMNI exposes an OpenAI-compatible API and an Anthropic-compatible bridge.
 
-Point `--model-dir` at a directory containing MLX-format model subdirectories. Two-level organization folders (e.g., `mlx-community/model-name/`) are also supported.
+| Endpoint | Status | Notes |
+|---|---|---|
+| `GET /v1/models` | Working | Proxies backend model list |
+| `POST /v1/chat/completions` | Working | Passthrough to backend |
+| `POST /v1/messages` | Working | Anthropic Messages to OpenAI chat translation |
+| `POST /v1/messages/count_tokens` | Approximate | Local estimate, supports context scaling |
+| `GET /admin/chat` | Working | Browser chat UI |
+| `GET /admin/dashboard` | Working | Proxy-mode admin dashboard |
+| `GET /admin/api/proxy/status` | Working | Backend reachability and model count |
+| `GET /admin/api/proxy/metrics` | Working | vLLM Prometheus and Ollama probes |
+| `POST /admin/api/sidecar/restart` | Working | Restarts the managed vLLM/llama.cpp sidecar container |
 
-```
-~/models/
-├── Step-3.5-Flash-8bit/
-├── Qwen3-Coder-Next-8bit/
-├── gpt-oss-120b-MXFP4-Q8/
-├── Qwen3.5-122B-A10B-4bit/
-└── bge-m3/
-```
+Native oMLX endpoints that depend on MLX model loading, local KV cache
+management, quantization, benchmarks, and macOS services are being removed,
+stubbed, or hidden in proxy mode.
 
-Models are auto-detected by type. You can also download models directly from the admin dashboard.
+## Backend Notes
 
-| Type | Models |
-|------|--------|
-| LLM | Any model supported by [mlx-lm](https://github.com/ml-explore/mlx-lm) |
-| VLM | Qwen3.5 Series, GLM-4V, Pixtral, and other [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) models |
-| OCR | DeepSeek-OCR, DOTS-OCR, GLM-OCR |
-| Embedding | BERT, BGE-M3, ModernBERT |
-| Reranker | ModernBERT, XLM-RoBERTa |
+The admin dashboard offers three backend types: **OpenAI-compatible**, **vLLM**,
+and **llama.cpp**. Selecting a type auto-populates the Backend URL: the vLLM and
+llama.cpp sidecar URLs are managed by the Compose stack and shown read-only,
+while the OpenAI-compatible URL is editable and defaults to the Ollama endpoint
+`http://host.docker.internal:11434/v1`. Settings that are unique to a backend
+(backend URL, API key, model, served model name, and the vLLM/llama.cpp launch
+flags) persist per backend type, so switching types back and forth restores each
+backend's last values. Hardware- and model-dependent settings such as context
+length, max parallel, and sampling defaults are shared across backends. In
+OpenAI-compatible "router" mode the sidecar launch settings are hidden, since a
+remote backend manages its own model and runtime.
 
-## CLI Configuration
+### Ollama (via the OpenAI-compatible backend type)
+
+There is no dedicated Ollama backend type; Ollama works through its
+OpenAI-compatible API. Select **OpenAI-compatible** in the admin settings (the
+URL already defaults to the Ollama endpoint), or point the proxy compose stack
+at it directly:
 
 ```bash
-# Managed background server (macOS app or Homebrew install)
-omlx start
-omlx stop
-omlx restart
-
-# Start with default settings (memory guard tier = balanced, manage via admin UI)
-omlx serve --model-dir ~/models
-
-# Choose a memory guard tier at startup
-omlx serve --model-dir ~/models --memory-guard safe
-
-# Set a custom memory guard ceiling in GB
-omlx serve --model-dir ~/models --memory-guard-gb 48
-
-# Enable SSD cache for KV blocks
-omlx serve --model-dir ~/models --paged-ssd-cache-dir ~/.omlx/cache
-
-# Set in-memory hot cache size
-omlx serve --model-dir ~/models --hot-cache-max-size 20%
-
-# Adjust max concurrent requests (default: 8)
-omlx serve --model-dir ~/models --max-concurrent-requests 16
-
-# With MCP tools
-omlx serve --model-dir ~/models --mcp-config mcp.json
-
-# HuggingFace mirror endpoint (for restricted regions)
-omlx serve --model-dir ~/models --hf-endpoint https://hf-mirror.com
-
-# API key authentication
-omlx serve --model-dir ~/models --api-key your-secret-key
-# Localhost-only: skip verification via admin panel global settings
+OMLX_BACKEND_URL=http://host.docker.internal:11434/v1 \
+docker compose -f docker/docker-compose.proxy.yml up --build
 ```
 
-All settings can also be configured from the web admin panel at `/admin`. Settings are persisted to `~/.omlx/settings.json`, and CLI flags take precedence.
+The admin metrics endpoint still probes Ollama-native `/api/tags` and `/api/ps`
+when available, so the dashboard can show available and loaded model counts.
 
-<details>
-<summary>Architecture</summary>
+### vLLM
 
-```
-FastAPI Server (OpenAI / Anthropic API)
-    │
-    ├── EnginePool (multi-model, LRU eviction, TTL, manual load/unload)
-    │   ├── BatchedEngine (LLMs, continuous batching)
-    │   ├── VLMEngine (vision-language models)
-    │   ├── EmbeddingEngine
-    │   └── RerankerEngine
-    │
-    ├── ProcessMemoryEnforcer (total memory limit, TTL checks)
-    │
-    ├── Scheduler (FCFS, configurable concurrency)
-    │   └── mlx-lm BatchGenerator
-    │
-    └── Cache Stack
-        ├── PagedCacheManager (GPU, block-based, CoW, prefix sharing)
-        ├── Hot Cache (in-memory tier, write-back)
-        └── PagedSSDCacheManager (SSD cold tier, safetensors format)
-```
+vLLM is the preferred Linux/NVIDIA backend target. oMNI can proxy to an external
+vLLM server or run with the generated vLLM sidecar compose stack. `omni serve
+--backend vllm` owns sidecar generation and Compose launch; Admin edits the same
+intended launch settings and regenerates the local env/compose files. The
+dashboard parses common vLLM Prometheus metrics such as request counts, token
+counts, running/waiting requests, and GPU cache usage.
 
-</details>
+### llama.cpp Server
+
+llama.cpp runs either as a managed sidecar (`omni serve --backend llamacpp`,
+which generates and launches `docker/docker-compose.llamacpp.yml`) or as an
+externally managed server (`omni serve --backend llamacpp --backend-url URL`).
+The managed sidecar starts `llama-server` with `--jinja` by default so
+OpenAI-compatible tool calling works with modern chat templates. Compatibility
+still needs more real-backend testing, especially around model listing,
+streaming behavior, tool calling, and metrics.
 
 ## Development
 
-### CLI Server
+Proxy-focused checks:
 
 ```bash
-git clone https://github.com/jundot/omlx.git
-cd omlx
-pip install -e ".[dev]"
-pytest -m "not slow"
+pytest tests/test_proxy.py tests/test_omni_cli.py -q
+python -m compileall -q omlx/proxy
+node --check omlx/admin/static/js/dashboard.js
+docker compose -f docker/docker-compose.proxy.yml build
 ```
 
-### macOS App
+The full upstream test suite still imports MLX/Metal paths. In headless,
+sandboxed, virtualized, or Linux environments those tests may fail during
+collection before reaching proxy code. Until the fork removes or isolates native
+MLX modules, `tests/test_proxy.py` and `tests/test_omni_cli.py` are the main
+regression suites for the Linux proxy path.
 
-The native SwiftUI app lives at `apps/omlx-mac/`. Requires Xcode 26.5+ and Python 3.11+. venvstacks is declared as a dev dependency so `pip install -e ".[dev]"` (or `uv sync --dev`) brings the pinned version in. The build script also falls back to `uvx venvstacks` or `pipx run venvstacks` if you prefer a host-global tool runner.
+## Project Layout
 
-```bash
-# Stage a runnable oMLX.app (xcodebuild + venvstacks Python layers + ad-hoc sign)
-apps/omlx-mac/Scripts/build.sh release
+| Path | Purpose |
+|---|---|
+| `omlx/proxy/` | MLX-free proxy gateway and backend adapters |
+| `omlx/admin/` | Reused oMLX admin UI assets and proxy compatibility routes |
+| `docker/Dockerfile.proxy` | Minimal proxy image |
+| `docker/docker-compose.proxy.yml` | Proxy with external backend |
+| `docker/docker-compose.vllm.template.yml` | Default template for generated vLLM compose files |
+| `docker/docker-compose.llamacpp.template.yml` | Default template for generated llama.cpp compose files |
+| `docker/docker-compose.vllm.yml` | Local generated vLLM sidecar compose file, ignored by git |
+| `docker/docker-compose.vllm.env` | Local generated vLLM launch settings, ignored by git |
+| `docker/docker-compose.llamacpp.yml` | Local generated llama.cpp sidecar compose file, ignored by git |
+| `docker/docker-compose.llamacpp.env` | Local generated llama.cpp launch settings, ignored by git |
+| `docker/docker-compose.proxy.env` | Local proxy launch settings, ignored by git |
+| `docker/omni-serve.json` | Last `omni serve` backend/compose selection, ignored by git |
+| `docker/proxy.env.example` | Example environment values |
+| `tests/test_proxy.py` | Proxy regression tests |
+| `LINUX_PROXY_REMAINING_WORK.md` | Current backlog |
 
-# Result lands at apps/omlx-mac/build/Stage/oMLX.app
-open apps/omlx-mac/build/Stage/oMLX.app
+## Current Status
 
-# Force a fresh venvstacks rebuild (otherwise it's cached by fingerprint)
-apps/omlx-mac/Scripts/build.sh release --rebuild-donor
-```
+Working:
 
-First cold build takes 10–20 minutes (venvstacks Python layer assembly). Subsequent builds reuse the cached `packaging/_export/` and finish in about 4 minutes. See [packaging/README.md](packaging/README.md) for the layer configuration and [apps/omlx-mac/](apps/omlx-mac/) for the Swift sources.
+- Dockerized proxy container.
+- OpenAI-compatible passthrough for `/v1/chat/completions` and related routes.
+- Anthropic Messages API translation at `/v1/messages`.
+- Built-in chat UI at `/admin/chat`.
+- Admin dashboard compatibility layer at `/admin/dashboard`.
+- Backend model discovery from `/v1/models`.
+- Proxy backend status and backend metrics panel.
+- Ollama support through the OpenAI-compatible backend type, with native
+  `/api/tags` and `/api/ps` metric probes.
+- vLLM-compatible Prometheus metrics parsing from `/metrics`.
+- Optional vLLM and llama.cpp sidecar compose generation for NVIDIA hosts.
+- `omni` CLI for generating sidecar stacks and managing Compose containers.
+- Admin controls for backend URL/API key/type and sidecar launch settings,
+  persisted per backend type.
+- Sidecar backend restart from the admin UI via the Docker Engine API.
+- Env-file persistence for sidecar launch settings and proxy sampling defaults.
+- Backend-portable `OMNI_*` settings shared between vLLM and llama.cpp sidecars.
+- Context token scaling for Claude Code style workflows.
+- SSE keepalive support for long-running requests.
 
-## Contributing
+Still in progress:
 
-Contributions are welcome! See [Contributing Guide](docs/CONTRIBUTING.md) for details.
+- Cleaner proxy-mode UI that hides native MLX-only controls.
+- More complete real-backend validation for vLLM, llama.cpp server, and
+  OpenAI-compatible backends such as Ollama.
+- Spark/Linux runbooks with known-good model examples and troubleshooting.
+- Formal package/module rename from `omlx` toward `omni` (including the
+  remaining `OMLX_*` proxy env vars).
+- Removing unused macOS/MLX-native code from this fork.
 
-- Bug fixes and improvements
-- Performance optimizations
-- Documentation improvements
+See [LINUX_PROXY_REMAINING_WORK.md](LINUX_PROXY_REMAINING_WORK.md) for the
+current implementation backlog.
+
+## Attribution
+
+oMNI is forked from oMLX by Jun Kim and keeps substantial oMLX code, UI assets,
+API adapters, and design ideas. This fork exists because oMLX built a useful
+admin and compatibility layer, and the goal here is to salvage that experience
+for non-MLX backends.
+
+Important upstream projects:
+
+- [oMLX](https://github.com/jundot/omlx) - original project and UI foundation.
+- [MLX](https://github.com/ml-explore/mlx) and
+  [mlx-lm](https://github.com/ml-explore/mlx-lm) - upstream oMLX inference stack.
+- [vLLM](https://github.com/vllm-project/vllm) - preferred Linux/NVIDIA backend.
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) - target local inference backend.
+- [Ollama](https://github.com/ollama/ollama) - supported OpenAI-compatible backend.
 
 ## License
 
-[Apache 2.0](LICENSE)
-
-## Acknowledgments
-
-- [MLX](https://github.com/ml-explore/mlx) and [mlx-lm](https://github.com/ml-explore/mlx-lm) by Apple
-- [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) - Vision-language model inference on Apple Silicon
-- [vllm-mlx](https://github.com/waybarrios/vllm-mlx) - oMLX started from vllm-mlx v0.1.0 and evolved significantly with multi-model serving, tiered KV caching, VLM with full paged cache support, an admin panel, and a macOS menu bar app
-- [venvstacks](https://venvstacks.lmstudio.ai) - Portable Python environment layering for the macOS app bundle
-- [mlx-embeddings](https://github.com/Blaizzy/mlx-embeddings) - Embedding model support for Apple Silicon
-- [dflash-mlx](https://github.com/bstnxbt/dflash-mlx) - Block diffusion speculative decoding on Apple Silicon
+This fork preserves the upstream Apache 2.0 license. See [LICENSE](LICENSE).

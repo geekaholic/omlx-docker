@@ -452,7 +452,10 @@
         position: relative;
     }
 
-    .code-copy-btn {
+    .code-copy-btn,
+    .svg-render-btn,
+    .html-preview-btn,
+    .markdown-preview-btn {
         background: var(--bg-secondary);
         border: 1px solid var(--border-faint);
         border-radius: 0.375em;
@@ -466,25 +469,10 @@
         flex-shrink: 0;
     }
 
-    .code-copy-btn:hover {
-        background: var(--bg-tertiary);
-    }
-
-    .svg-render-btn {
-        background: var(--bg-secondary);
-        border: 1px solid var(--border-faint);
-        border-radius: 0.375em;
-        padding: 0.25em 0.5em;
-        font-size: 0.7em;
-        cursor: pointer;
-        color: var(--text-secondary);
-        display: inline-flex;
-        align-items: center;
-        gap: 0.35em;
-        flex-shrink: 0;
-    }
-
-    .svg-render-btn:hover {
+    .code-copy-btn:hover,
+    .svg-render-btn:hover,
+    .html-preview-btn:hover,
+    .markdown-preview-btn:hover {
         background: var(--bg-tertiary);
     }
 
@@ -505,18 +493,56 @@
 
     .svg-preview-container {
         margin: 0.5em 0;
-        padding: 1em;
         background: #ffffff;
         border: 1px solid var(--border-faint);
         border-radius: 0.5em;
-        text-align: center;
-        overflow: auto;
-        max-height: 2160px;
+        overflow: hidden;
+        height: min(70vh, 720px);
+        min-height: 300px;
     }
 
-    .svg-preview-container svg {
-        max-width: 100%;
-        height: auto;
+    .svg-preview-frame {
+        display: block;
+        width: 100%;
+        height: 100%;
+        border: 0;
+        background: #ffffff;
+    }
+
+    .html-preview-container {
+        margin: 0.5em 0;
+        background: #ffffff;
+        border: 1px solid var(--border-faint);
+        border-radius: 0.5em;
+        overflow: hidden;
+        height: min(70vh, 720px);
+        min-height: 360px;
+    }
+
+    .html-preview-frame {
+        display: block;
+        width: 100%;
+        height: 100%;
+        border: 0;
+        background: #ffffff;
+    }
+
+    .markdown-preview-container {
+        margin: 0.5em 0;
+        padding: 1em;
+        background: var(--bg-primary);
+        border: 1px solid var(--border-faint);
+        border-radius: 0.5em;
+        overflow: auto;
+        max-height: min(70vh, 720px);
+    }
+
+    @media (max-width: 767px) {
+        .svg-preview-container,
+        .html-preview-container {
+            height: min(68vh, 560px);
+            min-height: 300px;
+        }
     }
 
     .svg-allow-row {
@@ -1013,9 +1039,9 @@
             <div class="flex items-center justify-between">
                 <div class="flex items-center gap-2">
                     <a href="/admin/dashboard">
-                        <img x-show="activeTheme === 'light'" src="/admin/static/navbar-logo-light.svg" alt="oMLX"
+                        <img x-show="activeTheme === 'light'" src="/admin/static/navbar-logo-light.svg" alt="oMNI"
                             class="w-[30px] h-[30px]">
-                        <img x-show="activeTheme === 'dark'" src="/admin/static/navbar-logo-dark.svg" alt="oMLX"
+                        <img x-show="activeTheme === 'dark'" src="/admin/static/navbar-logo-dark.svg" alt="oMNI"
                             class="w-[30px] h-[30px]" x-cloak>
                     </a>
                     <div class="flex flex-col gap-0">
@@ -1149,7 +1175,7 @@
                 <i data-lucide="trash-2" class="w-3 h-3"></i>
                 {{ t('chat.clear_all_history') }}
             </button>
-            <button @click="clearApiKey()"
+            <button @click="clearApiKey()" x-show="apiKeyRequired"
                 class="w-full flex items-center gap-1.5 px-2 py-1 text-xs text-fg-tertiary hover:bg-surface-muted rounded">
                 <i data-lucide="key" class="w-3 h-3"></i>
                 {{ t('chat.change_api_key') }}
@@ -1182,9 +1208,9 @@
             <div x-show="messages.length === 0" class="h-full flex items-center justify-center" x-cloak>
                 <div class="text-center max-w-lg px-4">
                     <div class="flex items-center justify-center gap-3 mb-4">
-                        <img x-show="activeTheme === 'light'" src="/admin/static/logo-light.svg" alt="oMLX"
+                        <img x-show="activeTheme === 'light'" src="/admin/static/logo-light.svg" alt="oMNI"
                             class="w-[60px] h-[60px]">
-                        <img x-show="activeTheme === 'dark'" src="/admin/static/logo-dark.svg" alt="oMLX"
+                        <img x-show="activeTheme === 'dark'" src="/admin/static/logo-dark.svg" alt="oMNI"
                             class="w-[60px] h-[60px]" x-cloak>
                         <h1 class="text-2xl font-bold">{{ t('chat.welcome_heading') }}</h1>
                     </div>
@@ -1529,7 +1555,7 @@
                         </div>
                         <!-- Streaming content (thinking block + final answer) -->
                         <!-- Live thinking bubble — shown while reasoning_content is arriving -->
-                        <div x-show="currentStream()?.streamingThinking" class="thinking-container mb-2">
+                        <div x-show="currentStream()?.streamingThinking || currentStream()?.displayStreamingThinking" class="thinking-container mb-2">
                             <div class="thinking-header" @click="toggleCurrentStreamThinking()">
                                 <svg class="thinking-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                     stroke-width="2">
@@ -1546,11 +1572,11 @@
                             </div>
                             <div class="thinking-content markdown-content thinking-markdown"
                                 :class="{ collapsed: !currentStream()?.streamingThinkingOpen }" data-math-pending="true"
-                                :data-math-version="String((currentStream()?.streamingThinking || '').length)"
-                                x-html="renderMarkdown(currentStream()?.streamingThinking || '')"></div>
+                                :data-math-version="String((currentStream()?.displayStreamingThinking || '').length)"
+                                x-html="renderMarkdown(currentStream()?.displayStreamingThinking || '')"></div>
                         </div>
-                        <div x-show="currentStream()?.streamingContent" class="markdown-content" x-ref="streamingOutput"
-                            x-effect="currentStream()?.isStreaming && updateStreamingDOM(currentStream()?.streamingContent)"></div>
+                        <div x-show="currentStream()?.streamingContent || currentStream()?.displayStreamingContent" class="markdown-content" x-ref="streamingOutput"
+                            x-effect="currentStream()?.isStreaming && updateStreamingDOM(currentStream()?.displayStreamingContent || '')"></div>
                     </div>
                 </div>
             </div>
@@ -1874,6 +1900,9 @@
                             min="1" placeholder="Default"
                             class="w-full px-3 py-2 text-xs border border-line rounded-xl focus:outline-none focus:border-line-strong bg-surface-muted"
                             style="color: var(--text-primary);">
+                        <p x-show="currentModelContextWindow" x-cloak class="text-[10px]"
+                            style="color: var(--text-secondary);"
+                            x-text="'Context: ' + (currentModelContextWindow || 0).toLocaleString() + ' tokens'"></p>
                     </div>
                 </div>
 
@@ -2055,7 +2084,8 @@
     function chatApp() {
         return {
             // API Key
-            apiKeySet: false,
+            apiKeyRequired: {{ api_key_configured | tojson }},
+            apiKeySet: {{ (not api_key_configured) | tojson }},
             apiKeyInput: '',
 
             // UI State
@@ -2139,6 +2169,8 @@
             // MCP Tool Call Limits
             MAX_TOOL_DEPTH: 10,          // Max recursive streamResponse calls for tool loops
             TOOL_TIMEOUT_MS: 30000,      // Per-tool execution timeout (ms)
+            STREAM_DISPLAY_FLUSH_MS: 60, // Coalesce tiny token deltas for smoother chat paint
+            STREAM_DISPLAY_FLUSH_CHARS: 24,
 
             // MCP tools & prefill polling
             mcpTools: [],                // OpenAI-format tool definitions loaded from /v1/mcp/tools
@@ -2493,6 +2525,13 @@
                 return Array.from(byId.values()).sort((a, b) =>
                     a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
                 );
+            },
+
+            get currentModelContextWindow() {
+                const model = (this.availableModels || []).find(
+                    m => m.id === this.currentModel || m.name === this.currentModel
+                );
+                return model?.context_window || null;
             },
 
             resolvePreferredDefaultModel(defaultModel) {
@@ -3038,6 +3077,144 @@
                 };
             },
 
+            trailingTagPrefix(text, tag) {
+                const max = Math.min(text.length, tag.length - 1);
+                for (let len = max; len > 0; len--) {
+                    const suffix = text.slice(-len);
+                    if (tag.startsWith(suffix)) return suffix;
+                }
+                return '';
+            },
+
+            finishStreamingThinking(stream, context) {
+                if (!stream.thinkingState.isInThinking) return;
+                const thinkSecs = ((Date.now() - stream.thinkingState.thinkingStartTime) / 1000).toFixed(1);
+                this.setEngineStatus(context.chatId, { text: `Thought for ${thinkSecs}s` });
+                stream.thinkingState.isInThinking = false;
+                stream.thinkingState.thinkingStartTime = null;
+                stream._thinkSecs = thinkSecs;
+            },
+
+            beginStreamingThinking(stream, context) {
+                if (stream.thinkingState.isInThinking) return;
+                stream.thinkingState.isInThinking = true;
+                stream.thinkingState.thinkingStartTime = Date.now();
+                this.setEngineStatus(context.chatId, { text: 'Thinking' });
+            },
+
+            clearStreamDisplayFlushTimer(stream) {
+                if (!stream?._streamDisplayFlushTimer) return;
+                clearTimeout(stream._streamDisplayFlushTimer);
+                stream._streamDisplayFlushTimer = null;
+            },
+
+            streamDisplayPendingLength(stream) {
+                if (!stream) return 0;
+                return Math.max(0, (stream.streamingContent || '').length - (stream.displayStreamingContent || '').length)
+                    + Math.max(0, (stream.streamingThinking || '').length - (stream.displayStreamingThinking || '').length);
+            },
+
+            shouldFlushStreamDisplay(stream, deltaText = '') {
+                if (this.streamDisplayPendingLength(stream) >= this.STREAM_DISPLAY_FLUSH_CHARS) return true;
+                return /[\s.,!?;:)\]} >"'。！？；：，、]$/.test(String(deltaText || ''));
+            },
+
+            flushStreamDisplay(stream) {
+                if (!stream) return;
+                this.clearStreamDisplayFlushTimer(stream);
+                const nextContent = stream.streamingContent || '';
+                const nextThinking = stream.streamingThinking || '';
+                if (stream.displayStreamingContent === nextContent
+                    && stream.displayStreamingThinking === nextThinking) {
+                    return;
+                }
+                stream.displayStreamingContent = nextContent;
+                stream.displayStreamingThinking = nextThinking;
+                stream._lastStreamDisplayFlushAt = Date.now();
+            },
+
+            scheduleStreamDisplayFlush(stream, deltaText = '') {
+                if (!stream || this.streamDisplayPendingLength(stream) <= 0) return;
+                if (this.shouldFlushStreamDisplay(stream, deltaText)) {
+                    this.flushStreamDisplay(stream);
+                    return;
+                }
+                if (stream._streamDisplayFlushTimer) return;
+
+                const elapsed = Date.now() - (stream._lastStreamDisplayFlushAt || 0);
+                const delay = Math.max(0, this.STREAM_DISPLAY_FLUSH_MS - elapsed);
+                stream._streamDisplayFlushTimer = setTimeout(() => {
+                    stream._streamDisplayFlushTimer = null;
+                    this.flushStreamDisplay(stream);
+                }, delay);
+            },
+
+            processStreamingContentDelta(stream, content, context) {
+                let input = `${stream._contentTagBuffer || ''}${content || ''}`;
+                stream._contentTagBuffer = '';
+                let visibleContent = false;
+                let thinkingContent = false;
+
+                while (input) {
+                    if (stream._literalThinkActive) {
+                        const closeIndex = input.indexOf('</think>');
+                        if (closeIndex === -1) {
+                            const keep = this.trailingTagPrefix(input, '</think>');
+                            const thinkingText = keep ? input.slice(0, -keep.length) : input;
+                            if (thinkingText) {
+                                stream.streamingThinking += thinkingText;
+                                thinkingContent = true;
+                            }
+                            stream._contentTagBuffer = keep;
+                            break;
+                        }
+
+                        const thinkingText = input.slice(0, closeIndex);
+                        if (thinkingText) {
+                            stream.streamingThinking += thinkingText;
+                            thinkingContent = true;
+                        }
+                        stream._literalThinkActive = false;
+                        this.finishStreamingThinking(stream, context);
+                        input = input.slice(closeIndex + '</think>'.length);
+                        continue;
+                    }
+
+                    const openIndex = input.indexOf('<think>');
+                    if (openIndex === -1) {
+                        const keep = this.trailingTagPrefix(input, '<think>');
+                        const visibleText = keep ? input.slice(0, -keep.length) : input;
+                        if (visibleText) {
+                            stream.streamingContent += visibleText;
+                            visibleContent = visibleContent || !!visibleText.trim();
+                        }
+                        stream._contentTagBuffer = keep;
+                        break;
+                    }
+
+                    const beforeThink = input.slice(0, openIndex);
+                    if (beforeThink) {
+                        stream.streamingContent += beforeThink;
+                        visibleContent = visibleContent || !!beforeThink.trim();
+                    }
+                    stream._literalThinkActive = true;
+                    this.beginStreamingThinking(stream, context);
+                    input = input.slice(openIndex + '<think>'.length);
+                }
+
+                return { visibleContent, thinkingContent };
+            },
+
+            flushStreamingContentTagBuffer(stream) {
+                if (!stream._contentTagBuffer) return;
+                if (stream._literalThinkActive) {
+                    stream.streamingThinking += stream._contentTagBuffer;
+                } else {
+                    stream.streamingContent += stream._contentTagBuffer;
+                }
+                stream._contentTagBuffer = '';
+            },
+
             createStreamSession(chatId = null) {
                 return {
                     chatId,
@@ -3046,10 +3223,14 @@
                     sourceProfile: null,
                     isStreaming: false,
                     streamingContent: '',
+                    displayStreamingContent: '',
                     abortController: null,
                     thinkingState: this.createThinkingState(),
                     streamingThinking: '',
+                    displayStreamingThinking: '',
                     streamingThinkingOpen: false,
+                    _literalThinkActive: false,
+                    _contentTagBuffer: '',
                     streamRenderState: {
                         stableIndex: 0,
                         stableText: ''
@@ -3064,6 +3245,8 @@
                     targetMessageId: null,
                     _statsRequestId: null,
                     _liveFooterStats: null,
+                    _streamDisplayFlushTimer: null,
+                    _lastStreamDisplayFlushAt: 0,
                 };
             },
 
@@ -3296,12 +3479,18 @@
                     clearInterval(stream._prefillInterval);
                     stream._prefillInterval = null;
                 }
+                this.clearStreamDisplayFlushTimer(stream);
                 stream.isStreaming = false;
                 stream.streamingContent = '';
+                stream.displayStreamingContent = '';
                 stream.abortController = null;
                 stream.thinkingState = this.createThinkingState();
                 stream.streamingThinking = '';
+                stream.displayStreamingThinking = '';
                 stream.streamingThinkingOpen = false;
+                stream._lastStreamDisplayFlushAt = 0;
+                stream._literalThinkActive = false;
+                stream._contentTagBuffer = '';
                 stream.streamRenderState = {
                     stableIndex: 0,
                     stableText: ''
@@ -3321,6 +3510,7 @@
                 stream.targetMessageId = null;
                 stream._statsRequestId = null;
                 stream._liveFooterStats = null;
+                stream._lastUsage = null;
                 if (stream._domUpdateRaf) {
                     cancelAnimationFrame(stream._domUpdateRaf);
                     stream._domUpdateRaf = null;
@@ -3345,7 +3535,7 @@
         }
 
         const storedKey = localStorage.getItem('omlx_chat_api_key');
-        if (storedKey) {
+        if (!this.apiKeyRequired || storedKey) {
             this.apiKeySet = true;
             await this.loadModels();
             if (this.currentModel) {
@@ -3420,7 +3610,7 @@
             async fetchModelTypes() {
         try {
             const resp = await fetch('/v1/models/status', {
-                headers: { 'Authorization': `Bearer ${this.getApiKey()}` }
+                headers: this.getAuthHeaders()
             });
             if (!resp.ok) return;
             const data = await resp.json();
@@ -3463,7 +3653,7 @@
             async fetchMcpTools() {
         try {
             const resp = await fetch('/v1/mcp/tools', {
-                headers: { 'Authorization': `Bearer ${this.getApiKey()}` }
+                headers: this.getAuthHeaders()
             });
             if (!resp.ok) return;
             const data = await resp.json();
@@ -3834,7 +4024,13 @@
     },
 
     getApiKey() {
+        if (!this.apiKeyRequired) return '';
         return localStorage.getItem('omlx_chat_api_key') || '';
+    },
+
+    getAuthHeaders() {
+        const apiKey = this.getApiKey();
+        return apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {};
     },
 
     combineAbortSignals(signals) {
@@ -3874,9 +4070,7 @@
             async loadModels() {
         try {
             this._adminModelsList = null;
-            const apiHeaders = this.getApiKey()
-                ? { 'Authorization': `Bearer ${this.getApiKey()}` }
-                : {};
+            const apiHeaders = this.getAuthHeaders();
             // Fetch models, admin model list, server health, and integration settings in parallel
             const [modelsResponse, adminModelsResponse, healthResponse, settingsResponse] = await Promise.all([
                 fetch('/v1/models', { headers: apiHeaders }),
@@ -3937,7 +4131,10 @@
                 }).map(m => ({
                     id: this.aliasToGateway[m.id] || m.id, // gateway id for API calls
                     name: m.id, // original name (alias or directory name) for display
-                    owned_by: m.owned_by
+                    owned_by: m.owned_by,
+                    // enriched by the server from backend metadata (vLLM
+                    // max_model_len / admin overrides); used for hints
+                    context_window: m.context_window || m.max_model_len || null
                 }))
             );
 
@@ -4702,9 +4899,14 @@
             stream.sourceModel = context.model;
             stream.sourceSystemPrompt = context.systemPrompt;
             stream.sourceProfile = context._profile;
+            this.clearStreamDisplayFlushTimer(stream);
             stream.streamingContent = '';
+            stream.displayStreamingContent = '';
             stream.streamingThinking = '';
+            stream.displayStreamingThinking = '';
             stream.streamingThinkingOpen = false;
+            stream._lastStreamDisplayFlushAt = Date.now();
+            this.resetStreamRenderState(stream);
         stream.abortController = new AbortController();
         this.autoScrollEnabled = true;
               
@@ -4721,7 +4923,7 @@
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${this.getApiKey()}`
+                    ...this.getAuthHeaders()
                 },
                 body: JSON.stringify(requestBody),
                 signal: stream.abortController.signal
@@ -4758,20 +4960,26 @@
                             const delta = choice?.delta;
                             if (choice?.finish_reason) finishReason = choice.finish_reason;
 
-                            // Usage chunk arrives as { choices: [], usage: {...} }
-                            if (data.usage && !delta) {
+                            // Usage may arrive as a usage-only chunk or attached to the final choice.
+                            if (data.usage) {
                                 lastUsage = data.usage;
                                 stream._lastUsage = data.usage;
+                            }
+                            if (data.usage && !delta) {
                                 continue;
                             }
 
-                            // Accumulate streaming tool_call chunks
-                            if (delta?.tool_calls) {
+                            // Accumulate streaming tool_call chunks. Some OpenAI-compatible
+                            // backends include an empty tool_calls array on normal text deltas.
+                            const toolCallDeltas = Array.isArray(delta?.tool_calls)
+                                ? delta.tool_calls.filter(Boolean)
+                                : [];
+                            if (toolCallDeltas.length > 0) {
                                 if (!firstToken) {
                                     firstToken = true;
                                     this.stopPrefillPolling(context.chatId);
                                 }
-                                for (const tc of delta.tool_calls) {
+                                for (const tc of toolCallDeltas) {
                                     const i = tc.index ?? 0;
                                     if (!toolCallsMap[i]) toolCallsMap[i] = { id: '', type: 'function', function: { name: '', arguments: '' } };
                                     if (tc.id) toolCallsMap[i].id = tc.id;
@@ -4782,6 +4990,9 @@
                                 // Also reset thinking state so the close tag isn't appended later
                                 if (stream.streamingContent) {
                                     stream.streamingContent = '';
+                                    stream.displayStreamingContent = '';
+                                    this.clearStreamDisplayFlushTimer(stream);
+                                    this.resetStreamRenderState(stream);
                                     stream.thinkingState.isInThinking = false;
                                     stream.thinkingState.thinkingStartTime = null;
                                 }
@@ -4796,7 +5007,8 @@
                                 }
                             }
 
-                            if (delta?.reasoning_content) {
+                            const reasoningDelta = delta?.reasoning_content ?? delta?.reasoning;
+                            if (reasoningDelta) {
                                 if (!firstToken) {
                                     firstToken = true;
                                     stream._ttft = (Date.now() - stream._statusStart) / 1000;
@@ -4808,7 +5020,8 @@
                                     this.setEngineStatus(context.chatId, { text: 'Thinking' });
                                 }
                                 // Accumulate into live thinking bubble
-                                stream.streamingThinking += delta.reasoning_content;
+                                stream.streamingThinking += reasoningDelta;
+                                this.scheduleStreamDisplayFlush(stream, reasoningDelta);
                             }
 
                             if (delta?.content) {
@@ -4817,20 +5030,16 @@
                                     stream._ttft = (Date.now() - stream._statusStart) / 1000;
                                     this.stopPrefillPolling(context.chatId);
                                 }
-                                // Log thinking duration to timeline when content starts
-                                if (stream.thinkingState.isInThinking) {
-                                    const thinkSecs = ((Date.now() - stream.thinkingState.thinkingStartTime) / 1000).toFixed(1);
-                                    this.setEngineStatus(context.chatId, { text: `Thought for ${thinkSecs}s` });
-                                    stream.thinkingState.isInThinking = false;
-                                    stream.thinkingState.thinkingStartTime = null;
-                                    stream._thinkSecs = thinkSecs;
+                                const parsed = this.processStreamingContentDelta(stream, delta.content, context);
+                                this.scheduleStreamDisplayFlush(stream, delta.content);
+                                if (parsed.visibleContent) {
+                                    // Log thinking duration to timeline when answer content starts.
+                                    this.finishStreamingThinking(stream, context);
+                                    if (!stream.finalContent) {
+                                        stream.finalContent = true;
+                                        stream.engineStatus = null;
+                                    }
                                 }
-                                // Only set finalContent on non-whitespace content
-                                if (!stream.finalContent && delta.content.trim()) {
-                                    stream.finalContent = true;
-                                    stream.engineStatus = null;
-                                }
-                                stream.streamingContent += delta.content;
                                 if (this.currentChatId === context.chatId) {
                                     this.scrollToBottom();
                                 }
@@ -4841,6 +5050,9 @@
                     }
                 }
             }
+
+            this.flushStreamingContentTagBuffer(stream);
+            this.flushStreamDisplay(stream);
 
             // If model ended while still thinking (tool-call turn or manual stop), log elapsed and reset
             if (stream.thinkingState.isInThinking) {
@@ -4915,7 +5127,7 @@
                         try {
                             execResp = await fetch('/v1/mcp/execute', {
                                 method: 'POST',
-                                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.getApiKey()}` },
+                                headers: { 'Content-Type': 'application/json', ...this.getAuthHeaders() },
                                 body: JSON.stringify({ tool_name: toolName, arguments: args }),
                                 signal: combinedSignal,
                             });
@@ -4964,9 +5176,13 @@
                     return;
                 }
 
+                this.clearStreamDisplayFlushTimer(stream);
                 stream.streamingContent = '';
+                stream.displayStreamingContent = '';
                 stream.streamingThinking = '';
+                stream.displayStreamingThinking = '';
                 stream.streamingThinkingOpen = false;
+                stream._lastStreamDisplayFlushAt = 0;
                 this.resetStreamRenderState(stream);
 
                 // Recurse — model synthesises final answer using tool results
@@ -5007,6 +5223,7 @@
                     stream.thinkingState.isInThinking = false;
                     stream.thinkingState.thinkingStartTime = null;
                 }
+                this.flushStreamDisplay(stream);
                 // Stream was stopped by user — push whatever was accumulated
                 if (stream.streamingContent || stream.streamingThinking) {
                     const assistantId = stream.targetMessageId || this.newMessageId();
@@ -5729,43 +5946,23 @@
             container.dataset.streamChatId = activeChat;
         }
 
-        if (!stream?.streamingContent) {
+        if (!stream?.displayStreamingContent) {
             container.innerHTML = '';
             this.resetStreamRenderState(stream);
             return;
         }
 
-        const text = stream.streamingContent;
+        const text = stream.displayStreamingContent;
 
-        if (text.includes('<think>')) {
-            container.innerHTML = this.renderStreamingMarkdown(text);
-
-            this.$nextTick(() => {
-                this.addCodeCopyButtons(container);
-                this.renderMathInRoot(container);
-                this.scrollToBottom();
-            });
-            return;
-        }
-
-        const { stableRoot, tailRoot } = this.ensureStreamingRoots(container, stream);
-        const cutoff = this.findStableRenderCutoff(text);
-        const safeCutoff = Math.max(cutoff, stream.streamRenderState.stableIndex);
-
-        if (safeCutoff > stream.streamRenderState.stableIndex) {
-            stream.streamRenderState.stableText = text.slice(0, safeCutoff);
-            stableRoot.innerHTML = stream.streamRenderState.stableText
-                ? DOMPurify.sanitize(marked.parse(stream.streamRenderState.stableText))
-                : '';
-            this.addCodeCopyButtons(stableRoot);
-            this.renderMathInRoot(stableRoot);
-            stream.streamRenderState.stableIndex = safeCutoff;
-        }
-
-        const tailText = text.slice(stream.streamRenderState.stableIndex);
-        tailRoot.innerHTML = tailText ? DOMPurify.sanitize(marked.parse(tailText)) : '';
+        // Render from the complete accumulated stream each frame. vLLM can emit
+        // very small deltas, and the stable/tail renderer can visibly replace
+        // the tail on every token for Qwen-style streams. Full re-rendering is
+        // simpler and keeps the visible text monotonic while streaming.
+        container.innerHTML = this.renderStreamingMarkdown(text);
 
         this.$nextTick(() => {
+            this.addCodeCopyButtons(container);
+            this.renderMathInRoot(container);
             this.scrollToBottom();
         });
     },
@@ -5795,6 +5992,102 @@
         stream.streamRenderState.stableText = '';
     },
 
+    getCodeBlockLanguage(codeBlock) {
+        const languageClass = Array.from(codeBlock?.classList || [])
+            .find(cls => cls.startsWith('language-'));
+        return languageClass ? languageClass.replace(/^language-/, '').toLowerCase() : '';
+    },
+
+    isLikelyHtmlCodeBlock(rawText, lang, isSvg) {
+        if (isSvg) return false;
+        if (['html', 'htm', 'xhtml'].includes(lang)) return true;
+
+        const trimmed = String(rawText || '').trim();
+        return /^<!doctype\s+html[\s>]/i.test(trimmed) || /^<html[\s>]/i.test(trimmed);
+    },
+
+    isMarkdownCodeBlock(lang) {
+        return ['markdown', 'md', 'mdown', 'mkd'].includes(lang);
+    },
+
+    htmlPreviewCsp() {
+        return "default-src 'none'; base-uri 'none'; object-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; navigate-to 'none';";
+    },
+
+    svgPreviewCsp() {
+        return "default-src 'none'; base-uri 'none'; object-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; navigate-to 'none';";
+    },
+
+    buildSvgPreviewDocument(rawSvg) {
+        const svg = String(rawSvg || '');
+        return `<!doctype html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="${this.svgPreviewCsp()}">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+    html,
+    body {
+        margin: 0;
+        min-height: 100%;
+    }
+
+    body {
+        min-height: 100vh;
+        box-sizing: border-box;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+        background: #ffffff;
+        color: #111827;
+    }
+
+    svg {
+        max-width: 100%;
+        max-height: calc(100vh - 32px);
+        height: auto;
+    }
+</style>
+</head>
+<body>${svg}</body>
+</html>`;
+    },
+
+    buildHtmlPreviewDocument(rawHtml) {
+        const html = String(rawHtml || '');
+        const previewStyles = `
+<style>
+    html,
+    body {
+        margin: 0;
+        min-height: 100%;
+    }
+
+    body {
+        background: #ffffff;
+        color: #111827;
+    }
+</style>`;
+        const injection = `
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="${this.htmlPreviewCsp()}">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+${previewStyles}`;
+
+        if (/<head(\s[^>]*)?>/i.test(html)) {
+            return html.replace(/<head(\s[^>]*)?>/i, match => `${match}${injection}`);
+        }
+        if (/<html(\s[^>]*)?>/i.test(html)) {
+            return html.replace(/<html(\s[^>]*)?>/i, match => `${match}<head>${injection}</head>`);
+        }
+        if (/<body(\s[^>]*)?>/i.test(html)) {
+            return `<!doctype html><html><head>${injection}</head>${html}</html>`;
+        }
+        return `<!doctype html><html><head>${injection}</head><body>${html}</body></html>`;
+    },
+
     setAllowSvg(enabled) {
         this.allowSvg = !!enabled;
         localStorage.setItem('omlx-chat-allow-svg', this.allowSvg ? 'true' : 'false');
@@ -5805,7 +6098,7 @@
         const container = document.getElementById('messagesContainer');
         if (!container) return;
 
-        container.querySelectorAll('.svg-preview-container').forEach(preview => {
+        container.querySelectorAll('.svg-preview-container, .html-preview-container, .markdown-preview-container').forEach(preview => {
             const wrapper = preview.parentElement;
             const pre = wrapper?.querySelector('pre');
             if (pre) pre.style.display = '';
@@ -5836,20 +6129,23 @@
             // Check if button row already exists
             if (pre.parentElement.querySelector('.code-btn-row')) return;
 
-            // Detect SVG code blocks
-            const rawText = codeBlock.textContent;
+            // Detect previewable code blocks
+            const rawText = codeBlock.textContent || '';
+            const lang = this.getCodeBlockLanguage(codeBlock);
             const isSvg = /^\s*(?:<\?xml[^?]*\?>\s*)?(?:<!--[\s\S]*?-->\s*)?<svg[\s>]/i.test(rawText);
+            const isMarkdown = this.isMarkdownCodeBlock(lang);
+            const isHtml = !isMarkdown && this.isLikelyHtmlCodeBlock(rawText, lang, isSvg);
 
             // Create button row
             const btnRow = document.createElement('div');
             btnRow.className = 'code-btn-row';
 
-            // Create SVG render button (only for SVG blocks when allowed)
-            if (isSvg && this.allowSvg) {
-                const wandIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>';
+            // SVG preview runs in a sandboxed iframe, so unlabeled SVG fences can preview safely.
+            if (isSvg) {
+                const previewIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>';
                 const renderBtn = document.createElement('button');
                 renderBtn.className = 'svg-render-btn';
-                renderBtn.innerHTML = wandIcon + ' Render';
+                renderBtn.innerHTML = previewIcon + ' Preview';
                 renderBtn.onclick = (e) => {
                     e.preventDefault();
                     e.stopPropagation();
@@ -5857,27 +6153,103 @@
                     const copyBtn = wrapper.querySelector('.code-copy-btn');
                     let preview = wrapper.querySelector('.svg-preview-container');
                     if (preview) {
-                        // Toggle back to code view
                         preview.remove();
                         pre.style.display = '';
                         if (copyBtn) copyBtn.style.display = '';
-                        renderBtn.innerHTML = wandIcon + ' Render';
+                        renderBtn.innerHTML = previewIcon + ' Preview';
                         return;
                     }
-                    const sanitized = DOMPurify.sanitize(rawText, {
-                        ADD_TAGS: ['svg', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse', 'g', 'defs', 'clipPath', 'text', 'tspan', 'symbol', 'linearGradient', 'radialGradient', 'stop', 'pattern', 'mask', 'title', 'desc'],
-                        ADD_ATTR: ['viewBox', 'xmlns', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'd', 'cx', 'cy', 'r', 'rx', 'ry', 'x', 'y', 'x1', 'y1', 'x2', 'y2', 'points', 'transform', 'clip-path', 'opacity', 'gradientUnits', 'gradientTransform', 'offset', 'stop-color', 'stop-opacity', 'font-size', 'font-family', 'text-anchor', 'dominant-baseline', 'width', 'height', 'preserveAspectRatio', 'filter', 'flood-color', 'flood-opacity', 'in', 'in2', 'type', 'values', 'stdDeviation', 'result', 'patternTransform', 'patternUnits', 'spreadMethod', 'fx', 'fy'],
-                    });
-                    if (!sanitized || !sanitized.includes('<svg')) return;
+
                     preview = document.createElement('div');
                     preview.className = 'svg-preview-container';
-                    preview.innerHTML = sanitized;
+                    const iframe = document.createElement('iframe');
+                    iframe.className = 'svg-preview-frame';
+                    iframe.setAttribute('title', 'SVG preview');
+                    iframe.setAttribute('sandbox', '');
+                    iframe.setAttribute('referrerpolicy', 'no-referrer');
+                    iframe.setAttribute('loading', 'lazy');
+                    iframe.srcdoc = this.buildSvgPreviewDocument(rawText);
+                    preview.appendChild(iframe);
+
                     pre.style.display = 'none';
                     if (copyBtn) copyBtn.style.display = 'none';
                     wrapper.appendChild(preview);
                     renderBtn.innerHTML = '\u2190 Back';
                 };
                 btnRow.appendChild(renderBtn);
+            }
+
+            if (isHtml) {
+                const previewIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="12" x="3" y="4" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/></svg>';
+                const htmlPreviewBtn = document.createElement('button');
+                htmlPreviewBtn.className = 'html-preview-btn';
+                htmlPreviewBtn.innerHTML = previewIcon + ' Preview';
+                htmlPreviewBtn.onclick = (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const wrapper = pre.parentElement;
+                    const copyBtn = wrapper.querySelector('.code-copy-btn');
+                    let preview = wrapper.querySelector('.html-preview-container');
+                    if (preview) {
+                        preview.remove();
+                        pre.style.display = '';
+                        if (copyBtn) copyBtn.style.display = '';
+                        htmlPreviewBtn.innerHTML = previewIcon + ' Preview';
+                        return;
+                    }
+
+                    preview = document.createElement('div');
+                    preview.className = 'html-preview-container';
+                    const iframe = document.createElement('iframe');
+                    iframe.className = 'html-preview-frame';
+                    iframe.setAttribute('title', 'HTML preview');
+                    iframe.setAttribute('sandbox', 'allow-scripts');
+                    iframe.setAttribute('referrerpolicy', 'no-referrer');
+                    iframe.setAttribute('loading', 'lazy');
+                    iframe.srcdoc = this.buildHtmlPreviewDocument(rawText);
+                    preview.appendChild(iframe);
+
+                    pre.style.display = 'none';
+                    if (copyBtn) copyBtn.style.display = 'none';
+                    wrapper.appendChild(preview);
+                    htmlPreviewBtn.innerHTML = '\u2190 Back';
+                };
+                btnRow.appendChild(htmlPreviewBtn);
+            }
+
+            if (isMarkdown) {
+                const previewIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>';
+                const markdownPreviewBtn = document.createElement('button');
+                markdownPreviewBtn.className = 'markdown-preview-btn';
+                markdownPreviewBtn.innerHTML = previewIcon + ' Preview';
+                markdownPreviewBtn.onclick = (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const wrapper = pre.parentElement;
+                    const copyBtn = wrapper.querySelector('.code-copy-btn');
+                    let preview = wrapper.querySelector('.markdown-preview-container');
+                    if (preview) {
+                        preview.remove();
+                        pre.style.display = '';
+                        if (copyBtn) copyBtn.style.display = '';
+                        markdownPreviewBtn.innerHTML = previewIcon + ' Preview';
+                        return;
+                    }
+
+                    preview = document.createElement('div');
+                    preview.className = 'markdown-preview-container markdown-content';
+                    preview.innerHTML = this.renderMarkdown(rawText);
+                    pre.style.display = 'none';
+                    if (copyBtn) copyBtn.style.display = 'none';
+                    wrapper.appendChild(preview);
+                    markdownPreviewBtn.innerHTML = '\u2190 Back';
+
+                    this.$nextTick(() => {
+                        this.addCodeCopyButtons(preview);
+                        this.renderMathInRoot(preview);
+                    });
+                };
+                btnRow.appendChild(markdownPreviewBtn);
             }
 
             // Create copy button
