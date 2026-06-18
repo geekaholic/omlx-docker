@@ -13,6 +13,7 @@ import urllib.request
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from ._version import __version__
 from .model_discovery import _read_model_context_length
@@ -80,6 +81,7 @@ PROXY_ENV_KEYS = (
     "OMLX_BACKEND_API_KEY",
     "OMLX_PROXY_API_KEY",
     "OMLX_PROXY_PORT",
+    "OMLX_PROXY_BIND_HOST",
     "OMLX_CONTEXT_SCALING",
     "OMLX_TARGET_CONTEXT_SIZE",
     "OMLX_ACTUAL_CONTEXT_SIZE",
@@ -94,6 +96,7 @@ PORTABLE_ARG_ATTRS = (
     "hf_home",
     "hf_endpoint",
     "model_dir",
+    "proxy_bind_host",
 )
 VLLM_SPECIFIC_ARG_ATTRS = (
     "vllm_image",
@@ -308,6 +311,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--api-key", default=None, help="API key required by the oMNI proxy"
     )
     serve.add_argument("--proxy-port", type=int, default=None, help="Host proxy port")
+    serve.add_argument(
+        "--proxy-bind-host",
+        default=None,
+        help="Host interface for published proxy port (default: 127.0.0.1)",
+    )
     serve.add_argument(
         "--compose-file",
         default=None,
@@ -954,6 +962,7 @@ def portable_cli_environment(args: argparse.Namespace) -> dict[str, str]:
         "no_proxy": "OMNI_NO_PROXY",
         "ca_bundle": "OMNI_CA_BUNDLE",
         "proxy_port": "OMLX_PROXY_PORT",
+        "proxy_bind_host": "OMLX_PROXY_BIND_HOST",
         "api_key": "OMLX_PROXY_API_KEY",
         "backend_api_key": "OMLX_BACKEND_API_KEY",
         "target_context_size": "OMLX_TARGET_CONTEXT_SIZE",
@@ -1148,6 +1157,7 @@ def default_proxy_environment(backend: str) -> dict[str, str]:
         "OMLX_BACKEND_API_KEY": "",
         "OMLX_PROXY_API_KEY": "",
         "OMLX_PROXY_PORT": str(VllmComposeSettings.proxy_port),
+        "OMLX_PROXY_BIND_HOST": VllmComposeSettings.proxy_bind_host,
         "OMLX_CONTEXT_SCALING": "false",
         "OMLX_TARGET_CONTEXT_SIZE": str(VllmComposeSettings.target_context_size),
         "OMLX_ACTUAL_CONTEXT_SIZE": "32768",
@@ -1162,6 +1172,7 @@ def proxy_cli_environment(args: argparse.Namespace) -> dict[str, str]:
         "backend_api_key": "OMLX_BACKEND_API_KEY",
         "api_key": "OMLX_PROXY_API_KEY",
         "proxy_port": "OMLX_PROXY_PORT",
+        "proxy_bind_host": "OMLX_PROXY_BIND_HOST",
         "target_context_size": "OMLX_TARGET_CONTEXT_SIZE",
         "sse_keepalive_mode": "OMLX_SSE_KEEPALIVE_MODE",
     }
@@ -1467,7 +1478,7 @@ def launch_command(args: argparse.Namespace) -> int:
         sonnet_model=sonnet_model if tool_name == "claude" else None,
         haiku_model=haiku_model if tool_name == "claude" else None,
         context_window=model_info.get("max_context_window"),
-        max_tokens=model_info.get("max_tokens"),
+        max_tokens=_launch_max_tokens(model_info),
         model_type=model_info.get("model_type"),
         reasoning=model_info.get("enable_thinking"),
     )
@@ -1476,12 +1487,31 @@ def launch_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _positive_int_or_none(value: str | None) -> int | None:
+def _positive_int_from_any(value) -> int | None:
     try:
         parsed = int(str(value))
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _launch_max_tokens(model_info: Mapping[str, Any]) -> int | None:
+    """Return a safe advertised output cap for launched integrations."""
+    reported = _positive_int_from_any(model_info.get("max_tokens"))
+    context = _positive_int_from_any(
+        model_info.get("max_context_window") or model_info.get("max_model_len")
+    )
+    if context is None:
+        return reported
+
+    derived = max(1024, min(8192, context // 4))
+    if reported is None:
+        return derived
+    return min(reported, derived)
+
+
+def _positive_int_or_none(value: str | None) -> int | None:
+    return _positive_int_from_any(value)
 
 
 def _explicit_vllm_env_keys(args: argparse.Namespace) -> set[str]:

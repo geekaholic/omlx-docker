@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import (
     JSONResponse,
     RedirectResponse,
@@ -78,6 +78,25 @@ from .stats import (
 security = HTTPBearer(auto_error=False)
 
 
+def verify_proxy_key_for_config(
+    config: ProxyConfig,
+    credentials: HTTPAuthorizationCredentials | None,
+    x_api_key: str | None,
+    cookie_api_key: str | None = None,
+) -> bool:
+    expected = config.proxy_api_key
+    if not expected:
+        return True
+    bearer_token = credentials.credentials if credentials else None
+    if (
+        bearer_token != expected
+        and x_api_key != expected
+        and cookie_api_key != expected
+    ):
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return True
+
+
 def create_app(
     config: ProxyConfig | None = None,
     backend: OpenAIBackend | None = None,
@@ -100,23 +119,24 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.server_metrics = server_metrics
-    configure_admin(app, backend, proxy_config)
-
-    @app.get("/", include_in_schema=False)
-    async def root_redirect():
-        return RedirectResponse(url="/admin/dashboard", status_code=302)
 
     async def verify_proxy_key(
         credentials: HTTPAuthorizationCredentials = Depends(security),
         x_api_key: str | None = Header(default=None),
+        omlx_api_key: str | None = Cookie(default=None),
     ) -> bool:
-        expected = backend.config.proxy_api_key
-        if not expected:
-            return True
-        bearer_token = credentials.credentials if credentials else None
-        if bearer_token != expected and x_api_key != expected:
-            raise HTTPException(status_code=401, detail="Invalid API key")
-        return True
+        return verify_proxy_key_for_config(
+            backend.config,
+            credentials,
+            x_api_key,
+            omlx_api_key,
+        )
+
+    configure_admin(app, backend, proxy_config, auth_dependency=verify_proxy_key)
+
+    @app.get("/", include_in_schema=False)
+    async def root_redirect():
+        return RedirectResponse(url="/admin/dashboard", status_code=302)
 
     @app.get("/health")
     async def health(request: Request):

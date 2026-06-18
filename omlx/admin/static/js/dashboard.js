@@ -65,6 +65,46 @@
     const DASHBOARD_SETTINGS_TABS = new Set(['global', 'integrations', 'models']);
     const DASHBOARD_MODELS_TABS = new Set(['manager', 'downloader', 'quantizer', 'uploader']);
     const DASHBOARD_BENCH_TABS = new Set(['throughput', 'accuracy']);
+    const ADMIN_API_KEY_STORAGE = 'omlx_chat_api_key';
+
+    function setAdminApiKeyCookie(apiKey) {
+        if (!apiKey) return;
+        document.cookie = `omlx_api_key=${encodeURIComponent(apiKey)}; Path=/; SameSite=Lax`;
+    }
+
+    function clearAdminApiKeyCookie() {
+        document.cookie = 'omlx_api_key=; Path=/; Max-Age=0; SameSite=Lax';
+    }
+
+    (function installAdminApiAuthFetch() {
+        if (window.__omlxAdminApiAuthFetchInstalled) return;
+        window.__omlxAdminApiAuthFetchInstalled = true;
+        const nativeFetch = window.fetch.bind(window);
+        window.fetch = async function(input, init = {}) {
+            const url = typeof input === 'string' ? input : input?.url;
+            const isAdminApi = typeof url === 'string' && url.startsWith('/admin/api/');
+            if (!isAdminApi) {
+                return nativeFetch(input, init);
+            }
+            const apiKey = localStorage.getItem(ADMIN_API_KEY_STORAGE) || '';
+            if (apiKey) {
+                setAdminApiKeyCookie(apiKey);
+            }
+            let response = await nativeFetch(input, init);
+            if (response.status !== 401) {
+                return response;
+            }
+            clearAdminApiKeyCookie();
+            localStorage.removeItem(ADMIN_API_KEY_STORAGE);
+            const entered = window.prompt('Enter the oMNI proxy API key');
+            if (!entered) {
+                return response;
+            }
+            localStorage.setItem(ADMIN_API_KEY_STORAGE, entered);
+            setAdminApiKeyCookie(entered);
+            return nativeFetch(input, init);
+        };
+    })();
 
     function dashboard() {
         return {
@@ -998,7 +1038,9 @@
                             ...(this.proxyMode ? {
                                 proxy_backend_url: this.globalSettings.proxy.backend_url,
                                 proxy_backend_type: this.globalSettings.proxy.backend_type,
-                                proxy_backend_api_key: this.globalSettings.proxy.backend_api_key || '',
+                                ...(this.globalSettings.proxy.backend_api_key ? {
+                                    proxy_backend_api_key: this.globalSettings.proxy.backend_api_key,
+                                } : {}),
                                 ...(['vllm', 'llama.cpp'].includes(this.globalSettings.proxy.backend_type) ? {
                                     omni_model: this.globalSettings.proxy.sidecar?.model || '',
                                     omni_served_model_name: this.globalSettings.proxy.sidecar?.served_model_name || '',

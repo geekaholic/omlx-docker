@@ -1129,6 +1129,7 @@ class TestClaudeCodeIntegration:
                     api_key="secret",
                     model="qwen3.5",
                     context_window=131072,
+                    max_tokens=8192,
                 )
             )
 
@@ -1143,6 +1144,7 @@ class TestClaudeCodeIntegration:
         assert env["ANTHROPIC_MODEL"] == "qwen3.5"
         assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "qwen3.5"
         assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "131072"
+        assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "8192"
         # Bundled-python vars must be stripped so claude code subprocess hooks
         # don't inherit our cpython-3.11 stack.
         assert "PYTHONHOME" not in env

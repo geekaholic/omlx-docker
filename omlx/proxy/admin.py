@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -126,7 +126,13 @@ class ProxyAdminState:
         )
 
 
-def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
+def configure_admin(
+    app,
+    backend: OpenAIBackend,
+    config: ProxyConfig,
+    *,
+    auth_dependency=None,
+) -> None:
     """Attach admin UI routes and static assets to a proxy FastAPI app."""
     state_path = Path(os.getenv("OMLX_PROXY_STATE_PATH", "/data/proxy-state.json"))
     state = ProxyAdminState.load(state_path)
@@ -136,6 +142,11 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
     _apply_proxy_backend_overrides(backend, config, state)
     templates = _templates()
     router = APIRouter(prefix="/admin", tags=["proxy-admin"])
+    api_router = APIRouter(
+        prefix="/admin/api",
+        tags=["proxy-admin"],
+        dependencies=[Depends(auth_dependency)] if auth_dependency else [],
+    )
 
     app.mount("/admin/static", StaticFiles(directory=STATIC_DIR), name="admin-static")
 
@@ -150,14 +161,13 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
 
     @router.get("/chat")
     async def chat_page(request: Request):
-        api_key = config.proxy_api_key or ""
         return templates.TemplateResponse(
             request,
             "chat.html",
-            {"api_key": api_key, "api_key_configured": bool(api_key)},
+            {"api_key": "", "api_key_configured": bool(config.proxy_api_key)},
         )
 
-    @router.get("/api/update-check")
+    @api_router.get("/update-check")
     async def update_check():
         return {
             "update_available": False,
@@ -166,7 +176,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             "release_url": "https://github.com/jundot/omlx",
         }
 
-    @router.get("/api/server-info")
+    @api_router.get("/server-info")
     async def server_info():
         return {
             "version": __version__,
@@ -178,7 +188,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             "capabilities": _capabilities(),
         }
 
-    @router.get("/api/proxy/status")
+    @api_router.get("/proxy/status")
     async def proxy_status():
         started = time.monotonic()
         try:
@@ -202,7 +212,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             "capabilities": _capabilities(),
         }
 
-    @router.get("/api/proxy/config")
+    @api_router.get("/proxy/config")
     async def proxy_config():
         try:
             context_limit = await backend_context_limit(backend)
@@ -212,7 +222,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             "backend_url": backend.config.normalized_backend_url,
             "backend_type": _proxy_backend_type(state),
             "backend_context_limit": context_limit,
-            "backend_api_key": backend.config.backend_api_key or "",
+            "backend_api_key": "",
             "backend_api_key_set": bool(backend.config.backend_api_key),
             "proxy_host": backend.config.host,
             "proxy_port": backend.config.port,
@@ -230,14 +240,14 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             "hot_reloadable": ["backend_url", "backend_api_key", "backend_type"],
         }
 
-    @router.get("/api/proxy/metrics")
+    @api_router.get("/proxy/metrics")
     async def proxy_metrics():
         started = time.monotonic()
         metrics = await collect_backend_metrics_cached(backend)
         metrics["latency_ms"] = round((time.monotonic() - started) * 1000, 1)
         return metrics
 
-    @router.get("/api/proxy/sidecar-compose")
+    @api_router.get("/proxy/sidecar-compose")
     async def proxy_sidecar_compose():
         backend_name = _sidecar_backend(state)
         spec = backend_spec(backend_name)
@@ -255,7 +265,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             "writable": bool(compose_path or env_path),
         }
 
-    @router.post("/api/proxy/sidecar-compose/regenerate")
+    @api_router.post("/proxy/sidecar-compose/regenerate")
     async def regenerate_proxy_sidecar_compose():
         result = _write_sidecar_compose_if_configured(state)
         status = 200 if result.get("written") or not result.get("error") else 500
@@ -263,7 +273,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
 
     local_models_cache: list[dict[str, Any]] | None = None
 
-    @router.get("/api/proxy/local-models")
+    @api_router.get("/proxy/local-models")
     async def local_models(refresh: int = 0):
         nonlocal local_models_cache
         directory = scan_dir()
@@ -290,7 +300,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             "backend_type": _proxy_backend_type(state),
         }
 
-    @router.get("/api/global-settings")
+    @api_router.get("/global-settings")
     async def get_global_settings():
         payload = _global_settings_payload(backend.config, state)
         try:
@@ -301,7 +311,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             payload["proxy"]["backend_context_limit"] = None
         return payload
 
-    @router.post("/api/global-settings")
+    @api_router.post("/global-settings")
     async def update_global_settings(request: Request):
         payload = await request.json()
         try:
@@ -489,16 +499,16 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             "restart_required_settings": ["proxy_host", "proxy_port", "sidecar"],
         }
 
-    @router.get("/api/models")
+    @api_router.get("/models")
     async def admin_models():
         return {"models": await _admin_models(backend, state)}
 
-    @router.post("/api/reload")
+    @api_router.post("/reload")
     async def reload_models():
         state.log("model list refreshed from backend")
         return {"status": "ok", "message": "Model list refreshed from backend"}
 
-    @router.put("/api/models/{model_id}/settings")
+    @api_router.put("/models/{model_id}/settings")
     async def update_model_settings(model_id: str, request: Request):
         payload = await request.json()
         settings = state.model_settings.setdefault(model_id, {})
@@ -516,7 +526,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             "auto_reloaded": False,
         }
 
-    @router.post("/api/models/{model_id}/load")
+    @api_router.post("/models/{model_id}/load")
     async def load_model(model_id: str):
         return {
             "status": "ok",
@@ -524,7 +534,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             "message": "Remote backend manages model loading",
         }
 
-    @router.post("/api/models/{model_id}/unload")
+    @api_router.post("/models/{model_id}/unload")
     async def unload_model(model_id: str):
         return {
             "status": "ok",
@@ -532,22 +542,22 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             "message": "Remote backend manages model unloading",
         }
 
-    @router.get("/api/models/{model_id}/profiles")
+    @api_router.get("/models/{model_id}/profiles")
     async def model_profiles(model_id: str):
         return {"profiles": [], "active_profile_name": None}
 
-    @router.post("/api/models/{model_id}/profiles")
+    @api_router.post("/models/{model_id}/profiles")
     async def create_model_profile(model_id: str):
         return JSONResponse(
             {"detail": "Profiles are not implemented in proxy mode"},
             status_code=501,
         )
 
-    @router.get("/api/profile-templates")
+    @api_router.get("/profile-templates")
     async def profile_templates():
         return {"templates": []}
 
-    @router.get("/api/profile-fields")
+    @api_router.get("/profile-fields")
     async def profile_fields():
         return {
             "universal": [
@@ -569,15 +579,15 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             "model_specific": [],
         }
 
-    @router.get("/api/grammar/parsers")
+    @api_router.get("/grammar/parsers")
     async def grammar_parsers():
         return {"parsers": []}
 
-    @router.get("/api/models/{model_id}/generation_config")
+    @api_router.get("/models/{model_id}/generation_config")
     async def generation_config(model_id: str):
         return {"config": {}, "source": "proxy"}
 
-    @router.get("/api/stats")
+    @api_router.get("/stats")
     async def stats(model: str = "", scope: str = "session"):
         models = await _admin_models(backend, state)
         metrics_obj = getattr(app.state, "server_metrics", None)
@@ -597,7 +607,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             memory=memory,
         )
 
-    @router.post("/api/stats/clear")
+    @api_router.post("/stats/clear")
     async def clear_stats():
         metrics_obj = getattr(app.state, "server_metrics", None)
         if metrics_obj is not None:
@@ -605,7 +615,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
         state.log("cleared proxy session stats")
         return {"status": "ok"}
 
-    @router.post("/api/stats/clear-alltime")
+    @api_router.post("/stats/clear-alltime")
     async def clear_alltime_stats():
         metrics_obj = getattr(app.state, "server_metrics", None)
         if metrics_obj is not None:
@@ -613,8 +623,8 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
         state.log("cleared proxy all-time stats")
         return {"status": "ok"}
 
-    @router.post("/api/ssd-cache/clear")
-    @router.post("/api/hot-cache/clear")
+    @api_router.post("/ssd-cache/clear")
+    @api_router.post("/hot-cache/clear")
     async def clear_cache():
         return {
             "status": "ok",
@@ -630,7 +640,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             sources.append(f"{_sidecar_backend(state)}{_CONTAINER_SUFFIX}")
         return sources
 
-    @router.get("/api/logs")
+    @api_router.get("/logs")
     async def logs(lines: int = 200, file: str = "server.log"):
         available = _log_sources()
         if file.endswith(_CONTAINER_SUFFIX):
@@ -666,7 +676,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             "file": file,
         }
 
-    @router.get("/api/device-info")
+    @api_router.get("/device-info")
     async def device_info():
         return {
             "device": "remote-backend",
@@ -675,75 +685,75 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             "memory_available": 0,
         }
 
-    @router.get("/api/bench/active")
+    @api_router.get("/bench/active")
     async def bench_active():
         return {"active": False, "run": None}
 
-    @router.post("/api/bench/start")
+    @api_router.post("/bench/start")
     async def bench_start():
         return JSONResponse(
             {"detail": "Benchmarks are not implemented in proxy mode"},
             status_code=501,
         )
 
-    @router.get("/api/bench/accuracy/results")
+    @api_router.get("/bench/accuracy/results")
     async def accuracy_results():
         return {"results": []}
 
-    @router.get("/api/bench/accuracy/queue/status")
+    @api_router.get("/bench/accuracy/queue/status")
     async def accuracy_queue():
         return {"queue": [], "active": None}
 
-    @router.get("/api/hf/tasks")
-    @router.get("/api/ms/tasks")
-    @router.get("/api/oq/tasks")
-    @router.get("/api/upload/tasks")
+    @api_router.get("/hf/tasks")
+    @api_router.get("/ms/tasks")
+    @api_router.get("/oq/tasks")
+    @api_router.get("/upload/tasks")
     async def empty_tasks():
         return {"tasks": []}
 
-    @router.get("/api/hf/models")
+    @api_router.get("/hf/models")
     async def hf_models():
         return {"models": []}
 
-    @router.get("/api/hf/recommended")
-    @router.get("/api/ms/recommended")
+    @api_router.get("/hf/recommended")
+    @api_router.get("/ms/recommended")
     async def recommended_models():
         return {"trending": [], "popular": []}
 
-    @router.get("/api/hf/search")
-    @router.get("/api/ms/search")
+    @api_router.get("/hf/search")
+    @api_router.get("/ms/search")
     async def search_models():
         return {"models": [], "total": 0}
 
-    @router.get("/api/hf/model-info")
-    @router.get("/api/ms/model-info")
+    @api_router.get("/hf/model-info")
+    @api_router.get("/ms/model-info")
     async def model_info():
         return {"model": None}
 
-    @router.get("/api/ms/status")
+    @api_router.get("/ms/status")
     async def ms_status():
         return {"available": False}
 
-    @router.get("/api/oq/models")
+    @api_router.get("/oq/models")
     async def oq_models():
         return {"models": [], "all_models": []}
 
-    @router.get("/api/upload/oq-models")
+    @api_router.get("/upload/oq-models")
     async def upload_oq_models():
         return {"oq_models": [], "all_models": []}
 
-    @router.post("/api/logout")
+    @api_router.post("/logout")
     async def logout():
         return {"status": "ok"}
 
-    @router.post("/api/server/restart")
+    @api_router.post("/server/restart")
     async def restart():
         return JSONResponse(
             {"detail": "Restart is managed by Docker/Compose in proxy mode"},
             status_code=501,
         )
 
-    @router.post("/api/sidecar/restart")
+    @api_router.post("/sidecar/restart")
     async def restart_sidecar(request: Request):
         backend_type = _proxy_backend_type(state)
         if backend_type not in SIDECAR_BACKEND_TYPES:
@@ -795,7 +805,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
             status_code=202,
         )
 
-    @router.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+    @api_router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
     async def unsupported_admin_api(path: str):
         return {
             "status": "unsupported",
@@ -803,6 +813,7 @@ def configure_admin(app, backend: OpenAIBackend, config: ProxyConfig) -> None:
         }
 
     app.include_router(router)
+    app.include_router(api_router)
 
 
 def _templates() -> Jinja2Templates:
@@ -1520,7 +1531,7 @@ def _global_settings_payload(
             "mode": "proxy",
             "backend_url": config.normalized_backend_url,
             "backend_type": _proxy_backend_type(state),
-            "backend_api_key": config.backend_api_key or "",
+            "backend_api_key": "",
             "backend_api_key_set": bool(config.backend_api_key),
             "state_path": str(state.state_path) if state.state_path else None,
             "capabilities": _capabilities(),

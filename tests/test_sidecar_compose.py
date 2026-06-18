@@ -149,6 +149,22 @@ def test_proxy_service_mounts_docker_socket_for_sidecar_restart():
         assert "- /var/run/docker.sock:/var/run/docker.sock" in proxy_block
 
 
+def test_proxy_service_binds_localhost_by_default():
+    content = render_vllm_compose(VllmComposeSettings())
+
+    assert (
+        '"${OMLX_PROXY_BIND_HOST:-127.0.0.1}:${OMLX_PROXY_PORT:-8080}:8080"'
+        in content
+    )
+    assert 'OMLX_PROXY_BIND_HOST: "${OMLX_PROXY_BIND_HOST:-127.0.0.1}"' in content
+
+
+def test_proxy_service_bind_host_can_be_overridden():
+    content = render_vllm_compose(VllmComposeSettings(proxy_bind_host="0.0.0.0"))
+
+    assert '"${OMLX_PROXY_BIND_HOST:-0.0.0.0}:${OMLX_PROXY_PORT:-8080}:8080"' in content
+
+
 def test_sidecar_reloads_env_file_on_restart():
     cases = (
         (render_vllm_compose(VllmComposeSettings()), "docker-compose.vllm.env"),

@@ -807,7 +807,7 @@ def test_vllm_compose_sanitizes_empty_runtime_url_env(tmp_path):
     assert "unset REQUESTS_CA_BUNDLE" in content
     assert "unset OMNI_MODEL OMNI_SERVED_MODEL_NAME" in content
     assert "unset VLLM_IMAGE VLLM_GPU_MEMORY_UTILIZATION" in content
-    assert "unset OMLX_PROXY_PORT OMLX_PROXY_API_KEY" in content
+    assert "unset OMLX_PROXY_PORT OMLX_PROXY_BIND_HOST OMLX_PROXY_API_KEY" in content
 
 
 def test_vllm_settings_from_args_maps_advanced_flags():
@@ -1390,6 +1390,63 @@ def test_launch_command_passes_served_window(monkeypatch):
     assert ctx.context_window == 65536
     assert ctx.max_tokens == 4096
     assert ctx.model_type == "llm"
+
+
+def test_launch_command_derives_safe_max_tokens_from_served_window(monkeypatch):
+    import io
+    import json as _json
+
+    health_bytes = b'{"status":"healthy"}'
+    models_bytes = _json.dumps(
+        {
+            "data": [
+                {
+                    "id": "test-model",
+                    "model_type": "llm",
+                    "max_context_window": 40960,
+                }
+            ]
+        }
+    ).encode()
+    responses = [io.BytesIO(health_bytes), io.BytesIO(models_bytes)]
+
+    class FakeCtxManager:
+        def __init__(self, data):
+            self._data = data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self):
+            return self._data.read()
+
+    call_count = [0]
+
+    def fake_open(req, timeout):
+        idx = call_count[0]
+        call_count[0] += 1
+        return FakeCtxManager(responses[idx])
+
+    monkeypatch.setattr(omni_cli.urllib.request, "urlopen", fake_open)
+
+    launched = []
+    from omlx.integrations import get_integration
+
+    real_integration = get_integration("claude")
+    monkeypatch.setattr(real_integration, "is_installed", lambda: True)
+    monkeypatch.setattr(real_integration, "launch", lambda ctx: launched.append(ctx))
+
+    result = omni_cli.launch_command(
+        parse_launch("claude", "--port", "8080", "--model", "test-model")
+    )
+
+    assert result == 0
+    ctx = launched[0]
+    assert ctx.context_window == 40960
+    assert ctx.max_tokens == 8192
 
 
 def test_launch_command_uses_env_port(monkeypatch):

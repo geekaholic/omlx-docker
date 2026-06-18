@@ -294,6 +294,119 @@ async def test_proxy_auth_accepts_x_api_key_for_claude_code():
 
 
 @pytest.mark.asyncio
+async def test_proxy_admin_api_requires_configured_api_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    config = ProxyConfig(backend_url="http://backend/v1", proxy_api_key="secret")
+    backend = OpenAIBackend(
+        config=config,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    app = create_app(config=config, backend=backend)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        missing = await client.get("/admin/api/global-settings")
+        assert missing.status_code == 401
+
+        page = await client.get("/admin/dashboard")
+        assert page.status_code == 200
+
+        bearer = await client.get(
+            "/admin/api/global-settings",
+            headers={"Authorization": "Bearer secret"},
+        )
+        assert bearer.status_code == 200
+
+        x_key = await client.get(
+            "/admin/api/global-settings",
+            headers={"x-api-key": "secret"},
+        )
+        assert x_key.status_code == 200
+
+        cookie = await client.get(
+            "/admin/api/global-settings",
+            cookies={"omlx_api_key": "secret"},
+        )
+        assert cookie.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_proxy_admin_settings_redacts_backend_api_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    config = ProxyConfig(
+        backend_url="http://backend/v1",
+        backend_api_key="backend-secret",
+    )
+    backend = OpenAIBackend(
+        config=config,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    app = create_app(config=config, backend=backend)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        settings = (await client.get("/admin/api/global-settings")).json()
+        proxy_config = (await client.get("/admin/api/proxy/config")).json()
+
+    assert settings["proxy"]["backend_api_key"] == ""
+    assert settings["proxy"]["backend_api_key_set"] is True
+    assert proxy_config["backend_api_key"] == ""
+    assert proxy_config["backend_api_key_set"] is True
+
+
+@pytest.mark.asyncio
+async def test_proxy_admin_omitted_backend_api_key_preserves_secret(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("OMLX_PROXY_STATE_PATH", str(tmp_path / "state.json"))
+    seen_headers = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers.append(request.headers)
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"object": "list", "data": []})
+        return httpx.Response(404)
+
+    config = ProxyConfig(
+        backend_url="http://backend/v1",
+        backend_api_key="backend-secret",
+    )
+    backend = OpenAIBackend(
+        config=config,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    app = create_app(config=config, backend=backend)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        save = await client.post(
+            "/admin/api/global-settings",
+            json={"proxy_backend_url": "http://backend/v1"},
+        )
+        assert save.status_code == 200
+
+        models = await client.get("/v1/models")
+        assert models.status_code == 200
+
+    assert seen_headers[-1]["authorization"] == "Bearer backend-secret"
+
+
+@pytest.mark.asyncio
 async def test_anthropic_messages_non_stream_translates_response():
     seen_request = {}
 

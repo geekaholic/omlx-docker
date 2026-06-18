@@ -71,10 +71,14 @@ class ClaudeCodeIntegration(Integration):
 
         if ctx.context_window:
             env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(ctx.context_window)
+        if ctx.max_tokens:
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(ctx.max_tokens)
 
         binary = self._find_claude_binary()
         argv = [binary, *ctx.extra_args]
         print(f"Launching Claude Code with model {ctx.model}...")
         if ctx.context_window:
             print(f"Auto-compact window: {ctx.context_window:,} tokens")
+        if ctx.max_tokens:
+            print(f"Max output tokens: {ctx.max_tokens:,}")
         os.execvpe(binary, argv, env)

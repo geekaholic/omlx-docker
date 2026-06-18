@@ -65,7 +65,7 @@ def test_render_compose_unsets_env_before_exec():
 
     assert "unset OMNI_MODEL OMNI_SERVED_MODEL_NAME" in content
     assert "unset LLAMACPP_IMAGE LLAMACPP_N_GPU_LAYERS" in content
-    assert "unset OMLX_PROXY_PORT OMLX_PROXY_API_KEY" in content
+    assert "unset OMLX_PROXY_PORT OMLX_PROXY_BIND_HOST OMLX_PROXY_API_KEY" in content
     assert 'exec /app/llama-server "$${@}"' in content
 
 

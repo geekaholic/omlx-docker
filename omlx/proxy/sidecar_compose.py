@@ -32,6 +32,7 @@ class CommonSidecarSettings:
     no_proxy: str = ""
     ca_bundle: str = ""
     proxy_port: int = 8080
+    proxy_bind_host: str = "127.0.0.1"
     proxy_api_key: str = ""
     backend_api_key: str = ""
     context_scaling: bool = False
@@ -70,6 +71,7 @@ OMNI_ENV_KEYS = (
 
 OMLX_PROXY_SIDECAR_KEYS = (
     "OMLX_PROXY_PORT",
+    "OMLX_PROXY_BIND_HOST",
     "OMLX_PROXY_API_KEY",
     "OMLX_BACKEND_API_KEY",
     "OMLX_CONTEXT_SCALING",
@@ -137,6 +139,7 @@ def common_environment(settings: CommonSidecarSettings) -> dict[str, str]:
 def proxy_sidecar_environment(settings: CommonSidecarSettings) -> dict[str, str]:
     return {
         "OMLX_PROXY_PORT": str(settings.proxy_port),
+        "OMLX_PROXY_BIND_HOST": settings.proxy_bind_host,
         "OMLX_PROXY_API_KEY": settings.proxy_api_key,
         "OMLX_BACKEND_API_KEY": settings.backend_api_key,
         "OMLX_CONTEXT_SCALING": _bool_str(settings.context_scaling),
@@ -178,6 +181,9 @@ def common_settings_kwargs_from_env(
         "no_proxy": values.get("OMNI_NO_PROXY", defaults.no_proxy),
         "ca_bundle": values.get("OMNI_CA_BUNDLE", defaults.ca_bundle),
         "proxy_port": _int_value(values.get("OMLX_PROXY_PORT"), defaults.proxy_port),
+        "proxy_bind_host": values.get(
+            "OMLX_PROXY_BIND_HOST", defaults.proxy_bind_host
+        ),
         "proxy_api_key": values.get("OMLX_PROXY_API_KEY", ""),
         "backend_api_key": values.get("OMLX_BACKEND_API_KEY", ""),
         "context_scaling": _bool_value(
@@ -251,6 +257,10 @@ def common_settings_kwargs_from_overrides(
             pick("omlx_proxy_port", defaults.proxy_port),
             defaults.proxy_port,
         ),
+        "proxy_bind_host": str(
+            pick("omlx_proxy_bind_host", defaults.proxy_bind_host)
+        ).strip()
+        or defaults.proxy_bind_host,
         "proxy_api_key": str(pick("omlx_proxy_api_key", "")).strip(),
         "backend_api_key": str(pick("omlx_backend_api_key", "")).strip(),
         "context_scaling": _bool(
@@ -379,17 +389,22 @@ def render_proxy_service(
 ) -> str:
     hf_default = _compose_default_expr("OMNI_HF_HOME", settings.hf_home)
     scan_source = "${OMLX_MODEL_SCAN_HOST_DIR:-" + hf_default + "}"
+    proxy_bind = _compose_default_expr(
+        "OMLX_PROXY_BIND_HOST", settings.proxy_bind_host
+    )
+    proxy_port = _compose_default_expr("OMLX_PROXY_PORT", str(settings.proxy_port))
     return f"""  omlx-proxy:
     build:
       context: {_yaml_quote(project_context)}
       dockerfile: docker/Dockerfile.proxy
     ports:
-      - "{_compose_default_expr('OMLX_PROXY_PORT', str(settings.proxy_port))}:8080"
+      - "{proxy_bind}:{proxy_port}:8080"
     environment:
       OMLX_BACKEND_URL: "http://{backend_service}:8000/v1"
       OMLX_SIDECAR_BACKEND: "{backend_name}"
       OMLX_BACKEND_API_KEY: {_yaml_quote(_compose_default_expr('OMLX_BACKEND_API_KEY', settings.backend_api_key))}
       OMLX_PROXY_API_KEY: {_yaml_quote(_compose_default_expr('OMLX_PROXY_API_KEY', settings.proxy_api_key))}
+      OMLX_PROXY_BIND_HOST: {_yaml_quote(proxy_bind)}
       OMLX_PROXY_HOST: "0.0.0.0"
       OMLX_PROXY_PORT: "8080"
       OMLX_CONTEXT_SCALING: {_yaml_quote(_compose_default_expr('OMLX_CONTEXT_SCALING', _bool_str(settings.context_scaling)))}
